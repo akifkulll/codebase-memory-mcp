@@ -14,12 +14,17 @@ const struct zova_plugin_descriptor_v1 *cbm_zova_plugin_descriptor(void) {
 
 #else
 
+#include "cypher/cypher.h"
+#include "store/store.h"
+#include "zova/cbm_zova.h"
 #include "zova/cbm_zova_edge_payload.h"
 #include "zova_plugin.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <yyjson/yyjson.h>
 
 enum {
     PLUGIN_EDGE_TYPES_MAX = 16,
@@ -38,7 +43,22 @@ enum {
     PLUGIN_PAYLOAD_COLUMNS = 4,
     PLUGIN_EDGES_ARGUMENTS = 4,
     PLUGIN_EDGES_COLUMNS = 6,
+    PLUGIN_SCAN_PAGE = 2048,
+    PLUGIN_CYPHER_ARGUMENTS = 3,
+    PLUGIN_CYPHER_COLUMNS = 2,
 };
+
+#define PLUGIN_NODE_SELECT                                                              \
+    "SELECT n.zova_node_key,n.label,n.name,n.qualified_name,f.file_path,n.start_line," \
+    "n.end_line,n.properties FROM cbm_nodes_v1 n JOIN cbm_files_v1 f "                 \
+    "ON f.file_key=n.file_key "
+
+/* The host services one hook or operation callback may use. */
+typedef struct {
+    void *connection;
+    const zova_plugin_data_service_v1 *data;
+    const zova_plugin_query_service_v1 *query;
+} plugin_session_t;
 
 /* One reached node. text holds label, name, qualified_name, file_path and
  * properties back to back. */
@@ -77,6 +97,20 @@ static int32_t plugin_service(const zova_plugin_host_v1 *host, void *connection,
         return ZOVA_PLUGIN_UNSUPPORTED;
     }
     return ((const zova_plugin_service_host_v1 *)host)->get_service(connection, id, 1, size, out);
+}
+
+static int32_t plugin_session_open(const zova_plugin_host_v1 *host, void *connection,
+                                   plugin_session_t *session) {
+    const void *data = NULL;
+    const void *query = NULL;
+    int32_t status = plugin_service(host, connection, ZOVA_PLUGIN_SERVICE_DATA,
+                                    sizeof(zova_plugin_data_service_v1), &data);
+    if (status == ZOVA_PLUGIN_OK) {
+        status = plugin_service(host, connection, ZOVA_PLUGIN_SERVICE_QUERY,
+                                sizeof(zova_plugin_query_service_v1), &query);
+    }
+    *session = (plugin_session_t){connection, data, query};
+    return status;
 }
 
 static void plugin_trace_free(plugin_trace_t *trace) {
@@ -136,9 +170,8 @@ static int32_t ZOVA_PLUGIN_CALL plugin_neighbor_row(void *user_data,
 }
 
 /* Reads every matching neighbor of keys[0..count), following the keyed cursor. */
-static int32_t plugin_expand(const zova_plugin_data_service_v1 *data, void *connection,
-                             plugin_trace_t *trace, zova_plugin_data_request_v1 *request,
-                             size_t first, size_t count) {
+static int32_t plugin_expand(const plugin_session_t *session, plugin_trace_t *trace,
+                             zova_plugin_data_request_v1 *request, size_t first, size_t count) {
     zova_plugin_cursor_v1 after = {0};
     while (count > 0) {
         zova_plugin_data_page_v1 page = {0};
@@ -147,7 +180,7 @@ static int32_t plugin_expand(const zova_plugin_data_service_v1 *data, void *conn
         request->key_count = count;
         request->after = after;
         trace->last_ordinal = 0;
-        int32_t status = data->read(connection, request, &page);
+        int32_t status = session->data->read(session->connection, request, &page);
         if (status != ZOVA_PLUGIN_OK) return status;
         if (!page.has_more) break;
         if (page.rows == 0 || trace->last_ordinal >= count) return ZOVA_PLUGIN_ERROR;
@@ -208,12 +241,9 @@ static void plugin_rows_truncate(plugin_trace_t *trace, size_t count) {
 
 /* Loads the cbm_nodes_v1 rows of keys[first..first+count). Graph nodes without a
  * row are skipped. A batch over the query byte budget is retried in halves. */
-static int32_t plugin_hydrate(const zova_plugin_query_service_v1 *query, void *connection,
-                              plugin_trace_t *trace, size_t first, size_t count) {
-    static const char head[] =
-        "SELECT n.zova_node_key,n.label,n.name,n.qualified_name,f.file_path,n.start_line,"
-        "n.end_line,n.properties FROM cbm_nodes_v1 n JOIN cbm_files_v1 f "
-        "ON f.file_key=n.file_key WHERE n.zova_node_key IN (";
+static int32_t plugin_hydrate(const plugin_session_t *session, plugin_trace_t *trace,
+                              size_t first, size_t count) {
+    static const char head[] = PLUGIN_NODE_SELECT "WHERE n.zova_node_key IN (";
     char sql[sizeof(head) + PLUGIN_HYDRATE_BATCH * 2 + 2];
     zova_plugin_value_v1 parameters[PLUGIN_HYDRATE_BATCH];
     size_t batch = PLUGIN_HYDRATE_BATCH;
@@ -241,7 +271,7 @@ static int32_t plugin_hydrate(const zova_plugin_query_service_v1 *query, void *c
             .user_data = trace,
         };
         size_t before = trace->count;
-        int32_t status = query->query(connection, &request);
+        int32_t status = session->query->query(session->connection, &request);
         if (status == ZOVA_PLUGIN_LIMIT && n > 1) {
             plugin_rows_truncate(trace, before);
             batch = n / 2;
@@ -319,48 +349,17 @@ static int plugin_direction(const zova_plugin_value_v1 *value, uint32_t *out) {
 }
 
 
-static int32_t ZOVA_PLUGIN_CALL plugin_trace_open(const zova_plugin_host_v1 *host,
-                                                  void *connection, void *state,
-                                                  const zova_plugin_value_v1 *arguments,
-                                                  uint64_t argument_count, void **out_cursor) {
-    (void)state;
-    *out_cursor = NULL;
-    if (argument_count != PLUGIN_TRACE_ARGUMENTS) return ZOVA_PLUGIN_INVALID_ARGUMENT;
-    const zova_plugin_value_v1 *graph = &arguments[0];
-    int64_t start_key = arguments[1].integer;
-    int64_t max_depth = arguments[4].integer;
-    int64_t max_results = arguments[5].integer;
-    zova_plugin_bytes_v1 edge_types[PLUGIN_EDGE_TYPES_MAX];
-    int edge_type_count = plugin_edge_types(&arguments[3], edge_types);
-    uint32_t direction;
-    if (plugin_direction(&arguments[2], &direction) != 0) return ZOVA_PLUGIN_INVALID_ARGUMENT;
-    if (graph->bytes_len == 0 || graph->bytes_len > PLUGIN_NAME_MAX || start_key <= 0 ||
-        edge_type_count <= 0 || max_depth < 0 || max_results <= 0 ||
-        max_results > PLUGIN_MAX_RESULTS) {
-        return ZOVA_PLUGIN_INVALID_ARGUMENT;
-    }
-
-    const void *raw_data = NULL;
-    const void *raw_query = NULL;
-    int32_t status = plugin_service(host, connection, ZOVA_PLUGIN_SERVICE_DATA,
-                                    sizeof(zova_plugin_data_service_v1), &raw_data);
-    if (status == ZOVA_PLUGIN_OK) {
-        status = plugin_service(host, connection, ZOVA_PLUGIN_SERVICE_QUERY,
-                                sizeof(zova_plugin_query_service_v1), &raw_query);
-    }
-    if (status != ZOVA_PLUGIN_OK) return status;
-    const zova_plugin_data_service_v1 *data = raw_data;
-    const zova_plugin_query_service_v1 *query = raw_query;
-
-    plugin_trace_t *trace = calloc(1, sizeof(*trace));
-    if (!trace) return ZOVA_PLUGIN_OUT_OF_MEMORY;
-    *out_cursor = trace;
+/* Walks breadth-first from start_key and leaves the reached nodes in
+ * trace->rows, ordered and cut to max_results. */
+static int32_t plugin_trace_run(const plugin_session_t *session, plugin_trace_t *trace,
+                                zova_plugin_bytes_v1 graph, int64_t start_key,
+                                uint32_t direction, const zova_plugin_bytes_v1 *edge_types,
+                                int edge_type_count, int64_t max_depth, int64_t max_results) {
     if (plugin_visit(trace, start_key) < 0) return ZOVA_PLUGIN_OUT_OF_MEMORY;
-
     zova_plugin_data_request_v1 request = {
         .struct_size = sizeof(request),
         .operation = ZOVA_PLUGIN_GRAPH_NEIGHBORS_KEYED,
-        .name = {graph->bytes, graph->bytes_len},
+        .name = graph,
         .direction = direction,
         .row_limit = PLUGIN_PAGE_ROWS,
         .byte_limit = PLUGIN_PAGE_BYTES,
@@ -375,13 +374,13 @@ static int32_t ZOVA_PLUGIN_CALL plugin_trace_open(const zova_plugin_host_v1 *hos
         for (size_t first = level_start; first < level_end; first += PLUGIN_FRONTIER_BATCH) {
             size_t count = level_end - first;
             if (count > PLUGIN_FRONTIER_BATCH) count = PLUGIN_FRONTIER_BATCH;
-            status = plugin_expand(data, connection, trace, &request, first, count);
+            int32_t status = plugin_expand(session, trace, &request, first, count);
             if (status != ZOVA_PLUGIN_OK) return status;
         }
         level_start = level_end;
         level_end = trace->key_count;
         trace->level = (int32_t)hop;
-        status = plugin_hydrate(query, connection, trace, level_start, level_end - level_start);
+        int32_t status = plugin_hydrate(session, trace, level_start, level_end - level_start);
         if (status != ZOVA_PLUGIN_OK) return status;
         /* Later levels sort after this one, so they cannot enter the result. */
         if (trace->count >= (size_t)max_results) break;
@@ -389,6 +388,35 @@ static int32_t ZOVA_PLUGIN_CALL plugin_trace_open(const zova_plugin_host_v1 *hos
     if (trace->count > 1) qsort(trace->rows, trace->count, sizeof(*trace->rows), plugin_row_compare);
     plugin_rows_truncate(trace, (size_t)max_results);
     return ZOVA_PLUGIN_OK;
+}
+
+static int32_t ZOVA_PLUGIN_CALL plugin_trace_open(const zova_plugin_host_v1 *host,
+                                                  void *connection, void *state,
+                                                  const zova_plugin_value_v1 *arguments,
+                                                  uint64_t argument_count, void **out_cursor) {
+    (void)state;
+    *out_cursor = NULL;
+    if (argument_count != PLUGIN_TRACE_ARGUMENTS) return ZOVA_PLUGIN_INVALID_ARGUMENT;
+    zova_plugin_bytes_v1 graph = {arguments[0].bytes, arguments[0].bytes_len};
+    int64_t start_key = arguments[1].integer;
+    int64_t max_depth = arguments[4].integer;
+    int64_t max_results = arguments[5].integer;
+    zova_plugin_bytes_v1 edge_types[PLUGIN_EDGE_TYPES_MAX];
+    int edge_type_count = plugin_edge_types(&arguments[3], edge_types);
+    uint32_t direction;
+    if (plugin_direction(&arguments[2], &direction) != 0 || graph.len == 0 ||
+        graph.len > PLUGIN_NAME_MAX || start_key <= 0 || edge_type_count <= 0 || max_depth < 0 ||
+        max_results <= 0 || max_results > PLUGIN_MAX_RESULTS) {
+        return ZOVA_PLUGIN_INVALID_ARGUMENT;
+    }
+    plugin_session_t session;
+    int32_t status = plugin_session_open(host, connection, &session);
+    if (status != ZOVA_PLUGIN_OK) return status;
+    plugin_trace_t *trace = calloc(1, sizeof(*trace));
+    if (!trace) return ZOVA_PLUGIN_OUT_OF_MEMORY;
+    *out_cursor = trace;
+    return plugin_trace_run(&session, trace, graph, start_key, direction, edge_types,
+                            edge_type_count, max_depth, max_results);
 }
 
 static int32_t ZOVA_PLUGIN_CALL plugin_trace_next(const zova_plugin_host_v1 *host,
@@ -545,8 +573,8 @@ static int32_t ZOVA_PLUGIN_CALL plugin_edges_payload_row(void *user_data,
 
 /* Decodes the payloads of every collected neighbor edge. A batch over the byte
  * budget is retried in halves. */
-static int32_t plugin_edges_payloads(const zova_plugin_data_service_v1 *data, void *connection,
-                                     plugin_edges_t *state, zova_plugin_bytes_v1 graph) {
+static int32_t plugin_edges_payloads(const plugin_session_t *session, plugin_edges_t *state,
+                                     zova_plugin_bytes_v1 graph) {
     int64_t keys[PLUGIN_PAYLOAD_BATCH];
     size_t batch = PLUGIN_PAYLOAD_BATCH;
     size_t first = 0;
@@ -569,7 +597,7 @@ static int32_t plugin_edges_payloads(const zova_plugin_data_service_v1 *data, vo
         size_t before = state->edge_count;
         state->batch_first = first;
         state->batch_count = n;
-        int32_t status = data->read(connection, &request, &page);
+        int32_t status = session->data->read(session->connection, &request, &page);
         if (status == ZOVA_PLUGIN_LIMIT && n > 1) {
             plugin_edges_truncate(state, before);
             batch = n / 2;
@@ -580,6 +608,36 @@ static int32_t plugin_edges_payloads(const zova_plugin_data_service_v1 *data, vo
         first += n;
     }
     return ZOVA_PLUGIN_OK;
+}
+
+/* Collects the adjacency of node_key into state->neighbors. */
+static int32_t plugin_edges_neighbors(const plugin_session_t *session, plugin_edges_t *state,
+                                      zova_plugin_bytes_v1 graph, int64_t node_key,
+                                      uint32_t direction, const zova_plugin_bytes_v1 *edge_types,
+                                      int edge_type_count) {
+    state->node_key = node_key;
+    state->direction = direction;
+    zova_plugin_data_request_v1 request = {
+        .struct_size = sizeof(request),
+        .operation = ZOVA_PLUGIN_GRAPH_NEIGHBORS_KEYED,
+        .name = graph,
+        .keys = &state->node_key,
+        .key_count = 1,
+        .direction = direction,
+        .row_limit = PLUGIN_PAGE_ROWS,
+        .byte_limit = PLUGIN_PAGE_BYTES,
+        .row = plugin_edges_neighbor_row,
+        .user_data = state,
+    };
+    plugin_request_edge_types(&request, edge_types, edge_type_count);
+    for (;;) {
+        zova_plugin_data_page_v1 page = {0};
+        int32_t status = session->data->read(session->connection, &request, &page);
+        if (status != ZOVA_PLUGIN_OK) return status;
+        if (!page.has_more) return ZOVA_PLUGIN_OK;
+        if (page.rows == 0) return ZOVA_PLUGIN_ERROR;
+        request.after = page.next;
+    }
 }
 
 static int32_t ZOVA_PLUGIN_CALL plugin_edges_open(const zova_plugin_host_v1 *host,
@@ -597,40 +655,15 @@ static int32_t ZOVA_PLUGIN_CALL plugin_edges_open(const zova_plugin_host_v1 *hos
         graph.len > PLUGIN_NAME_MAX || arguments[1].integer <= 0 || edge_type_count < 0) {
         return ZOVA_PLUGIN_INVALID_ARGUMENT;
     }
-    const void *raw = NULL;
-    int32_t status = plugin_service(host, connection, ZOVA_PLUGIN_SERVICE_DATA,
-                                    sizeof(zova_plugin_data_service_v1), &raw);
+    plugin_session_t session;
+    int32_t status = plugin_session_open(host, connection, &session);
     if (status != ZOVA_PLUGIN_OK) return status;
-    const zova_plugin_data_service_v1 *data = raw;
-
     plugin_edges_t *state = calloc(1, sizeof(*state));
     if (!state) return ZOVA_PLUGIN_OUT_OF_MEMORY;
     *out_cursor = state;
-    state->node_key = arguments[1].integer;
-    state->direction = direction;
-
-    zova_plugin_data_request_v1 request = {
-        .struct_size = sizeof(request),
-        .operation = ZOVA_PLUGIN_GRAPH_NEIGHBORS_KEYED,
-        .name = graph,
-        .keys = &state->node_key,
-        .key_count = 1,
-        .direction = direction,
-        .row_limit = PLUGIN_PAGE_ROWS,
-        .byte_limit = PLUGIN_PAGE_BYTES,
-        .row = plugin_edges_neighbor_row,
-        .user_data = state,
-    };
-    plugin_request_edge_types(&request, edge_types, edge_type_count);
-    for (;;) {
-        zova_plugin_data_page_v1 page = {0};
-        status = data->read(connection, &request, &page);
-        if (status != ZOVA_PLUGIN_OK) return status;
-        if (!page.has_more) break;
-        if (page.rows == 0) return ZOVA_PLUGIN_ERROR;
-        request.after = page.next;
-    }
-    return plugin_edges_payloads(data, connection, state, graph);
+    status = plugin_edges_neighbors(&session, state, graph, arguments[1].integer, direction,
+                                    edge_types, edge_type_count);
+    return status == ZOVA_PLUGIN_OK ? plugin_edges_payloads(&session, state, graph) : status;
 }
 
 static int32_t ZOVA_PLUGIN_CALL plugin_edges_next(const zova_plugin_host_v1 *host,
@@ -664,6 +697,475 @@ static int32_t ZOVA_PLUGIN_CALL plugin_edges_next(const zova_plugin_host_v1 *hos
 
 static void ZOVA_PLUGIN_CALL plugin_edges_close(void *cursor) {
     plugin_edges_free(cursor);
+}
+
+/* ── cypher ────────────────────────────────────────────────────── */
+
+/* Store backend for one workspace: answers the reads the Cypher engine makes
+ * from the plugin services. Node ids are Zova node keys and edge ids Zova edge
+ * keys, so id(n) and id(r) differ from the host store's hashed ids. */
+typedef struct {
+    plugin_session_t session;
+    zova_plugin_bytes_v1 graph;
+    char graph_name[CBM_ZOVA_WORKSPACE_ID_MAX + 32];
+    int64_t workspace_key;
+    char *project;
+} plugin_store_t;
+
+static char *plugin_dup(const char *bytes, uint64_t len) {
+    char *copy = malloc((size_t)len + 1);
+    if (!copy) return NULL;
+    if (len) memcpy(copy, bytes, (size_t)len);
+    copy[len] = '\0';
+    return copy;
+}
+
+static void plugin_node_clear(cbm_node_t *node) {
+    free((char *)node->project);
+    free((char *)node->label);
+    free((char *)node->name);
+    free((char *)node->qualified_name);
+    free((char *)node->file_path);
+    free((char *)node->properties_json);
+    memset(node, 0, sizeof(*node));
+}
+
+static int plugin_node_from_row(const plugin_store_t *store, const plugin_row_t *row,
+                                cbm_node_t *out) {
+    *out = (cbm_node_t){
+        .id = row->key,
+        .project = plugin_dup(store->project, strlen(store->project)),
+        .label = plugin_dup(row->text + row->off[ROW_LABEL], row->len[ROW_LABEL]),
+        .name = plugin_dup(row->text + row->off[ROW_NAME], row->len[ROW_NAME]),
+        .qualified_name = plugin_dup(row->text + row->off[ROW_QN], row->len[ROW_QN]),
+        .file_path = plugin_dup(row->text + row->off[ROW_FILE], row->len[ROW_FILE]),
+        .start_line = (int)row->start_line,
+        .end_line = (int)row->end_line,
+        .properties_json = plugin_dup(row->text + row->off[ROW_PROPERTIES],
+                                      row->len[ROW_PROPERTIES]),
+    };
+    if (out->project && out->label && out->name && out->qualified_name && out->file_path &&
+        out->properties_json) {
+        return 0;
+    }
+    plugin_node_clear(out);
+    return -1;
+}
+
+static zova_plugin_value_v1 plugin_text_value(const char *bytes, uint64_t len) {
+    return (zova_plugin_value_v1){.kind = ZOVA_PLUGIN_VALUE_TEXT,
+                                  .bytes = (const uint8_t *)bytes, .bytes_len = len};
+}
+
+/* Workspace nodes ordered by name, qualified_name, key, optionally of one label.
+ * Read in keyset pages; a page over the byte budget is retried at half size. */
+static int plugin_store_search(void *ctx, const cbm_search_params_t *params,
+                               cbm_search_output_t *out) {
+    static const char sql[] = PLUGIN_NODE_SELECT
+        "WHERE n.workspace_key=?1 AND (?2='' OR n.label=?2) AND "
+        "(?3=0 OR (n.name,n.qualified_name,n.zova_node_key)>(?4,?5,?6)) "
+        "ORDER BY n.name,n.qualified_name,n.zova_node_key LIMIT ?7";
+    const plugin_store_t *store = ctx;
+    memset(out, 0, sizeof(*out));
+    /* The engine only scans by label; refuse filters this backend does not apply. */
+    if (params->name_pattern || params->qn_pattern || params->file_pattern ||
+        params->relationship || params->exclude_labels || params->exclude_entry_points ||
+        params->min_degree >= 0 || params->max_degree >= 0 || params->offset != 0) {
+        return CBM_STORE_ERR;
+    }
+    size_t limit = params->limit > 0 ? (size_t)params->limit : 10;
+    const char *label = params->label ? params->label : "";
+    plugin_trace_t *rows = calloc(1, sizeof(*rows));
+    if (!rows) return CBM_STORE_ERR;
+    size_t page = PLUGIN_SCAN_PAGE;
+    int rc = CBM_STORE_OK;
+    while (rows->count < limit) {
+        size_t n = limit - rows->count < page ? limit - rows->count : page;
+        const plugin_row_t *last = rows->count ? &rows->rows[rows->count - 1] : NULL;
+        zova_plugin_value_v1 parameters[] = {
+            {.kind = ZOVA_PLUGIN_VALUE_INTEGER, .integer = store->workspace_key},
+            plugin_text_value(label, strlen(label)),
+            {.kind = ZOVA_PLUGIN_VALUE_INTEGER, .integer = last != NULL},
+            plugin_text_value(last ? last->text + last->off[ROW_NAME] : "",
+                              last ? last->len[ROW_NAME] : 0),
+            plugin_text_value(last ? last->text + last->off[ROW_QN] : "",
+                              last ? last->len[ROW_QN] : 0),
+            {.kind = ZOVA_PLUGIN_VALUE_INTEGER, .integer = last ? last->key : 0},
+            {.kind = ZOVA_PLUGIN_VALUE_INTEGER, .integer = (int64_t)n},
+        };
+        zova_plugin_query_request_v1 request = {
+            .struct_size = sizeof(request),
+            .sql = sql,
+            .sql_len = sizeof(sql) - 1,
+            .parameters = parameters,
+            .parameter_count = sizeof(parameters) / sizeof(parameters[0]),
+            .row_limit = n,
+            .byte_limit = PLUGIN_PAGE_BYTES,
+            .row = plugin_node_row,
+            .user_data = rows,
+        };
+        size_t before = rows->count;
+        int32_t status = store->session.query->query(store->session.connection, &request);
+        if (status == ZOVA_PLUGIN_LIMIT && n > 1) {
+            plugin_rows_truncate(rows, before);
+            page = n / 2;
+            continue;
+        }
+        if (status != ZOVA_PLUGIN_OK) {
+            rc = CBM_STORE_ERR;
+            break;
+        }
+        if (rows->count - before < n) break;
+    }
+    cbm_search_result_t *results =
+        rc == CBM_STORE_OK && rows->count ? calloc(rows->count, sizeof(*results)) : NULL;
+    if (rc == CBM_STORE_OK && rows->count && !results) rc = CBM_STORE_ERR;
+    for (size_t i = 0; rc == CBM_STORE_OK && i < rows->count; i++) {
+        if (plugin_node_from_row(store, &rows->rows[i], &results[i].node) != 0) {
+            rc = CBM_STORE_ERR;
+            break;
+        }
+        out->count = (int)i + 1;
+    }
+    out->results = results;
+    out->total = out->count;
+    if (rc != CBM_STORE_OK) cbm_store_search_free(out);
+    plugin_trace_free(rows);
+    return rc;
+}
+
+static int plugin_store_find_node_by_id(void *ctx, int64_t id, cbm_node_t *out) {
+    const plugin_store_t *store = ctx;
+    memset(out, 0, sizeof(*out));
+    if (id <= 0) return CBM_STORE_NOT_FOUND;
+    plugin_trace_t *rows = calloc(1, sizeof(*rows));
+    if (!rows) return CBM_STORE_ERR;
+    int rc = CBM_STORE_ERR;
+    if (plugin_visit(rows, id) == 1 &&
+        plugin_hydrate(&store->session, rows, 0, 1) == ZOVA_PLUGIN_OK) {
+        rc = rows->count == 0 ? CBM_STORE_NOT_FOUND
+                              : plugin_node_from_row(store, &rows->rows[0], out) == 0
+                                    ? CBM_STORE_OK
+                                    : CBM_STORE_ERR;
+    }
+    plugin_trace_free(rows);
+    return rc;
+}
+
+static int plugin_store_direction(const char *direction, uint32_t *out) {
+    if (!direction || strcmp(direction, "outbound") == 0) {
+        *out = ZOVA_PLUGIN_OUTGOING;
+    } else if (strcmp(direction, "inbound") == 0) {
+        *out = ZOVA_PLUGIN_INCOMING;
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
+static int plugin_store_find_edges(void *ctx, int64_t node_id, const char *direction,
+                                   const char *type, cbm_edge_t **out, int *count) {
+    const plugin_store_t *store = ctx;
+    *out = NULL;
+    *count = 0;
+    uint32_t zova_direction;
+    if (node_id <= 0 || plugin_store_direction(direction, &zova_direction) != 0) {
+        return CBM_STORE_ERR;
+    }
+    zova_plugin_bytes_v1 edge_type = {(const uint8_t *)type, type ? strlen(type) : 0};
+    if (edge_type.len > PLUGIN_NAME_MAX) return CBM_STORE_ERR;
+    plugin_edges_t *state = calloc(1, sizeof(*state));
+    if (!state) return CBM_STORE_ERR;
+    int rc = CBM_STORE_ERR;
+    cbm_edge_t *edges = NULL;
+    if (plugin_edges_neighbors(&store->session, state, store->graph, node_id, zova_direction,
+                               &edge_type, edge_type.len ? 1 : 0) != ZOVA_PLUGIN_OK ||
+        plugin_edges_payloads(&store->session, state, store->graph) != ZOVA_PLUGIN_OK) {
+        goto done;
+    }
+    edges = state->edge_count ? calloc(state->edge_count, sizeof(*edges)) : NULL;
+    if (state->edge_count && !edges) goto done;
+    for (size_t i = 0; i < state->edge_count; i++) {
+        const plugin_edge_t *edge = &state->edges[i];
+        const plugin_neighbor_t *neighbor = &state->neighbors[edge->neighbor];
+        int outgoing = zova_direction == ZOVA_PLUGIN_OUTGOING;
+        edges[i] = (cbm_edge_t){
+            .id = neighbor->edge_key,
+            .project = plugin_dup(store->project, strlen(store->project)),
+            .source_id = outgoing ? node_id : neighbor->neighbor_key,
+            .target_id = outgoing ? neighbor->neighbor_key : node_id,
+            .type = plugin_dup(neighbor->type, neighbor->type_len),
+            .properties_json = plugin_dup(edge->text + edge->local_name_len,
+                                          edge->properties_len),
+        };
+        *count = (int)i + 1;
+        if (!edges[i].project || !edges[i].type || !edges[i].properties_json) goto done;
+    }
+    rc = CBM_STORE_OK;
+done:
+    if (rc == CBM_STORE_OK) {
+        *out = edges;
+    } else {
+        cbm_store_free_edges(edges, *count);
+        *count = 0;
+    }
+    plugin_edges_free(state);
+    return rc;
+}
+
+/* CALLS edges in and out, like the host store. */
+static int plugin_store_node_degree(void *ctx, int64_t node_id, int *in_deg, int *out_deg) {
+    static const zova_plugin_bytes_v1 calls = {(const uint8_t *)"CALLS", 5};
+    const plugin_store_t *store = ctx;
+    int *degrees[] = {out_deg, in_deg};
+    const uint32_t directions[] = {ZOVA_PLUGIN_OUTGOING, ZOVA_PLUGIN_INCOMING};
+    if (node_id <= 0) return CBM_STORE_ERR;
+    for (int i = 0; i < 2; i++) {
+        plugin_edges_t *state = calloc(1, sizeof(*state));
+        if (!state) return CBM_STORE_ERR;
+        int32_t status = plugin_edges_neighbors(&store->session, state, store->graph, node_id,
+                                                directions[i], &calls, 1);
+        *degrees[i] = (int)state->neighbor_count;
+        plugin_edges_free(state);
+        if (status != ZOVA_PLUGIN_OK) return CBM_STORE_ERR;
+    }
+    return CBM_STORE_OK;
+}
+
+static int plugin_store_bfs(void *ctx, int64_t start_id, const char *direction,
+                            const char **edge_types, int edge_type_count, int max_depth,
+                            int max_results, cbm_traverse_result_t *out) {
+    static const char *const default_types[] = {"CALLS"};
+    const plugin_store_t *store = ctx;
+    memset(out, 0, sizeof(*out));
+    uint32_t zova_direction;
+    /* The host store walks one direction per call too. */
+    if (plugin_store_direction(direction, &zova_direction) != 0) return CBM_STORE_NOT_FOUND;
+    if (edge_type_count <= 0) {
+        edge_types = (const char **)default_types;
+        edge_type_count = 1;
+    }
+    if (edge_type_count > PLUGIN_EDGE_TYPES_MAX || max_depth < 0 || max_results <= 0 ||
+        max_results > PLUGIN_MAX_RESULTS) {
+        return CBM_STORE_ERR;
+    }
+    zova_plugin_bytes_v1 types[PLUGIN_EDGE_TYPES_MAX];
+    for (int i = 0; i < edge_type_count; i++) {
+        types[i] = (zova_plugin_bytes_v1){(const uint8_t *)edge_types[i], strlen(edge_types[i])};
+        if (types[i].len == 0 || types[i].len > PLUGIN_NAME_MAX) return CBM_STORE_ERR;
+    }
+    int rc = plugin_store_find_node_by_id(ctx, start_id, &out->root);
+    if (rc != CBM_STORE_OK) return rc;
+    plugin_trace_t *trace = calloc(1, sizeof(*trace));
+    rc = CBM_STORE_ERR;
+    if (trace && plugin_trace_run(&store->session, trace, store->graph, start_id, zova_direction,
+                                  types, edge_type_count, max_depth, max_results) ==
+                     ZOVA_PLUGIN_OK) {
+        out->visited = trace->count ? calloc(trace->count, sizeof(*out->visited)) : NULL;
+        rc = trace->count && !out->visited ? CBM_STORE_ERR : CBM_STORE_OK;
+        for (size_t i = 0; rc == CBM_STORE_OK && i < trace->count; i++) {
+            if (plugin_node_from_row(store, &trace->rows[i], &out->visited[i].node) != 0) {
+                rc = CBM_STORE_ERR;
+                break;
+            }
+            out->visited[i].hop = trace->rows[i].hop;
+            out->visited_count = (int)i + 1;
+        }
+    }
+    plugin_trace_free(trace);
+    if (rc != CBM_STORE_OK) cbm_store_traverse_free(out);
+    return rc;
+}
+
+static const cbm_store_backend_t plugin_store_backend = {
+    .search = plugin_store_search,
+    .find_node_by_id = plugin_store_find_node_by_id,
+    .find_edges = plugin_store_find_edges,
+    .node_degree = plugin_store_node_degree,
+    .bfs = plugin_store_bfs,
+};
+
+/* Workspace row: workspace_key, project. */
+static int32_t ZOVA_PLUGIN_CALL plugin_workspace_row(void *user_data,
+                                                     const zova_plugin_value_v1 *values,
+                                                     uint64_t count) {
+    plugin_store_t *store = user_data;
+    if (count != 2 || values[0].kind != ZOVA_PLUGIN_VALUE_INTEGER ||
+        values[1].kind != ZOVA_PLUGIN_VALUE_TEXT) {
+        return ZOVA_PLUGIN_ERROR;
+    }
+    store->workspace_key = values[0].integer;
+    store->project = plugin_dup((const char *)values[1].bytes, values[1].bytes_len);
+    return store->project ? ZOVA_PLUGIN_OK : ZOVA_PLUGIN_OUT_OF_MEMORY;
+}
+
+/* Result rows as (kind, cells) pairs, in emission order. */
+typedef struct {
+    const char **kinds;
+    char **cells;
+    size_t count;
+    size_t next;
+} plugin_cypher_t;
+
+static void plugin_cypher_free(plugin_cypher_t *cursor) {
+    if (!cursor) return;
+    for (size_t i = 0; i < cursor->count; i++) free(cursor->cells[i]);
+    free(cursor->kinds);
+    free(cursor->cells);
+    free(cursor);
+}
+
+/* Takes ownership of cells; NULL cells reports an allocation failure. */
+static int plugin_cypher_push(plugin_cypher_t *cursor, const char *kind, char *cells) {
+    if (!cells) return -1;
+    cursor->kinds[cursor->count] = kind;
+    cursor->cells[cursor->count++] = cells;
+    return 0;
+}
+
+static char *plugin_json_array(const char *const *values, int count) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    if (!doc) return NULL;
+    yyjson_mut_val *array = yyjson_mut_arr(doc);
+    yyjson_mut_doc_set_root(doc, array);
+    for (int i = 0; i < count; i++) {
+        if (values[i]) {
+            yyjson_mut_arr_add_str(doc, array, values[i]);
+        } else {
+            yyjson_mut_arr_add_null(doc, array);
+        }
+    }
+    char *json = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
+    return json;
+}
+
+static int32_t plugin_cypher_run(const plugin_session_t *session,
+                                 const zova_plugin_value_v1 *arguments,
+                                 plugin_cypher_t *cursor) {
+    static const char workspace_sql[] =
+        "SELECT r.workspace_key,p.project FROM cbm_workspace_registry r "
+        "JOIN cbm_projects_v1 p ON p.workspace_key=r.workspace_key WHERE r.workspace_id=?1";
+    plugin_store_t store = {.session = *session};
+    char *workspace_id = plugin_dup((const char *)arguments[0].bytes, arguments[0].bytes_len);
+    char *query = plugin_dup((const char *)arguments[1].bytes, arguments[1].bytes_len);
+    cbm_store_t *handle = NULL;
+    cbm_cypher_result_t result = {0};
+    int32_t status = ZOVA_PLUGIN_OUT_OF_MEMORY;
+    /* Up to three rows besides the result rows: columns, warning, error. */
+    cursor->kinds = calloc(3, sizeof(*cursor->kinds));
+    cursor->cells = calloc(3, sizeof(*cursor->cells));
+    if (!workspace_id || !query || !cursor->kinds || !cursor->cells) goto done;
+    if (strlen(workspace_id) != arguments[0].bytes_len || strlen(query) != arguments[1].bytes_len ||
+        cbm_zova_workspace_graph_name(workspace_id, store.graph_name,
+                                      sizeof(store.graph_name)) != 0) {
+        status = ZOVA_PLUGIN_INVALID_ARGUMENT;
+        goto done;
+    }
+    store.graph = (zova_plugin_bytes_v1){(const uint8_t *)store.graph_name,
+                                         strlen(store.graph_name)};
+    zova_plugin_query_request_v1 request = {
+        .struct_size = sizeof(request),
+        .sql = workspace_sql,
+        .sql_len = sizeof(workspace_sql) - 1,
+        .parameters = &arguments[0],
+        .parameter_count = 1,
+        .row_limit = 1,
+        .byte_limit = PLUGIN_PAGE_BYTES,
+        .row = plugin_workspace_row,
+        .user_data = &store,
+    };
+    status = session->query->query(session->connection, &request);
+    if (status != ZOVA_PLUGIN_OK) goto done;
+    status = ZOVA_PLUGIN_OUT_OF_MEMORY;
+    if (!store.project) {
+        status = plugin_cypher_push(cursor, "error", plugin_dup("workspace not found", 19)) == 0
+                     ? ZOVA_PLUGIN_OK
+                     : ZOVA_PLUGIN_OUT_OF_MEMORY;
+        goto done;
+    }
+    handle = cbm_store_open_backend(&plugin_store_backend, &store);
+    if (!handle) goto done;
+    if (cbm_cypher_execute(handle, query, store.project, (int)arguments[2].integer, &result) !=
+        0) {
+        const char *message = result.error ? result.error : "query failed";
+        if (plugin_cypher_push(cursor, "error", plugin_dup(message, strlen(message))) == 0) {
+            status = ZOVA_PLUGIN_OK;
+        }
+        goto done;
+    }
+    size_t capacity = (size_t)result.row_count + 3;
+    const char **kinds = realloc(cursor->kinds, capacity * sizeof(*kinds));
+    if (!kinds) goto done;
+    cursor->kinds = kinds;
+    char **cells = realloc(cursor->cells, capacity * sizeof(*cells));
+    if (!cells) goto done;
+    cursor->cells = cells;
+    if (plugin_cypher_push(cursor, "columns",
+                           plugin_json_array(result.columns, result.col_count)) != 0) {
+        goto done;
+    }
+    for (int i = 0; i < result.row_count; i++) {
+        if (plugin_cypher_push(cursor, "row",
+                               plugin_json_array(result.rows[i], result.col_count)) != 0) {
+            goto done;
+        }
+    }
+    if (result.warning && plugin_cypher_push(cursor, "warning",
+                                             plugin_dup(result.warning,
+                                                        strlen(result.warning))) != 0) {
+        goto done;
+    }
+    status = ZOVA_PLUGIN_OK;
+done:
+    cbm_cypher_result_free(&result);
+    cbm_store_close(handle);
+    free(store.project);
+    free(workspace_id);
+    free(query);
+    return status;
+}
+
+static int32_t ZOVA_PLUGIN_CALL plugin_cypher_open(const zova_plugin_host_v1 *host,
+                                                   void *connection, void *unused,
+                                                   const zova_plugin_value_v1 *arguments,
+                                                   uint64_t argument_count, void **out_cursor) {
+    (void)unused;
+    *out_cursor = NULL;
+    if (argument_count != PLUGIN_CYPHER_ARGUMENTS || arguments[1].bytes_len == 0 ||
+        arguments[2].integer < 0 || arguments[2].integer > INT32_MAX) {
+        return ZOVA_PLUGIN_INVALID_ARGUMENT;
+    }
+    plugin_session_t session;
+    int32_t status = plugin_session_open(host, connection, &session);
+    if (status != ZOVA_PLUGIN_OK) return status;
+    plugin_cypher_t *cursor = calloc(1, sizeof(*cursor));
+    if (!cursor) return ZOVA_PLUGIN_OUT_OF_MEMORY;
+    *out_cursor = cursor;
+    return plugin_cypher_run(&session, arguments, cursor);
+}
+
+static int32_t ZOVA_PLUGIN_CALL plugin_cypher_next(const zova_plugin_host_v1 *host,
+                                                   void *connection, void *raw,
+                                                   zova_plugin_row_v1 row, void *row_context,
+                                                   uint32_t *out_has_row) {
+    (void)host;
+    (void)connection;
+    plugin_cypher_t *cursor = raw;
+    *out_has_row = 0;
+    if (cursor->next >= cursor->count) return ZOVA_PLUGIN_OK;
+    const char *kind = cursor->kinds[cursor->next];
+    const char *cells = cursor->cells[cursor->next++];
+    zova_plugin_value_v1 values[PLUGIN_CYPHER_COLUMNS] = {
+        plugin_text_value(kind, strlen(kind)),
+        plugin_text_value(cells, strlen(cells)),
+    };
+    *out_has_row = 1;
+    return row(row_context, values, PLUGIN_CYPHER_COLUMNS);
+}
+
+static void ZOVA_PLUGIN_CALL plugin_cypher_close(void *cursor) {
+    plugin_cypher_free(cursor);
 }
 
 #define PLUGIN_COLUMN(text, kind) {{(const uint8_t *)(text), sizeof(text) - 1}, (kind), 0}
@@ -737,7 +1239,32 @@ static int32_t ZOVA_PLUGIN_CALL plugin_register_sql(const zova_plugin_host_v1 *h
         .next = plugin_edges_next,
         .close = plugin_edges_close,
     };
-    return operations->register_operation(connection, &edges);
+    status = operations->register_operation(connection, &edges);
+    if (status != ZOVA_PLUGIN_OK) return status;
+
+    static const zova_plugin_operation_column_v1 cypher_arguments[PLUGIN_CYPHER_ARGUMENTS] = {
+        PLUGIN_COLUMN("workspace_id", ZOVA_PLUGIN_VALUE_TEXT),
+        PLUGIN_COLUMN("query", ZOVA_PLUGIN_VALUE_TEXT),
+        PLUGIN_COLUMN("max_rows", ZOVA_PLUGIN_VALUE_INTEGER),
+    };
+    static const zova_plugin_operation_column_v1 cypher_columns[PLUGIN_CYPHER_COLUMNS] = {
+        PLUGIN_COLUMN("kind", ZOVA_PLUGIN_VALUE_TEXT),
+        PLUGIN_COLUMN("cells", ZOVA_PLUGIN_VALUE_TEXT),
+    };
+    zova_plugin_operation_v1 cypher = {
+        .struct_size = sizeof(cypher),
+        .kind = ZOVA_PLUGIN_OPERATION_TABLE,
+        .flags = ZOVA_PLUGIN_OPERATION_EXACT | ZOVA_PLUGIN_OPERATION_ORDERED,
+        .name = {(const uint8_t *)"cypher", sizeof("cypher") - 1},
+        .arguments = cypher_arguments,
+        .argument_count = PLUGIN_CYPHER_ARGUMENTS,
+        .column_count = PLUGIN_CYPHER_COLUMNS,
+        .columns = cypher_columns,
+        .open = plugin_cypher_open,
+        .next = plugin_cypher_next,
+        .close = plugin_cypher_close,
+    };
+    return operations->register_operation(connection, &cypher);
 }
 
 /* The plugin owns no tables. data_version names the cbm tables and graph layout

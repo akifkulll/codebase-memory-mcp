@@ -104,6 +104,9 @@ static int bind_text(sqlite3_stmt *s, int col, const char *v) {
 struct cbm_store {
     sqlite3 *db;
     const char *db_path; /* heap-allocated, or NULL for :memory: */
+    /* Set only by cbm_store_open_backend; db is NULL then. */
+    const cbm_store_backend_t *backend;
+    void *backend_ctx;
     char errbuf[CBM_SZ_512];
 
     /* Read-only Zova sidecar session. One store is single-thread-owned. */
@@ -1121,8 +1124,24 @@ static void finalize_stmt(sqlite3_stmt **s) {
     }
 }
 
+cbm_store_t *cbm_store_open_backend(const cbm_store_backend_t *backend, void *ctx) {
+    if (!backend) {
+        return NULL;
+    }
+    cbm_store_t *s = calloc(1, sizeof(*s));
+    if (s) {
+        s->backend = backend;
+        s->backend_ctx = ctx;
+    }
+    return s;
+}
+
 void cbm_store_close(cbm_store_t *s) {
     if (!s) {
+        return;
+    }
+    if (s->backend) {
+        free(s);
         return;
     }
 
@@ -1472,6 +1491,7 @@ static void scan_node(sqlite3_stmt *stmt, cbm_node_t *n) {
 }
 
 int cbm_store_find_node_by_id(cbm_store_t *s, int64_t id, cbm_node_t *out) {
+    if (s && s->backend) return s->backend->find_node_by_id(s->backend_ctx, id, out);
     if (s && s->zova_workspace_query && s->zova_repository)
         return cbm_zova_repository_find_node_by_numeric_id(
             s->zova_repository, s->zova_graph_workspace_id, id, out);
@@ -1698,13 +1718,15 @@ int cbm_store_find_nodes_by_name(cbm_store_t *s, const char *project, const char
 
 int cbm_store_find_nodes_by_label(cbm_store_t *s, const char *project, const char *label,
                                   cbm_node_t **out, int *count) {
-    if (s && s->zova_workspace_query && s->zova_repository) {
+    if (s && (s->backend || (s->zova_workspace_query && s->zova_repository))) {
         cbm_search_output_t search = {0};
         cbm_search_params_t params = {
             .project = project, .label = label, .min_degree = -1, .max_degree = -1,
             .limit = INT_MAX};
-        int rc = cbm_zova_repository_search(
-            s->zova_repository, s->zova_graph_workspace_id, &params, &search);
+        int rc = s->backend
+                     ? s->backend->search(s->backend_ctx, &params, &search)
+                     : cbm_zova_repository_search(s->zova_repository,
+                                                  s->zova_graph_workspace_id, &params, &search);
         if (rc != CBM_STORE_OK) {
             *out = NULL;
             *count = 0;
@@ -2002,6 +2024,8 @@ static int store_zova_workspace_edges(cbm_store_t *s, int64_t node_numeric_id,
 
 int cbm_store_find_edges_by_source(cbm_store_t *s, int64_t source_id, cbm_edge_t **out,
                                    int *count) {
+    if (s && s->backend)
+        return s->backend->find_edges(s->backend_ctx, source_id, "outbound", NULL, out, count);
     if (s && s->zova_workspace_query)
         return store_zova_workspace_edges(s,source_id,"outbound",NULL,out,count);
     bind_id_t b = {source_id};
@@ -2013,6 +2037,8 @@ int cbm_store_find_edges_by_source(cbm_store_t *s, int64_t source_id, cbm_edge_t
 
 int cbm_store_find_edges_by_target(cbm_store_t *s, int64_t target_id, cbm_edge_t **out,
                                    int *count) {
+    if (s && s->backend)
+        return s->backend->find_edges(s->backend_ctx, target_id, "inbound", NULL, out, count);
     if (s && s->zova_workspace_query)
         return store_zova_workspace_edges(s,target_id,"inbound",NULL,out,count);
     bind_id_t b = {target_id};
@@ -2024,6 +2050,8 @@ int cbm_store_find_edges_by_target(cbm_store_t *s, int64_t target_id, cbm_edge_t
 
 int cbm_store_find_edges_by_source_type(cbm_store_t *s, int64_t source_id, const char *type,
                                         cbm_edge_t **out, int *count) {
+    if (s && s->backend)
+        return s->backend->find_edges(s->backend_ctx, source_id, "outbound", type, out, count);
     if (s && s->zova_workspace_query)
         return store_zova_workspace_edges(s,source_id,"outbound",type,out,count);
     bind_id_type_t b = {source_id, type};
@@ -2035,6 +2063,8 @@ int cbm_store_find_edges_by_source_type(cbm_store_t *s, int64_t source_id, const
 
 int cbm_store_find_edges_by_target_type(cbm_store_t *s, int64_t target_id, const char *type,
                                         cbm_edge_t **out, int *count) {
+    if (s && s->backend)
+        return s->backend->find_edges(s->backend_ctx, target_id, "inbound", type, out, count);
     if (s && s->zova_workspace_query)
         return store_zova_workspace_edges(s,target_id,"inbound",type,out,count);
     bind_id_type_t b = {target_id, type};
@@ -2345,6 +2375,13 @@ void cbm_store_node_degree(cbm_store_t *s, int64_t node_id, int *in_deg, int *ou
     *in_deg = 0;
     *out_deg = 0;
 
+    if (s->backend) {
+        if (s->backend->node_degree(s->backend_ctx, node_id, in_deg, out_deg) != CBM_STORE_OK) {
+            *in_deg = 0;
+            *out_deg = 0;
+        }
+        return;
+    }
     if (s->zova_workspace_query) {
         char stable[CBM_ZOVA_WORKSPACE_ID_MAX + 96] = {0};
         char graph[CBM_ZOVA_WORKSPACE_ID_MAX + 32];
@@ -3052,6 +3089,9 @@ static int search_build_where(const cbm_search_params_t *params, char *where, in
 
 int cbm_store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_search_output_t *out) {
     memset(out, 0, sizeof(*out));
+    if (s && s->backend) {
+        return s->backend->search(s->backend_ctx, params, out);
+    }
     if (!s || !s->db) {
         return CBM_STORE_ERR;
     }
@@ -3349,6 +3389,10 @@ static int store_zova_workspace_bfs(cbm_store_t *s, int64_t start_id, const char
 int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const char **edge_types,
                   int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out) {
     memset(out, 0, sizeof(*out));
+    if (s && s->backend) {
+        return s->backend->bfs(s->backend_ctx, start_id, direction, edge_types, edge_type_count,
+                               max_depth, max_results, out);
+    }
 
     cbm_node_t root = {0};
     int rc = store_find_cached_zova_workspace_node(s, start_id, &root);

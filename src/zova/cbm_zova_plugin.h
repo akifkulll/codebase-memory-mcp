@@ -1,7 +1,7 @@
 #ifndef CBM_ZOVA_PLUGIN_H
 #define CBM_ZOVA_PLUGIN_H
 
-/* Statically linked Zova plugin "cbm". Registers two read-only table operations.
+/* Statically linked Zova plugin "cbm". Registers read-only table operations.
  *
  *   zova_cbm_trace_path(graph, start_key, direction, edge_types, max_depth, max_results)
  *
@@ -17,6 +17,14 @@
  * in adjacency order, with the relationship properties decoded from the edge
  * payload. An empty edge_types means every type. One graph edge yields one row
  * per cbm edge it carries; local_name tells those apart.
+ *
+ *   zova_cbm_cypher(workspace_id, query, max_rows)
+ *
+ * runs the Cypher engine over one workspace. Rows are (kind, cells): one
+ * 'columns' row and then one 'row' per result, both JSON arrays of strings, an
+ * optional 'warning' row, or a single 'error' row carrying the message.
+ * max_rows 0 means the engine default. id(n) and id(r) return Zova keys here,
+ * not the host store's hashed ids.
  *
  * Not installed in user databases: a database with the plugin installed can
  * only be opened by a host that links it. */

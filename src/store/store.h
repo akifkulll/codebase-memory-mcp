@@ -456,6 +456,29 @@ void cbm_store_zova_graph_set_request_metrics(cbm_store_t *s,
 /* Free a traverse result's allocated memory. */
 void cbm_store_traverse_free(cbm_traverse_result_t *out);
 
+/* ── Query backend ──────────────────────────────────────────────── */
+
+/* A store whose graph reads are answered by the caller instead of a database.
+ * It serves exactly the reads the Cypher engine makes: cbm_store_search,
+ * cbm_store_find_node_by_id, cbm_store_find_nodes_by_label, the four
+ * cbm_store_find_edges_by_{source,target}[_type], cbm_store_node_degree and
+ * cbm_store_bfs. Every other store call is unsupported on it. Results follow
+ * the usual ownership: the caller frees them with the cbm_store_*_free
+ * functions, so every string is individually malloc'd. */
+typedef struct {
+    int (*search)(void *ctx, const cbm_search_params_t *params, cbm_search_output_t *out);
+    int (*find_node_by_id)(void *ctx, int64_t id, cbm_node_t *out);
+    /* direction is "outbound" or "inbound"; type NULL means every type. */
+    int (*find_edges)(void *ctx, int64_t node_id, const char *direction, const char *type,
+                      cbm_edge_t **out, int *count);
+    int (*node_degree)(void *ctx, int64_t node_id, int *in_deg, int *out_deg);
+    int (*bfs)(void *ctx, int64_t start_id, const char *direction, const char **edge_types,
+               int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out);
+} cbm_store_backend_t;
+
+/* backend and ctx must outlive the store. Close with cbm_store_close. */
+cbm_store_t *cbm_store_open_backend(const cbm_store_backend_t *backend, void *ctx);
+
 /* ── Impact analysis ────────────────────────────────────────────── */
 
 typedef enum {

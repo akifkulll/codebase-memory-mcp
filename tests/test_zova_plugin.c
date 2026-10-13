@@ -3,6 +3,8 @@
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h"
 #include "../src/foundation/platform.h"
+#include "cypher/cypher.h"
+#include "store/store.h"
 #include "zova/cbm_zova.h"
 #include "zova/cbm_zova_plugin.h"
 
@@ -27,6 +29,8 @@ TEST(zova_plugin_disabled) {
 
 #include "zova.h"
 #include "zova_plugin.h"
+
+#include <yyjson/yyjson.h>
 
 enum { TZP_PATH_MAX = 512, TZP_ROWS_MAX = 16, TZP_TEXT_MAX = 64 };
 
@@ -97,15 +101,22 @@ static zova_status plugin_open(const char *path, int with_plugin, zova_database 
     return status;
 }
 
-static int plugin_fixture_create(plugin_fixture_t *fx) {
+static int plugin_fixture_publish(plugin_fixture_t *fx) {
     memset(fx, 0, sizeof(*fx));
     snprintf(fx->path, sizeof(fx->path), "%s/cbm-plugin-%d-%p.zova", cbm_tmpdir(), (int)getpid(),
              (void *)fx);
     cbm_unlink(fx->path);
-    if (plugin_publish(fx) != 0) return -1;
+    return plugin_publish(fx);
+}
+
+static int plugin_fixture_install(plugin_fixture_t *fx) {
     if (plugin_open(fx->path, 1, &fx->db) != ZOVA_OK) return -1;
     return zova_database_extension_install(&(zova_database_extension_request){
                .db = fx->db, .name = "cbm"}) == ZOVA_OK ? 0 : -1;
+}
+
+static int plugin_fixture_create(plugin_fixture_t *fx) {
+    return plugin_fixture_publish(fx) == 0 ? plugin_fixture_install(fx) : -1;
 }
 
 static void plugin_fixture_cleanup(plugin_fixture_t *fx) {
@@ -526,6 +537,163 @@ TEST(zova_plugin_trace_path_pages_wide_fanout) {
     PASS();
 }
 
+enum { TZP_CYPHER_TEXT = 4096, TZP_CYPHER_ROWS = 64 };
+
+/* A Cypher result as text: line 0 is the columns, the rest are the rows sorted,
+ * cells separated by '|'. An error is the single line "error". */
+typedef struct {
+    char lines[TZP_CYPHER_ROWS][TZP_TEXT_MAX * 2];
+    int count;
+} plugin_cypher_text_t;
+
+static int plugin_line_compare(const void *a, const void *b) {
+    return strcmp(a, b);
+}
+
+static void plugin_cypher_sort(plugin_cypher_text_t *text) {
+    if (text->count > 2) {
+        qsort(text->lines[1], (size_t)text->count - 1, sizeof(text->lines[0]),
+              plugin_line_compare);
+    }
+}
+
+static void plugin_cypher_line(plugin_cypher_text_t *text, const char *const *cells, int count) {
+    char *line = text->lines[text->count++];
+    size_t used = 0;
+    line[0] = '\0';
+    for (int i = 0; i < count && used < sizeof(text->lines[0]); i++) {
+        used += (size_t)snprintf(line + used, sizeof(text->lines[0]) - used, "%s%s", i ? "|" : "",
+                                 cells[i] ? cells[i] : "<null>");
+    }
+}
+
+static int plugin_cypher_host(const plugin_fixture_t *fx, const char *query,
+                              plugin_cypher_text_t *text) {
+    memset(text, 0, sizeof(*text));
+    cbm_store_t *store = cbm_store_open_zova_workspace_query(
+        fx->path, fx->graph_name + strlen("cbm_graph_"));
+    if (!store) return -1;
+    cbm_cypher_result_t result = {0};
+    if (cbm_cypher_execute(store, query, "proj", 0, &result) != 0) {
+        snprintf(text->lines[text->count++], sizeof(text->lines[0]), "error");
+    } else if (result.row_count + 1 > TZP_CYPHER_ROWS) {
+        text->count = -1;
+    } else {
+        plugin_cypher_line(text, result.columns, result.col_count);
+        for (int i = 0; i < result.row_count; i++) {
+            plugin_cypher_line(text, result.rows[i], result.col_count);
+        }
+        plugin_cypher_sort(text);
+    }
+    cbm_cypher_result_free(&result);
+    cbm_store_close(store);
+    return text->count;
+}
+
+/* Returns the line count, or -1 when the statement fails. message receives the
+ * cells of an 'error' row. */
+static int plugin_cypher(const plugin_fixture_t *fx, const char *workspace_id, const char *query,
+                         plugin_cypher_text_t *text, char *message, size_t message_size) {
+    memset(text, 0, sizeof(*text));
+    if (message_size) message[0] = '\0';
+    zova_statement *stmt = NULL;
+    if (zova_database_prepare(&(zova_database_prepare_request){
+            .db = fx->db, .sql = "SELECT kind,cells FROM zova_cbm_cypher(?1,?2,0)",
+            .out_statement = &stmt}) != ZOVA_OK) return -1;
+    int ok = zova_statement_bind_text(&(zova_statement_bind_text_request){
+                 .statement = stmt, .index = 1, .data = (const uint8_t *)workspace_id,
+                 .len = strlen(workspace_id)}) == ZOVA_OK &&
+             zova_statement_bind_text(&(zova_statement_bind_text_request){
+                 .statement = stmt, .index = 2, .data = (const uint8_t *)query,
+                 .len = strlen(query)}) == ZOVA_OK;
+    while (ok && text->count < TZP_CYPHER_ROWS) {
+        zova_step_result step = 0;
+        ok = zova_statement_step(&(zova_statement_step_request){
+                 .statement = stmt, .out_result = &step}) == ZOVA_OK;
+        if (!ok || step != ZOVA_STEP_ROW) break;
+        char kind[TZP_TEXT_MAX];
+        char cells[TZP_CYPHER_TEXT];
+        plugin_copy_text(stmt, 0, kind, sizeof(kind));
+        plugin_copy_text(stmt, 1, cells, sizeof(cells));
+        if (strcmp(kind, "error") == 0) {
+            snprintf(text->lines[text->count++], sizeof(text->lines[0]), "error");
+            snprintf(message, message_size, "%s", cells);
+            continue;
+        }
+        if (strcmp(kind, "warning") == 0) continue;
+        yyjson_doc *doc = yyjson_read(cells, strlen(cells), 0);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        const char *values[TZP_ROWS_MAX];
+        int count = 0;
+        size_t index;
+        size_t max;
+        yyjson_val *value;
+        ok = yyjson_is_arr(root) && yyjson_arr_size(root) <= TZP_ROWS_MAX;
+        if (ok) {
+            yyjson_arr_foreach(root, index, max, value) {
+                values[count++] = yyjson_get_str(value);
+            }
+            plugin_cypher_line(text, values, count);
+        }
+        yyjson_doc_free(doc);
+    }
+    zova_statement_finalize(stmt);
+    if (!ok) return -1;
+    plugin_cypher_sort(text);
+    return text->count;
+}
+
+/* The plugin runs the host's Cypher engine over plugin services, so both must
+ * answer alike. Host results are taken first: the host cannot open the
+ * database once the plugin is installed. */
+TEST(zova_plugin_cypher_matches_host_cypher) {
+    static const char *const queries[] = {
+        "MATCH (n:Function) RETURN n.name, n.qualified_name, n.file_path",
+        "MATCH (n) WHERE n.name = 'Beta' RETURN n.name, n.label, n.start_line, n.k",
+        "MATCH (a)-[r:CALLS]->(b) RETURN a.name, r.args, b.name",
+        "MATCH (a)-[r]->(b) WHERE a.name = 'Alpha' RETURN b.name, type(r)",
+        "MATCH (a)<-[:CALLS]-(b) WHERE a.name = 'Beta' RETURN b.name",
+        "MATCH (a)-[:HTTP_CALLS]->(b)-[:ASYNC_CALLS]->(c) RETURN a.name, b.name, c.name",
+        "MATCH (a:Function)-[:CALLS*1..3]->(b) WHERE a.name = 'Alpha' RETURN b.name",
+        "MATCH (a)-[r:CALLS]->(b) WHERE r.args = 'y' RETURN a.name, b.name",
+        "MATCH (n:Function) RETURN count(n)",
+        "MATCH (n:NoSuchLabel) RETURN n.name",
+        "MATCH (",
+    };
+    enum { QUERIES = sizeof(queries) / sizeof(queries[0]) };
+    static plugin_cypher_text_t host[QUERIES];
+    static plugin_cypher_text_t plugin;
+    plugin_fixture_t fx;
+    char message[TZP_CYPHER_TEXT];
+    ASSERT_EQ(plugin_fixture_publish(&fx), 0);
+    for (int i = 0; i < QUERIES; i++) ASSERT_GT(plugin_cypher_host(&fx, queries[i], &host[i]), 0);
+    /* The relationship-property query has rows to compare. */
+    ASSERT_EQ(host[2].count, 5);
+    ASSERT_STR_EQ(host[2].lines[1], "Alpha|x|Beta");
+    ASSERT_STR_EQ(host[2].lines[2], "Alpha|y|Beta");
+    ASSERT_STR_EQ(host[QUERIES - 1].lines[0], "error");
+
+    ASSERT_EQ(plugin_fixture_install(&fx), 0);
+    const char *workspace_id = fx.graph_name + strlen("cbm_graph_");
+    for (int i = 0; i < QUERIES; i++) {
+        ASSERT_EQ(plugin_cypher(&fx, workspace_id, queries[i], &plugin, message, sizeof(message)),
+                  host[i].count);
+        for (int line = 0; line < host[i].count; line++) {
+            ASSERT_STR_EQ(plugin.lines[line], host[i].lines[line]);
+        }
+    }
+
+    ASSERT_EQ(plugin_cypher(&fx, "no_such_workspace", queries[0], &plugin, message,
+                            sizeof(message)), 1);
+    ASSERT_STR_EQ(plugin.lines[0], "error");
+    ASSERT_STR_EQ(message, "workspace not found");
+    ASSERT_EQ(plugin_cypher(&fx, "not-a-workspace-id", queries[0], &plugin, message,
+                            sizeof(message)), -1);
+    ASSERT_EQ(plugin_cypher(&fx, workspace_id, "", &plugin, message, sizeof(message)), -1);
+    plugin_fixture_cleanup(&fx);
+    PASS();
+}
+
 /* Why the plugin stays out of user databases until every open path links it. */
 TEST(zova_plugin_installed_database_requires_linked_plugin) {
     plugin_fixture_t fx;
@@ -557,6 +725,7 @@ SUITE(zova_plugin) {
     RUN_TEST(zova_plugin_edges_return_relationship_properties);
     RUN_TEST(zova_plugin_edges_retry_payload_batches_over_budget);
     RUN_TEST(zova_plugin_trace_path_pages_wide_fanout);
+    RUN_TEST(zova_plugin_cypher_matches_host_cypher);
     RUN_TEST(zova_plugin_installed_database_requires_linked_plugin);
 #endif
 }
