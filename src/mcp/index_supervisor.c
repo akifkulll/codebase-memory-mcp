@@ -8,7 +8,7 @@
 #include "foundation/log.h"
 #include "foundation/platform.h" /* cbm_resolve_cache_dir */
 #include "foundation/profile.h"  /* cbm_profile_active (keep worker log under CBM_PROFILE) */
-#include "ui/http_server.h"      /* cbm_http_server_resolve_binary_path */
+#include "foundation/subprocess.h" /* cbm_resolve_binary_path */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -156,7 +156,7 @@ int cbm_index_spawn_worker(const char *args_json, bool single_thread, const char
     result->response = NULL;
 
     char self[1024] = {0};
-    if (!cbm_http_server_resolve_binary_path(NULL, self, sizeof(self)) || !self[0]) {
+    if (!cbm_resolve_binary_path(NULL, self, sizeof(self)) || !self[0]) {
         cbm_log_warn("index.supervisor.no_self_path", "action", "degrade_in_process");
         return -1;
     }

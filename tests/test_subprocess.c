@@ -9,9 +9,13 @@
  *      (SKIP_PLATFORM on Windows, which lacks it).
  */
 #include "test_framework.h"
+#include "../src/foundation/compat.h"
+#include "../src/foundation/compat_fs.h"
 #include "../src/foundation/subprocess.h"
 
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #ifndef _WIN32
 #include <signal.h>
@@ -316,6 +320,41 @@ TEST(win_cmdline_overflow_leaves_empty_string) {
     PASS();
 }
 
+TEST(subprocess_resolves_bare_binary_path_from_path) {
+#ifdef _WIN32
+    PASS();
+#else
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_subproc_bin_XXXXXX");
+    char *td = cbm_mkdtemp(tmpdir);
+    ASSERT_NOT_NULL(td);
+
+    char exe[512];
+    snprintf(exe, sizeof(exe), "%s/codebase-memory-mcp", td);
+    FILE *f = fopen(exe, "w");
+    ASSERT_NOT_NULL(f);
+    fputs("#!/bin/sh\nexit 0\n", f);
+    fclose(f);
+    ASSERT_EQ(chmod(exe, 0755), 0);
+
+    char *old_path = getenv("PATH") ? strdup(getenv("PATH")) : NULL;
+    cbm_setenv("PATH", td, 1);
+
+    char resolved[1024];
+    ASSERT_TRUE(
+        cbm_resolve_binary_path("codebase-memory-mcp", resolved, sizeof(resolved)));
+    ASSERT_STR_EQ(resolved, exe);
+
+    if (old_path) {
+        cbm_setenv("PATH", old_path, 1);
+        free(old_path);
+    } else {
+        cbm_unsetenv("PATH");
+    }
+    PASS();
+#endif
+}
+
 SUITE(subprocess) {
     RUN_TEST(subprocess_classify_clean);
     RUN_TEST(subprocess_classify_exit_nonzero);
@@ -334,4 +373,5 @@ SUITE(subprocess) {
     RUN_TEST(win_cmdline_roundtrip_battery);
     RUN_TEST(win_cmdline_overflow_rejected);
     RUN_TEST(win_cmdline_overflow_leaves_empty_string);
+    RUN_TEST(subprocess_resolves_bare_binary_path_from_path);
 }

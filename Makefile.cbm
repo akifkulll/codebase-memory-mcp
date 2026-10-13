@@ -255,14 +255,6 @@ GIT_SRCS = src/git/git_context.c
 # CLI module (new)
 CLI_SRCS = src/cli/cli.c src/cli/progress_sink.c src/cli/hook_augment.c
 
-# UI module (graph visualization)
-UI_SRCS = \
-    src/ui/config.c \
-    src/ui/http_server.c \
-    src/ui/layout3d.c \
-    src/ui/httpd.c \
-    src/ui/embedded_stub.c
-
 # mimalloc (vendored, global allocator override)
 #
 # Override strategy is platform-specific:
@@ -312,7 +304,7 @@ TRE_CFLAGS = -std=c11 -g -O1 -w -Ivendored/tre
 YYJSON_SRC = vendored/yyjson/yyjson.c
 
 # All production sources
-PROD_SRCS = $(FOUNDATION_SRCS) $(STORE_SRCS) $(ZOVA_SRCS) $(CYPHER_SRCS) $(MCP_SRCS) $(DISCOVER_SRCS) $(GRAPH_BUFFER_SRCS) $(PIPELINE_SRCS) $(SIMHASH_SRCS) $(SEMANTIC_SRCS) $(TRACES_SRCS) $(WATCHER_SRCS) $(GIT_SRCS) $(CLI_SRCS) $(UI_SRCS) $(YYJSON_SRC)
+PROD_SRCS = $(FOUNDATION_SRCS) $(STORE_SRCS) $(ZOVA_SRCS) $(CYPHER_SRCS) $(MCP_SRCS) $(DISCOVER_SRCS) $(GRAPH_BUFFER_SRCS) $(PIPELINE_SRCS) $(SIMHASH_SRCS) $(SEMANTIC_SRCS) $(TRACES_SRCS) $(WATCHER_SRCS) $(GIT_SRCS) $(CLI_SRCS) $(YYJSON_SRC)
 EXISTING_C_SRCS = $(EXTRACTION_SRCS) $(LSP_SRCS) $(TS_RUNTIME_SRC) \
                   $(GRAMMAR_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC)
 
@@ -410,9 +402,6 @@ TEST_CLI_SRCS = tests/test_cli.c
 
 TEST_MEM_SRCS = tests/test_mem.c
 
-TEST_UI_SRCS = tests/test_ui.c
-TEST_HTTPD_SRCS = tests/test_httpd.c
-
 TEST_SECURITY_SRCS = tests/test_security.c
 
 TEST_YAML_SRCS = tests/test_yaml.c
@@ -459,7 +448,6 @@ TEST_REPRO_SRCS = \
     tests/repro/repro_issue434.c \
     tests/repro/repro_issue471.c \
     tests/repro/repro_issue221.c \
-    tests/repro/repro_issue548.c \
     tests/repro/repro_new_ts_class_field_arrow.c \
     tests/repro/repro_new_py_tuple_unpack.c \
     tests/repro/repro_new_cypher_limit_zero.c \
@@ -490,14 +478,13 @@ TEST_REPRO_SRCS = \
     tests/repro/repro_lsp_java_cs.c \
     tests/repro/repro_lsp_kt_php_rust.c
 
-ALL_TEST_SRCS =$(TEST_FOUNDATION_SRCS) $(TEST_EXTRACTION_SRCS) $(TEST_STORE_SRCS) $(TEST_CYPHER_SRCS) $(TEST_MCP_SRCS) $(TEST_DISCOVER_SRCS) $(TEST_GRAPH_BUFFER_SRCS) $(TEST_PIPELINE_SRCS) $(TEST_WATCHER_SRCS) $(TEST_LZ4_SRCS) $(TEST_ZSTD_SRCS) $(TEST_ARTIFACT_SRCS) $(TEST_SQLITE_WRITER_SRCS) $(TEST_GO_LSP_SRCS) $(TEST_C_LSP_SRCS) $(TEST_PHP_LSP_SRCS) $(TEST_CS_LSP_SRCS) $(TEST_CS_LSP_BENCH_SRCS) $(TEST_SCOPE_SRCS) $(TEST_TYPE_REP_SRCS) $(TEST_PY_LSP_SRCS) $(TEST_PY_LSP_BENCH_SRCS) $(TEST_PY_LSP_STRESS_SRCS) $(TEST_PY_LSP_SCALE_SRCS) $(TEST_TS_LSP_SRCS) $(TEST_JAVA_LSP_SRCS) $(TEST_KOTLIN_LSP_SRCS) $(TEST_RUST_LSP_SRCS) $(TEST_TRACES_SRCS) $(TEST_CLI_SRCS) $(TEST_MEM_SRCS) $(TEST_UI_SRCS) $(TEST_HTTPD_SRCS) $(TEST_SECURITY_SRCS) $(TEST_YAML_SRCS) $(TEST_SEMANTIC_SRCS) $(TEST_AST_PROFILE_SRCS) $(TEST_SLAB_ALLOC_SRCS) $(TEST_SIMHASH_SRCS) $(TEST_STACK_OVERFLOW_SRCS) $(TEST_ZOVA_SRCS) $(TEST_ZOVA_C_SQL_FUNCTIONS_SRCS) $(TEST_ZOVA_BRIDGE_SRCS) $(TEST_INTEGRATION_SRCS)
+ALL_TEST_SRCS =$(TEST_FOUNDATION_SRCS) $(TEST_EXTRACTION_SRCS) $(TEST_STORE_SRCS) $(TEST_CYPHER_SRCS) $(TEST_MCP_SRCS) $(TEST_DISCOVER_SRCS) $(TEST_GRAPH_BUFFER_SRCS) $(TEST_PIPELINE_SRCS) $(TEST_WATCHER_SRCS) $(TEST_LZ4_SRCS) $(TEST_ZSTD_SRCS) $(TEST_ARTIFACT_SRCS) $(TEST_SQLITE_WRITER_SRCS) $(TEST_GO_LSP_SRCS) $(TEST_C_LSP_SRCS) $(TEST_PHP_LSP_SRCS) $(TEST_CS_LSP_SRCS) $(TEST_CS_LSP_BENCH_SRCS) $(TEST_SCOPE_SRCS) $(TEST_TYPE_REP_SRCS) $(TEST_PY_LSP_SRCS) $(TEST_PY_LSP_BENCH_SRCS) $(TEST_PY_LSP_STRESS_SRCS) $(TEST_PY_LSP_SCALE_SRCS) $(TEST_TS_LSP_SRCS) $(TEST_JAVA_LSP_SRCS) $(TEST_KOTLIN_LSP_SRCS) $(TEST_RUST_LSP_SRCS) $(TEST_TRACES_SRCS) $(TEST_CLI_SRCS) $(TEST_MEM_SRCS) $(TEST_SECURITY_SRCS) $(TEST_YAML_SRCS) $(TEST_SEMANTIC_SRCS) $(TEST_AST_PROFILE_SRCS) $(TEST_SLAB_ALLOC_SRCS) $(TEST_SIMHASH_SRCS) $(TEST_STACK_OVERFLOW_SRCS) $(TEST_ZOVA_SRCS) $(TEST_ZOVA_C_SQL_FUNCTIONS_SRCS) $(TEST_ZOVA_BRIDGE_SRCS) $(TEST_INTEGRATION_SRCS)
 
 
 # ── Build directories ────────────────────────────────────────────
 
 BUILD_DIR = build/c
 ZIG ?= zig
-BUN ?= bun
 CBM_WITH_ZOVA ?= 0
 ZOVA_ROOT ?= ../zova
 ZOVA_TEST_BUILD_DIR ?= build/c-zova
@@ -546,16 +533,10 @@ PP_OBJ_TEST = $(BUILD_DIR)/preprocessor.o
 
 # ── Targets ──────────────────────────────────────────────────────
 
-.PHONY: test test-cli test-mcp test-ui test-ui-build test-focused-cli-ui test-install-ui-success test-repro test-foundation test-tsan cbm cbm-with-ui frontend embed check-bun check-zova test-zova-link test-zova-container test-zova-i8 test-zova-vector-parity test-zova-benchmark-smoke test-zova-c-sql-functions test-zova-bridge test-zova-graph-mirror test-zova-real-repo zova-test-runner clean-c lint lint-tidy lint-cppcheck lint-format security
+.PHONY: test test-cli test-mcp test-repro test-foundation test-tsan cbm check-zova test-zova-link test-zova-container test-zova-i8 test-zova-vector-parity test-zova-benchmark-smoke test-zova-c-sql-functions test-zova-bridge test-zova-graph-mirror test-zova-real-repo zova-test-runner clean-c lint lint-tidy lint-cppcheck lint-format security
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
-
-check-bun:
-	@command -v $(BUN) >/dev/null 2>&1 || { \
-		echo "error: bun is required for UI tests/builds (install Bun or set BUN=/path/to/bun)." >&2; \
-		exit 1; \
-	}
 
 check-zova:
 	@if [ "$(CBM_PREBUILT_ZIG)" != "1" ]; then \
@@ -726,15 +707,6 @@ test-cli:
 test-mcp:
 	$(ZIG) build test-mcp $(ZIG_CBM_ARGS)
 
-test-ui:
-	$(ZIG) build test-ui
-
-test-ui-build:
-	$(ZIG) build test-ui-build
-
-test-focused-cli-ui:
-	$(ZIG) build test-focused-cli-ui $(ZIG_CBM_ARGS)
-
 zova-test-runner:
 	$(MAKE) -f Makefile.cbm CBM_WITH_ZOVA=1 BUILD_DIR=$(ZOVA_TEST_BUILD_DIR) $(ZOVA_TEST_BUILD_DIR)/test-runner
 
@@ -836,36 +808,6 @@ $(BUILD_DIR)/codebase-memory-mcp: $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(
 cbm:
 	$(ZIG) build cbm $(ZIG_CBM_ARGS)
 
-# ── Build with embedded UI (requires Bun) ───────────────────────
-
-# Swap embedded_stub.c for the generated embedded_assets.c
-UI_SRCS_WITH_ASSETS = $(subst src/ui/embedded_stub.c,src/ui/embedded_assets.c,$(UI_SRCS))
-PROD_SRCS_WITH_ASSETS = $(subst src/ui/embedded_stub.c,src/ui/embedded_assets.c,$(PROD_SRCS))
-
-# Embedded asset object files (generated by embed script)
-EMBED_OBJS = $(wildcard $(BUILD_DIR)/embedded/embed_*.o)
-
-frontend: check-bun
-	cd graph-ui && $(BUN) install --frozen-lockfile && $(BUN) run build
-
-embed: frontend
-	scripts/embed-frontend.sh graph-ui/dist $(BUILD_DIR)/embedded
-
-cbm-with-ui: embed $(OBJS_VENDORED_PROD) $(CBM_CLI_ZIG_LIB) $(CBM_ZOVA_BRIDGE_LIB) $(ZOVA_CHECK_TARGET)
-	$(CC) $(CFLAGS_PROD) -o $(BUILD_DIR)/codebase-memory-mcp \
-		$(MAIN_SRC) $(PROD_SRCS_WITH_ASSETS) \
-		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
-		$(OBJS_VENDORED_PROD) \
-		$(wildcard $(BUILD_DIR)/embedded/embed_*.o) \
-		$(CBM_ZOVA_BRIDGE_LIB) \
-		$(ZOVA_LINK_LIBS) \
-		$(CBM_CLI_ZIG_LIB) \
-		$(LDFLAGS)
-	@echo "Built with UI: $(BUILD_DIR)/codebase-memory-mcp"
-
-test-install-ui-success: cbm-with-ui
-	bash scripts/test-install-ui-success.sh
-
 clean-c:
 	rm -rf $(BUILD_DIR)
 
@@ -948,13 +890,12 @@ lint-ci: lint-cppcheck lint-format lint-no-suppress
 
 # ── Security audit (6 layers) ────────────────────────────────────
 
-# Run all security checks: static audit, binary strings, UI, install, network
+# Run all security checks: static audit, binary strings, install, network
 # Requires: production binary already built (make cbm)
 security: cbm
 	@echo "=== Running security audit suite ==="
 	scripts/security-audit.sh
 	scripts/security-strings.sh $(BUILD_DIR)/codebase-memory-mcp
-	scripts/security-ui.sh
 	scripts/security-install.sh $(BUILD_DIR)/codebase-memory-mcp
 	scripts/security-network.sh $(BUILD_DIR)/codebase-memory-mcp
 	scripts/security-fuzz.sh $(BUILD_DIR)/codebase-memory-mcp

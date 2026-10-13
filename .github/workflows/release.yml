@@ -71,18 +71,10 @@ jobs:
             codebase-memory-mcp-linux-amd64-portable.tar.gz \
             codebase-memory-mcp-linux-arm64-portable.tar.gz \
             codebase-memory-mcp-windows-amd64.zip \
-            codebase-memory-mcp-windows-arm64.zip \
-            codebase-memory-mcp-ui-darwin-amd64.tar.gz \
-            codebase-memory-mcp-ui-darwin-arm64.tar.gz \
-            codebase-memory-mcp-ui-linux-amd64.tar.gz \
-            codebase-memory-mcp-ui-linux-arm64.tar.gz \
-            codebase-memory-mcp-ui-linux-amd64-portable.tar.gz \
-            codebase-memory-mcp-ui-linux-arm64-portable.tar.gz \
-            codebase-memory-mcp-ui-windows-amd64.zip \
-            codebase-memory-mcp-ui-windows-arm64.zip; do
+            codebase-memory-mcp-windows-arm64.zip; do
             test -s "$name" || { echo "error: missing $name" >&2; exit 1; }
           done
-          test "$(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l | tr -d ' ')" = 16
+          test "$(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l | tr -d ' ')" = 8
           sha256sum ./*.tar.gz ./*.zip > checksums.txt
 
       - name: Create GitHub Release

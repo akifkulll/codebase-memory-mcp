@@ -98,8 +98,7 @@ body:
     attributes:
       label: Logs
       description: |
-        Relevant log output (stderr of the binary; for the UI variant also
-        `GET /api/logs`). Will be auto-formatted as code — no backticks needed.
+        Relevant log output (stderr of the binary). Will be auto-formatted as code — no backticks needed.
         Please check for private paths/strings before pasting.
       render: text
 

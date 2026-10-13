@@ -321,7 +321,6 @@ int cbm_config_delete(cbm_config_t *cfg, const char *key);
 #define CBM_CONFIG_AUTO_INDEX "auto_index"
 #define CBM_CONFIG_AUTO_INDEX_LIMIT "auto_index_limit"
 #define CBM_CONFIG_AUTO_WATCH "auto_watch"
-#define CBM_CONFIG_UI_LANG "ui-lang"
 
 /* ── Subcommands (wired from main.c) ─────────────────────────── */
 
@@ -332,14 +331,13 @@ int cbm_cmd_install(int argc, char **argv);
 /* uninstall: remove skills, remove editor MCP configs, remove binary. */
 int cbm_cmd_uninstall(int argc, char **argv);
 
-/* update: check latest release, prompt for index deletion, prompt for ui/standard,
- * download and replace binary. */
+/* update: check latest release, download and replace binary. */
 int cbm_cmd_update(int argc, char **argv);
 
 /* config: get/set/list/reset runtime config values. */
 int cbm_cmd_config(int argc, char **argv);
 
-/* doctor/where: report install, cache, UI, and config paths without mutating. */
+/* doctor/where: report install, cache, and config paths without mutating. */
 int cbm_cmd_doctor(int argc, char **argv);
 int cbm_cmd_where(int argc, char **argv);
 

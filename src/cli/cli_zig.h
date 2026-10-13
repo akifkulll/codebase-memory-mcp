@@ -14,8 +14,7 @@ extern "C" {
 char *cbm_cli_zig_doctor_report(const char *home, const char *running_binary,
                                 const char *installed_binary, const char *cache_dir,
                                 const char *database_path, const char *config_paths,
-                                const char *detected_agents, int path_ready,
-                                int ui_capable, int ui_enabled, int ui_port);
+                                const char *detected_agents, int path_ready);
 
 char *cbm_cli_zig_where_report(const char *running_binary, const char *installed_binary,
                                const char *cache_dir, const char *database_path,

@@ -99,15 +99,14 @@ This project implements multiple layers of security verification. Every release 
 
 ### Build-Time (CI — every commit)
 
-- **8-layer security audit suite** runs on every build:
+- **7-layer security audit suite** runs on every build:
   - Layer 1: Static allow-list for dangerous calls (`system`/`popen`/`fork`) + hardcoded URLs
   - Layer 2: Binary string audit (URLs, credentials, dangerous commands)
   - Layer 3: Network egress monitoring via strace (Linux)
   - Layer 4: Install output path + content validation
   - Layer 5: Smoke test hardening (clean shutdown, residual processes, version integrity)
-  - Layer 6: Graph UI audit (external domains, CORS, server binding, eval/iframe)
-  - Layer 7: MCP robustness (23 adversarial JSON-RPC payloads)
-  - Layer 8: Vendored dependency integrity (SHA-256 checksums, dangerous call scan)
+  - Layer 6: MCP robustness (23 adversarial JSON-RPC payloads)
+  - Layer 7: Vendored dependency integrity (SHA-256 checksums, dangerous call scan)
 - **All dangerous function calls** require a reviewed entry in `scripts/security-allowlist.txt`
 - **Time-bomb pattern detection** — scans for `time()`/`sleep()` near dangerous calls (could indicate delayed activation)
 - **MCP tool handler file read audit** — tracks file read count in `mcp.c` against an expected maximum (detects added file reads that could exfiltrate data through tool responses)
@@ -135,7 +134,6 @@ If ANY antivirus engine flags ANY binary, the release stays as a draft and is no
 
 - **Shell injection prevention** — `cbm_validate_shell_arg()` rejects metacharacters before all `popen()`/`system()` calls
 - **SQLite authorizer** — blocks `ATTACH`/`DETACH` at engine level (prevents file creation via SQL injection)
-- **CORS locked to localhost** — graph UI only accessible from localhost origins
 - **Path containment** — `realpath()` check prevents reading files outside project root
 - **Process-kill restriction** — only server-spawned PIDs can be terminated
 - **SHA-256 checksum verification** — update command verifies downloaded binary before installing

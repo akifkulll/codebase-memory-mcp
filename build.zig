@@ -15,7 +15,6 @@ const Config = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     with_zova: bool,
-    with_ui: bool,
     zova_root: []const u8,
     sanitize: Sanitizer,
     static_link: bool,
@@ -27,7 +26,6 @@ pub fn build(b: *std.Build) void {
         .target = b.standardTargetOptions(.{}),
         .optimize = b.standardOptimizeOption(.{}),
         .with_zova = b.option(bool, "with-zova", "Build with Zova C ABI support") orelse false,
-        .with_ui = b.option(bool, "with-ui", "Use embedded UI assets instead of the stub") orelse false,
         .zova_root = b.option([]const u8, "zova-root", "Path to the local Zova checkout") orelse "../zova",
         .sanitize = b.option(Sanitizer, "sanitize", "Sanitizer mode: none, address, thread") orelse .none,
         .static_link = b.option(bool, "static", "Request static system library linkage where supported") orelse false,
@@ -38,7 +36,7 @@ pub fn build(b: *std.Build) void {
         checkZovaInputs(b, cfg);
     }
 
-    const cbm_exe = addCbmExecutable(b, cfg, .prod, cfg.with_ui);
+    const cbm_exe = addCbmExecutable(b, cfg, .prod);
     const cbm_copy = copyArtifact(b, cbm_exe, "build/c/codebase-memory-mcp");
     const cbm_step = b.step("cbm", "Build build/c/codebase-memory-mcp");
     cbm_step.dependOn(&cbm_copy.step);
@@ -75,18 +73,8 @@ pub fn build(b: *std.Build) void {
     );
 
     _ = addRunSuiteStep(b, "test", "Run the full C test runner", test_runner, null, null);
-    const test_cli_step = addRunSuiteStep(b, "test-cli", "Run focused CLI tests", test_runner, "cli", null);
-    const test_mcp_step = addRunSuiteStep(b, "test-mcp", "Run focused MCP tests", test_runner, "mcp", null);
-
-    const test_ui_step = addUiStep(b, "test-ui", "Run graph-ui tests with Bun", &.{ "bun", "run", "test" });
-    const test_ui_build_step = addUiStep(b, "test-ui-build", "Build graph-ui with Bun", &.{ "bun", "run", "build" });
-
-    const focused = b.step("test-focused-cli-ui", "Run focused CLI/MCP/UI checks and build cbm");
-    focused.dependOn(test_cli_step);
-    focused.dependOn(test_mcp_step);
-    focused.dependOn(test_ui_step);
-    focused.dependOn(test_ui_build_step);
-    focused.dependOn(cbm_step);
+    _ = addRunSuiteStep(b, "test-cli", "Run focused CLI tests", test_runner, "cli", null);
+    _ = addRunSuiteStep(b, "test-mcp", "Run focused MCP tests", test_runner, "mcp", null);
 
     addZovaSuiteStep(b, cfg, test_runner, "test-zova-link", "off", "zova");
     addZovaSuiteStep(b, cfg, test_runner, "test-zova-container", "container", "zova");
@@ -97,15 +85,6 @@ pub fn build(b: *std.Build) void {
     addZovaSuiteStep(b, cfg, test_runner, "test-zova-bridge", "container", "zova_bridge");
     addZovaSuiteStep(b, cfg, test_runner, "test-zova-graph-mirror", "graph_mirror", "zova");
     addZovaRealRepoStep(b, cfg, cbm_copy, test_runner_copy);
-
-    const cbm_with_ui = b.step("cbm-with-ui", "Build UI-capable binary through the current embed flow");
-    const ui_build = b.addSystemCommand(&.{ "make", "-f", "Makefile.cbm", "cbm-with-ui" });
-    cbm_with_ui.dependOn(&ui_build.step);
-
-    const test_install_ui = b.step("test-install-ui-success", "Verify UI-capable install --ui succeeds");
-    const install_ui = b.addSystemCommand(&.{ "bash", "scripts/test-install-ui-success.sh" });
-    install_ui.step.dependOn(cbm_with_ui);
-    test_install_ui.dependOn(&install_ui.step);
 
     const test_install_safety =
         b.step("test-install-safety", "Verify installer replacement and idempotency safeguards");
@@ -148,9 +127,9 @@ fn checkZovaInputs(b: *std.Build, cfg: Config) void {
     }
 }
 
-fn addCbmExecutable(b: *std.Build, cfg: Config, kind: BuildKind, with_ui_assets: bool) *std.Build.Step.Compile {
+fn addCbmExecutable(b: *std.Build, cfg: Config, kind: BuildKind) *std.Build.Step.Compile {
     const module = createCModule(b, cfg, kind);
-    addNativeSources(b, module, cfg, kind, false, with_ui_assets);
+    addNativeSources(b, module, cfg, kind, false);
     module.addCSourceFile(.{
         .file = b.path("src/main.c"),
         .flags = flags(b, cfg, kind, .normal),
@@ -164,7 +143,7 @@ fn addCbmExecutable(b: *std.Build, cfg: Config, kind: BuildKind, with_ui_assets:
 
 fn addTestSupportLibrary(b: *std.Build, cfg: Config) *std.Build.Step.Compile {
     const module = createCModule(b, cfg, .tests);
-    addNativeSources(b, module, cfg, .tests, true, false);
+    addNativeSources(b, module, cfg, .tests, true);
     return b.addLibrary(.{
         .name = "cbm_test_support",
         .linkage = .static,
@@ -342,7 +321,6 @@ fn addNativeSources(
     cfg: Config,
     kind: BuildKind,
     defer_zova_runtime: bool,
-    with_ui_assets: bool,
 ) void {
     module.addCSourceFile(.{ .file = b.path("vendored/mimalloc/src/static.c"), .flags = flags(b, cfg, kind, .mimalloc) });
 
@@ -360,7 +338,6 @@ fn addNativeSources(
     module.addAssemblyFile(b.path("vendored/nomic/code_vectors_blob.S"));
 
     module.addCSourceFiles(.{ .files = &native_sources, .flags = flags(b, cfg, kind, .normal) });
-    module.addCSourceFiles(.{ .files = uiSources(with_ui_assets), .flags = flags(b, cfg, kind, .normal) });
 
     if (cfg.with_zova) {
         if (!defer_zova_runtime) {
@@ -492,14 +469,6 @@ fn addZovaRealRepoStep(
     step.dependOn(&run.step);
 }
 
-fn addUiStep(b: *std.Build, name: []const u8, desc: []const u8, argv: []const []const u8) *std.Build.Step {
-    const run = b.addSystemCommand(argv);
-    run.setCwd(b.path("graph-ui"));
-    const step = b.step(name, desc);
-    step.dependOn(&run.step);
-    return step;
-}
-
 fn grammarSources(b: *std.Build) []const []const u8 {
     var dir = b.root.root_dir.handle.openDir(b.graph.io, "internal/cbm", .{ .iterate = true }) catch @panic("unable to open internal/cbm");
     defer dir.close(b.graph.io);
@@ -512,22 +481,6 @@ fn grammarSources(b: *std.Build) []const []const u8 {
         list.append(b.allocator, b.pathJoin(&.{ "internal/cbm", entry.name })) catch @panic("OOM");
     }
     return list.toOwnedSlice(b.allocator) catch @panic("OOM");
-}
-
-fn uiSources(with_assets: bool) []const []const u8 {
-    return if (with_assets) &.{
-        "src/ui/config.c",
-        "src/ui/http_server.c",
-        "src/ui/layout3d.c",
-        "src/ui/httpd.c",
-        "src/ui/embedded_assets.c",
-    } else &.{
-        "src/ui/config.c",
-        "src/ui/http_server.c",
-        "src/ui/layout3d.c",
-        "src/ui/httpd.c",
-        "src/ui/embedded_stub.c",
-    };
 }
 
 const native_sources = [_][]const u8{
@@ -734,8 +687,6 @@ const all_test_sources = [_][]const u8{
     "tests/test_traces.c",
     "tests/test_cli.c",
     "tests/test_mem.c",
-    "tests/test_ui.c",
-    "tests/test_httpd.c",
     "tests/test_security.c",
     "tests/test_yaml.c",
     "tests/test_semantic.c",

@@ -9,7 +9,6 @@ This page documents the configuration files that `codebase-memory-mcp` reads or 
 | Global custom extension mapping | `$XDG_CONFIG_HOME/codebase-memory-mcp/config.json` | JSON | Falls back to `~/.config/codebase-memory-mcp/config.json` when `XDG_CONFIG_HOME` is unset. |
 | Per-project custom extension mapping | `{repo_root}/.codebase-memory.json` | JSON | Overrides conflicting global `extra_extensions` entries. |
 | CLI-managed runtime settings | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/_config.db` | SQLite | Written by `codebase-memory-mcp config set/reset`. |
-| UI settings | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/config.json` | JSON | Stores `ui_enabled` and `ui_port`. |
 
 ## 1. Custom File Extension Mapping
 
@@ -82,42 +81,20 @@ Current keys:
 | `auto_index` | `false` | Automatically index new projects when an MCP session starts. |
 | `auto_index_limit` | `50000` | Maximum file count allowed for automatic indexing of a new project. |
 
-## 3. UI Settings
-
-The optional built-in graph UI stores its settings in:
-
-```text
-${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/config.json
-```
-
-Current format:
-
-```json
-{
-  "ui_enabled": false,
-  "ui_port": 9749
-}
-```
-
-Notes:
-
-- If the UI-enabled binary has embedded assets and no UI config file exists yet, the UI auto-enables on first run.
-- `CBM_CACHE_DIR` changes both the UI config location and the runtime settings database location.
-
-## 4. Environment Variables
+## 3. Environment Variables
 
 These environment variables affect runtime behavior:
 
 | Variable | Default | Description |
 |---|---|---|
 | `CBM_ALLOWED_ROOT` | *(unset)* | Restrict `index_repository` to paths within this directory. When set, a `repo_path` that resolves (after symlink / `..` resolution) outside this root is refused; unset imposes no restriction. Useful when the server may be driven by an untrusted caller (agentic or multi-tenant deployments). |
-| `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | Override the cache directory used for indexes, `_config.db`, and UI `config.json`. |
+| `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | Override the cache directory used for indexes and `_config.db`. |
 | `CBM_DIAGNOSTICS` | `false` | Enable periodic diagnostics output to `/tmp/cbm-diagnostics-<pid>.json`. |
 | `CBM_DOWNLOAD_URL` | GitHub releases | Override the update download URL. |
 | `CBM_LOG_LEVEL` | `info` | Set stderr log level to `debug`, `info`, `warn`, `error`, or `none` (or `0`-`4`). |
 | `CBM_WORKERS` | auto-detected | Set the indexing worker count. `0` selects the sequential path; `1`–`256` selects an explicit worker count. |
 
-## 5. Agent and Editor Integration Files
+## 4. Agent and Editor Integration Files
 
 The `install` command can also write MCP entries and instruction blocks into agent/editor config files such as Claude Code, Codex, Gemini, VS Code, Cursor, Zed, and others.
 

@@ -6,7 +6,7 @@ Contributions are welcome. This guide covers setup, testing, and PR guidelines.
 
 ## Build from Source
 
-**Prerequisites**: C compiler (gcc or clang), make, zlib, Git. Optional: Node.js 22+ (for graph UI).
+**Prerequisites**: C compiler (gcc or clang), make, zlib, Git.
 
 ```bash
 git clone https://github.com/DeusData/codebase-memory-mcp.git
@@ -62,10 +62,8 @@ src/
   discover/         File discovery with gitignore support
   watcher/          Git-based background auto-sync
   cli/              CLI subcommands (install, update, uninstall, config)
-  ui/               Graph visualization HTTP server (first-party httpd)
 internal/cbm/       Tree-sitter AST extraction (64 languages, vendored C grammars)
 vendored/           sqlite3, yyjson, mimalloc, xxhash, tre, nomic
-graph-ui/           React/Three.js frontend for graph visualization
 scripts/            Build, test, lint, security audit scripts
 tests/              All C test files
 ```
@@ -153,7 +151,7 @@ If in doubt, open an issue and ask.
 
 We take security seriously. All PRs go through:
 - Manual security review (dangerous calls, network access, file writes, prompt injection)
-- Automated 8-layer security audit in CI
+- Automated 7-layer security audit in CI
 - Vendored dependency integrity checks
 
 If you add a new `system()`, `popen()`, `fork()`, or network call, it must be justified and added to `scripts/security-allowlist.txt`.

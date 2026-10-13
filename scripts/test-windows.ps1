@@ -6,7 +6,7 @@
     Builds the product binary (build/c/codebase-memory-mcp.exe) if it is not
     already present, then runs the deterministic Windows integration tests under
     tests/windows/ against a real codebase-memory-mcp.exe (real stdio / CLI /
-    HTTP UI, real SQLite DB).
+    real SQLite DB).
 
     Two categories of test:
 
@@ -15,7 +15,6 @@
                     regressed and fails this runner.
                       * test_non_ascii_path.py    guards #636/#357 (fixed by #700)
                       * test_hook_augment.py      guards #618      (fixed by #619)
-                      * test_ui_drive_listing.py  guards #548      (roots field)
                       * test_cli_non_ascii_arg.py guards #423/#20  (wide-argv main())
 
       KNOWN REDS  - genuine, still-open Windows bugs reproduced at the product
@@ -37,12 +36,7 @@
 
 .PARAMETER Binary
     Path to an existing codebase-memory-mcp.exe. If omitted, the script builds it
-    (target selected by -Target) into build/c/.
-
-.PARAMETER Target
-    Makefile.cbm target used when building: 'cbm-with-ui' (default; needed for the
-    drive-picker guard's embedded HTTP UI) or 'cbm' (no UI - the drive guard then
-    reports a precondition and is skipped).
+    (Makefile.cbm target 'cbm') into build/c/.
 
 .PARAMETER GuardsOnly
     Run only the green guards (the CI gate). Skips the opt-in known-red repros.
@@ -59,8 +53,6 @@
 [CmdletBinding()]
 param(
     [string]$Binary,
-    [ValidateSet("cbm-with-ui", "cbm")]
-    [string]$Target = "cbm-with-ui",
     [switch]$GuardsOnly,
     [string]$Make = "make"
 )
@@ -85,8 +77,8 @@ function Resolve-Binary {
     if ($Explicit) { return (Resolve-Path $Explicit).Path }
     $built = Join-Path $repoRoot "build\c\codebase-memory-mcp.exe"
     if (Test-Path $built) { return $built }
-    Write-Host "Building $Target via Makefile.cbm ..." -ForegroundColor Cyan
-    & $Make "-j" "-f" "Makefile.cbm" $Target "SANITIZE=" "TMP=$tmp" "TEMP=$tmp" "TMPDIR=$tmp"
+    Write-Host "Building cbm via Makefile.cbm ..." -ForegroundColor Cyan
+    & $Make "-j" "-f" "Makefile.cbm" "cbm" "SANITIZE=" "TMP=$tmp" "TEMP=$tmp" "TMPDIR=$tmp"
     if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
     if (-not (Test-Path $built)) { throw "binary not produced at $built" }
     return $built
@@ -99,13 +91,11 @@ $env:PYTHONUTF8 = "1"           # encode argv/stdio as UTF-8
 $env:CBM_INDEX_SUPERVISOR = "0" # in-process indexing (see .DESCRIPTION)
 
 # Green regression guards - must stay GREEN (exit 0). RED (exit 1) = the fix for
-# the referenced issue regressed. The drive-picker guard needs the embedded HTTP
-# UI (build target cbm-with-ui); against a non-UI binary it reports a precondition
-# (exit 2) and is skipped rather than failed.
+# the referenced issue regressed. A guard that reports a precondition (exit 2)
+# is skipped rather than failed.
 $guards = @(
     "tests\windows\test_non_ascii_path.py",
     "tests\windows\test_hook_augment.py",
-    "tests\windows\test_ui_drive_listing.py",
     "tests\windows\test_cli_non_ascii_arg.py"
 )
 
@@ -152,8 +142,7 @@ if (-not $GuardsOnly) {
 
 Write-Host ""
 if ($guardSkips.Count -gt 0) {
-    Write-Host ("Guards skipped (precondition): {0} - e.g. the drive-picker guard " -f $guardSkips.Count) -ForegroundColor Yellow
-    Write-Host "needs a UI build (-Target cbm-with-ui, the default)." -ForegroundColor Yellow
+    Write-Host ("Guards skipped (precondition): {0}" -f $guardSkips.Count) -ForegroundColor Yellow
 }
 if ($fixedKeepers.Count -gt 0) {
     Write-Host ("Known-red repros that are now GREEN (promote to guards): {0}" -f ($fixedKeepers -join ", ")) -ForegroundColor Green

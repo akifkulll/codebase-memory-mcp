@@ -21,14 +21,10 @@ if (-not $BaseUrl.StartsWith("https://") -and -not $BaseUrl.StartsWith("http://l
     exit 1
 }
 
-# Detect variant from args (--ui or --standard)
-$Variant = "standard"
 $SkipConfig = $false
 $Replace = $false
 $ReplaceConfig = $false
 foreach ($arg in $args) {
-    if ($arg -eq "--ui") { $Variant = "ui" }
-    if ($arg -eq "--standard") { $Variant = "standard" }
     if ($arg -eq "--skip-config") { $SkipConfig = $true }
     if ($arg -eq "--replace") { $Replace = $true }
     if ($arg -eq "--replace-config") { $ReplaceConfig = $true }
@@ -58,30 +54,21 @@ if ($env:CBM_ARCH) {
 }
 
 Write-Host "codebase-memory-mcp installer (Windows)"
-Write-Host "  variant: $Variant"
 Write-Host "  arch:    $Arch"
 Write-Host "  target:  $InstallDir\$BinName"
 Write-Host ""
 
 # Build download URL
-if ($Variant -eq "ui") {
-    $Archive = "codebase-memory-mcp-ui-windows-$Arch.zip"
-} else {
-    $Archive = "codebase-memory-mcp-windows-$Arch.zip"
-}
+$Archive = "codebase-memory-mcp-windows-$Arch.zip"
 $Url = "$BaseUrl/$Archive"
 
 # Release archives include this installer beside the exact binary they were
 # built with. Prefer that binary so an extracted release installs reproducibly
 # and works offline. The one-line installer falls back to the latest release.
 $TmpDir = $null
-$BundledName = if ($Variant -eq "ui") { "codebase-memory-mcp-ui.exe" } else { $BinName }
 $BundledBin = $null
 if ($PSScriptRoot) {
-    $BundledBin = Join-Path $PSScriptRoot $BundledName
-    if (-not (Test-Path $BundledBin) -and $Variant -eq "ui") {
-        $BundledBin = Join-Path $PSScriptRoot $BinName
-    }
+    $BundledBin = Join-Path $PSScriptRoot $BinName
 }
 
 if ($BundledBin -and (Test-Path $BundledBin)) {
@@ -137,14 +124,9 @@ if ($BundledBin -and (Test-Path $BundledBin)) {
 
     $DlBin = Join-Path $TmpDir $BinName
     if (-not (Test-Path $DlBin)) {
-        $UiBin = Join-Path $TmpDir "codebase-memory-mcp-ui.exe"
-        if (Test-Path $UiBin) {
-            $DlBin = $UiBin
-        } else {
-            Write-Host "error: binary not found after extraction" -ForegroundColor Red
-            Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
-            exit 1
-        }
+        Write-Host "error: binary not found after extraction" -ForegroundColor Red
+        Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
+        exit 1
     }
 }
 
@@ -206,7 +188,6 @@ if ($SkipConfig) {
     Write-Host ""
     Write-Host "Configuring coding agents..."
     $ConfigArgs = @("install", "-y")
-    if ($Variant -eq "ui") { $ConfigArgs += "--ui" }
     if ($ReplaceConfig) { $ConfigArgs += "--replace-config" }
     & $Dest @ConfigArgs 2>&1 | Write-Host
     if ($LASTEXITCODE -ne 0) {

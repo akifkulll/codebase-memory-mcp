@@ -77,7 +77,6 @@ extern void suite_repro_issue403(void);
 extern void suite_repro_issue434(void);
 extern void suite_repro_issue471(void);
 extern void suite_repro_issue221(void);
-extern void suite_repro_issue548(void);
 extern void suite_repro_issue363(void);
 extern void suite_repro_issue581(void);
 extern void suite_repro_issue787(void);
@@ -159,7 +158,6 @@ int main(void) {
     RUN_SUITE(repro_issue434);
     RUN_SUITE(repro_issue471);
     RUN_SUITE(repro_issue221);
-    RUN_SUITE(repro_issue548);
     RUN_SUITE(repro_new_ts_class_field_arrow);
     RUN_SUITE(repro_new_py_tuple_unpack);
     RUN_SUITE(repro_new_cypher_limit_zero);

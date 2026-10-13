@@ -7,7 +7,7 @@ authority=(
   zova_operations zova zova_c_sql_functions zova_bridge zova_plugin zova_incremental_native
 )
 mcp_query=(
-  mcp cypher cli integration security ui httpd
+  mcp cypher cli integration security
 )
 pipeline=(
   graph_buffer registry pipeline index_resilience fqn route_canon path_alias watcher

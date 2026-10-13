@@ -49,12 +49,10 @@
 /src/semantic/ @DeusData
 /src/simhash/ @DeusData
 /src/traces/ @DeusData
-/src/ui/ @DeusData
 
-# Extraction, language support, and graph UI.
+# Extraction and language support.
 /internal/cbm/ @DeusData
 /tools/ @DeusData
-/graph-ui/ @DeusData
 
 # Test and reproduction infrastructure.
 /tests/ @DeusData

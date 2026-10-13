@@ -216,8 +216,6 @@ extern void suite_system_info(void);
 extern void suite_worker_pool(void);
 extern void suite_parallel(void);
 extern void suite_mem(void);
-extern void suite_ui(void);
-extern void suite_httpd(void);
 extern void suite_security(void);
 extern void suite_yaml(void);
 extern void suite_integration(void);
@@ -429,12 +427,6 @@ int main(int argc, char **argv) {
     /* mem + arena + slab integration */
     RUN_SELECTED_SUITE(slab_alloc);
     RUN_SELECTED_SUITE(mem);
-
-    /* UI (config, embedded assets, layout) */
-    RUN_SELECTED_SUITE(ui);
-
-    /* UI HTTP server (transport + routing) */
-    RUN_SELECTED_SUITE(httpd);
 
     /* Security defenses */
     RUN_SELECTED_SUITE(security);

@@ -5,7 +5,6 @@ set -euo pipefail
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/0ctacity/codebase-memory-mcp/main/install.sh | bash
-#   curl -fsSL ... | bash -s -- --ui          # Install the UI variant
 #   curl -fsSL ... | bash -s -- --dir /path   # Custom install directory
 #
 # Environment:
@@ -19,7 +18,6 @@ main() {
 
 REPO="0ctacity/codebase-memory-mcp"
 INSTALL_DIR="$HOME/.local/bin"
-VARIANT="standard"
 SKIP_CONFIG=false
 REPLACE=false
 REPLACE_CONFIG=false
@@ -44,16 +42,13 @@ esac
 
 for arg in "$@"; do
     case "$arg" in
-        --ui)           VARIANT="ui" ;;
-        --standard)     VARIANT="standard" ;;
+        --standard)     ;; # accepted for compatibility; there is one variant
         --dir=*)        INSTALL_DIR="${arg#--dir=}" ;;
         --skip-config)  SKIP_CONFIG=true ;;
         --replace)      REPLACE=true ;;
         --replace-config) REPLACE_CONFIG=true ;;
         --help|-h)
-            echo "Usage: install.sh [--ui] [--dir=<path>] [--skip-config] [--replace] [--replace-config]"
-            echo "  --ui           Install the UI variant (with graph visualization)"
-            echo "  --standard     Install the standard variant (default)"
+            echo "Usage: install.sh [--dir=<path>] [--skip-config] [--replace] [--replace-config]"
             echo "  --dir PATH     Install directory (default: ~/.local/bin)"
             echo "  --skip-config  Skip automatic agent configuration"
             echo "  --replace      Replace a different binary already at the target"
@@ -103,7 +98,6 @@ ARCH=$(detect_arch)
 echo "codebase-memory-mcp installer"
 echo "  os:      $OS"
 echo "  arch:    $ARCH"
-echo "  variant: $VARIANT"
 echo "  target:  $INSTALL_DIR/codebase-memory-mcp"
 echo ""
 
@@ -120,11 +114,7 @@ fi
 PORTABLE=""
 [ "$OS" = "linux" ] && PORTABLE="-portable"
 
-if [ "$VARIANT" = "ui" ]; then
-    ARCHIVE="codebase-memory-mcp-ui-${OS}-${ARCH}${PORTABLE}.${EXT}"
-else
-    ARCHIVE="codebase-memory-mcp-${OS}-${ARCH}${PORTABLE}.${EXT}"
-fi
+ARCHIVE="codebase-memory-mcp-${OS}-${ARCH}${PORTABLE}.${EXT}"
 
 URL="${CBM_DOWNLOAD_URL}/${ARCHIVE}"
 
@@ -292,7 +282,6 @@ else
     echo "Configuring coding agents..."
     CONFIG_ARGS=(install -y)
     [ "$REPLACE_CONFIG" != true ] || CONFIG_ARGS+=(--replace-config)
-    [ "$VARIANT" != "ui" ] || CONFIG_ARGS+=(--ui)
     "$DEST" "${CONFIG_ARGS[@]}" 2>&1 || {
         echo ""
         echo "error: agent configuration was not changed." >&2

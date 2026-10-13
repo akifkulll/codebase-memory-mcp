@@ -59,21 +59,16 @@ while IFS= read -r file; do
 done < <(find "$ROOT/src" -name '*.c' -type f | sort)
 
 # ── 1b. Raw network calls (must not exist) ──────────────────────
-#
-# The graph-UI HTTP server (src/ui/httpd.c) is the one component that owns a
-# listening socket. It is first-party, binds 127.0.0.1 only, and is audited
-# separately by scripts/security-ui.sh (binding + CORS checks), so it is
-# exempt from this scan. No other source file may make raw network calls.
 
 echo ""
 echo "--- Scanning for raw network calls (must not exist) ---"
 
 NETWORK_FUNCS='[^a-z_]connect\(|[^a-z_]socket\(|[^a-z_]sendto\('
-if grep -rn -E "$NETWORK_FUNCS" "$ROOT/src/" --include='*.c' 2>/dev/null | grep -v '^\s*//' | grep -v '^\s*\*' | grep -v 'test' | grep -v 'src/ui/httpd.c'; then
+if grep -rn -E "$NETWORK_FUNCS" "$ROOT/src/" --include='*.c' 2>/dev/null | grep -v '^\s*//' | grep -v '^\s*\*' | grep -v 'test'; then
     echo "BLOCKED: Raw network calls found in src/."
     fail
 else
-    echo "OK: No raw network calls outside the graph-UI server."
+    echo "OK: No raw network calls."
 fi
 
 # ── 2. Hardcoded URLs in string literals ─────────────────────────
@@ -175,7 +170,7 @@ while IFS= read -r match; do
     file=$(echo "$match" | cut -d: -f1)
     relfile="${file#"$ROOT/"}"
     case "$relfile" in
-        src/cli/cli.c|src/store/store.c|src/pipeline/*.c|src/foundation/log.c|src/foundation/diagnostics.c|src/ui/http_server.c|src/ui/config.c|src/mcp/mcp.c)
+        src/cli/cli.c|src/store/store.c|src/pipeline/*.c|src/foundation/log.c|src/foundation/diagnostics.c|src/mcp/mcp.c)
             ;; # Known safe (diagnostics.c: atomic .tmp+rename metrics dump to configured path)
         *)
             echo "REVIEW: ${match}"

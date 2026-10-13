@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# build.sh — Clean build of production binary (standard or with UI).
+# build.sh — Clean build of production binary.
 #
 # Usage:
 #   scripts/build.sh                              # Standard binary
-#   scripts/build.sh --with-ui                    # Binary with embedded UI
 #   scripts/build.sh --version v0.8.0             # With version stamp
 #   scripts/build.sh --arch x86_64                # Force x86_64 build
 #   scripts/build.sh CC=gcc-14 CXX=g++-14        # Override compiler
@@ -34,7 +33,6 @@ done
 source "$ROOT/scripts/env.sh"
 
 # Parse remaining arguments
-WITH_UI=false
 WITH_ZOVA=false
 VERSION=""
 EXTRA_MAKE_ARGS=()
@@ -47,9 +45,6 @@ for arg in "$@"; do
         continue
     fi
     case "$arg" in
-        --with-ui)
-            WITH_UI=true
-            ;;
         CBM_WITH_ZOVA=1)
             WITH_ZOVA=true
             EXTRA_MAKE_ARGS+=("$arg")
@@ -84,12 +79,12 @@ if [[ -n "$VERSION" ]]; then
 fi
 
 print_env "build.sh"
-echo "  ui=$WITH_UI zova=$WITH_ZOVA version=${VERSION:-dev}"
+echo "  zova=$WITH_ZOVA version=${VERSION:-dev}"
 
 # Verify compiler supports target arch
 verify_compiler "$CC"
 
-# Step 1: Clean C build artifacts only (not node_modules — npm ci handles that)
+# Step 1: Clean C build artifacts
 rm -rf "$ROOT/build/c"
 if [[ -n "${CBM_PREBUILT_ZIG_DIR:-}" ]]; then
     for artifact in libcbm_cli_zig.a cbm_zova_bridge.o; do
@@ -105,10 +100,7 @@ if [[ -n "${CBM_PREBUILT_ZIG_DIR:-}" ]]; then
 fi
 
 # Step 2: Build (Makefile applies $ARCHFLAGS for the target arch on macOS)
-if $WITH_UI; then
-    make -j"$NPROC" -f Makefile.cbm cbm-with-ui \
-        CFLAGS_EXTRA="$CFLAGS_EXTRA" "${EXTRA_MAKE_ARGS[@]+"${EXTRA_MAKE_ARGS[@]}"}"
-elif $WITH_ZOVA; then
+if $WITH_ZOVA; then
     make -j"$NPROC" -f Makefile.cbm build/c/codebase-memory-mcp \
         CFLAGS_EXTRA="$CFLAGS_EXTRA" "${EXTRA_MAKE_ARGS[@]+"${EXTRA_MAKE_ARGS[@]}"}"
 else

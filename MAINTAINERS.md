@@ -39,9 +39,8 @@ review areas for future co-maintainers.
 | Language extraction and LSP resolution | `internal/cbm/`, `tools/`, `tests/test_*_lsp.c`, `tests/test_extraction.c`, `tests/test_grammar_*.c` | TBD | `@DeusData` |
 | Store, query, and graph buffers | `src/store/`, `src/cypher/`, `src/graph_buffer/`, `src/simhash/`, `src/semantic/`, `tests/test_store_*.c`, `tests/test_cypher.c` | TBD | `@DeusData` |
 | Foundation/runtime portability | `src/foundation/`, `vendored/`, `tests/test_*` foundation coverage | TBD | `@DeusData` |
-| Graph UI backend and frontend | `src/ui/`, `graph-ui/`, `tests/test_ui.c`, `tests/test_httpd.c` | TBD | `@DeusData` |
 | Tests, repro, smoke, and soak infrastructure | `tests/`, `tests/repro/`, `test-infrastructure/`, `scripts/test.sh`, `scripts/smoke-test.sh`, `scripts/soak-test.sh` | TBD | `@DeusData` |
-| Packaging and distribution | `pkg/`, `install.sh`, `install.ps1`, `server.json`, `glama.json`, `flake.nix`, `flake.lock`, `THIRD_PARTY.md`, `scripts/gen-third-party-notices.sh`, `scripts/gen-ui-licenses.py`, release archive contents | TBD | `@DeusData` |
+| Packaging and distribution | `pkg/`, `install.sh`, `install.ps1`, `server.json`, `glama.json`, `flake.nix`, `flake.lock`, `THIRD_PARTY.md`, `scripts/gen-third-party-notices.sh`, release archive contents | TBD | `@DeusData` |
 | Security and supply chain | `SECURITY.md`, `docs/SECURITY-DISCLOSURE.md`, `scripts/security-*`, `scripts/*license*`, `scripts/*allowlist*`, `.github/workflows/codeql.yml`, `.github/workflows/scorecard.yml` | `@DeusData` only initially | `@DeusData` |
 | CI and release operations | `.github/workflows/`, `scripts/ci/`, `Makefile.cbm` | `@DeusData` only initially | `@DeusData` |
 | Governance and contribution policy | `.github/CODEOWNERS`, `MAINTAINERS.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `DCO`, `LICENSE`, `.github/pull_request_template.md`, issue templates | `@DeusData` only initially | `@DeusData` |

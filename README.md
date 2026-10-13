@@ -45,12 +45,6 @@ Full indexing remains the current tradeoff. Zova's advantage is strongest for re
 
 > **Security & Trust** — This tool reads your codebase and writes to your agent configuration files. Audit the [fork source](https://github.com/0ctacity/codebase-memory-mcp) before running if required. Indexing and queries run locally; source code is not sent to a hosted service. Report security issues through [SECURITY.md](SECURITY.md).
 
-<p align="center">
-  <img src="docs/graph-ui-screenshot.png" alt="Graph visualization UI showing the codebase-memory-mcp knowledge graph" width="800">
-  <br>
-  <em>Built-in 3D graph visualization (UI variant) — explore your knowledge graph at localhost:9749</em>
-</p>
-
 ## Why this fork
 
 - **Fast updates after the first index** — native delta publication makes incremental indexing 51.6%–76.9% faster in the current TOPS and Deno benchmarks.
@@ -60,7 +54,6 @@ Full indexing remains the current tradeoff. Zova's advantage is strongest for re
 - **158 languages** — vendored tree-sitter grammars compiled into the binary. Nothing to install, nothing that breaks.
 - **120x fewer tokens** — 5 structural queries: ~3,400 tokens vs ~412,000 via file-by-file search. One graph query replaces dozens of grep/read cycles.
 - **11 agents, one command** — `install` auto-detects Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode, VS Code, OpenClaw, and Kiro — configures MCP entries, instruction files, and pre-tool hooks for each.
-- **Built-in graph visualization** — 3D interactive UI at `localhost:9749` (optional UI binary variant).
 - **Infrastructure-as-code indexing** — Dockerfiles, Kubernetes manifests, and Kustomize overlays indexed as graph nodes with cross-references. `Resource` nodes for K8s kinds, `Module` nodes for Kustomize overlays with `IMPORTS` edges to referenced resources.
 - **14 MCP tools** — search, trace, architecture, impact analysis, Cypher queries, dead code detection, cross-service HTTP linking, ADR management, and more.
 
@@ -74,11 +67,6 @@ curl -fsSL https://raw.githubusercontent.com/0ctacity/codebase-memory-mcp/main/i
 The installer is non-destructive by default. If a different binary or MCP
 configuration already exists, replacement must be authorized explicitly with
 `--replace` or `--replace-config`.
-
-With graph visualization UI:
-```bash
-curl -fsSL https://raw.githubusercontent.com/0ctacity/codebase-memory-mcp/main/install.sh | bash -s -- --ui
-```
 
 **Windows** (PowerShell):
 ```powershell
@@ -98,7 +86,7 @@ Unblock-File .\install.ps1
 
 > **Note:** If you see a script execution policy error, run `Set-ExecutionPolicy -Scope Process Bypass` first, or invoke with `PowerShell -ExecutionPolicy Bypass -File .\install.ps1`.
 
-Options: `--ui` (graph visualization), `--skip-config` (binary only, no agent setup), `--dir=<path>` (custom location).
+Options: `--skip-config` (binary only, no agent setup), `--dir=<path>` (custom location).
 
 Restart your coding agent. Say **"Index this project"** — done.
 
@@ -106,8 +94,7 @@ Restart your coding agent. Say **"Index this project"** — done.
 <summary>Manual install</summary>
 
 1. **Download** the archive for your platform from the [latest release](https://github.com/0ctacity/codebase-memory-mcp/releases/latest):
-   - `codebase-memory-mcp-<os>-<arch>.tar.gz` (macOS/Linux) or `.zip` (Windows) — standard
-   - `codebase-memory-mcp-ui-<os>-<arch>.tar.gz` / `.zip` — with graph visualization
+   - `codebase-memory-mcp-<os>-<arch>.tar.gz` (macOS/Linux) or `.zip` (Windows)
 
 2. **Extract and install** (each archive includes `install.sh` or `install.ps1`):
 
@@ -130,16 +117,6 @@ The `install` command automatically strips macOS quarantine attributes and ad-ho
 </details>
 
 The `install` command auto-detects all installed coding agents and configures MCP server entries, instruction files, skills, and pre-tool hooks for each.
-
-### Graph Visualization UI
-
-If you downloaded the `ui` variant:
-
-```bash
-codebase-memory-mcp --ui=true --port=9749
-```
-
-Open `http://localhost:9749` in your browser. The UI runs as a background thread alongside the MCP server — it's available whenever your agent is connected.
 
 ### Auto-Index
 
@@ -193,7 +170,6 @@ Removes the installed binary, agent configs, skills, hooks, and instructions. Th
 
 ### Cross-repo intelligence
 - **`CROSS_*` edges** link nodes across multiple repos indexed under the same store
-- **Multi-galaxy 3D UI layout** for cross-repo architecture visualization
 - **Cross-repo architecture summary** combining services, routes, and dependencies across the indexed fleet
 
 ### Edge types (selected)
@@ -297,16 +273,16 @@ When you open a memory/performance issue, **attach the `.ndjson` trajectory** �
 
 ### Pre-built Binaries
 
-| Platform | Standard | With Graph UI |
-|----------|----------|---------------|
-| macOS (Apple Silicon) | `codebase-memory-mcp-darwin-arm64.tar.gz` | `codebase-memory-mcp-ui-darwin-arm64.tar.gz` |
-| macOS (Intel) | `codebase-memory-mcp-darwin-amd64.tar.gz` | `codebase-memory-mcp-ui-darwin-amd64.tar.gz` |
-| Linux (x86_64) | `codebase-memory-mcp-linux-amd64.tar.gz` | `codebase-memory-mcp-ui-linux-amd64.tar.gz` |
-| Linux (ARM64) | `codebase-memory-mcp-linux-arm64.tar.gz` | `codebase-memory-mcp-ui-linux-arm64.tar.gz` |
-| Linux portable (x86_64) | `codebase-memory-mcp-linux-amd64-portable.tar.gz` | `codebase-memory-mcp-ui-linux-amd64-portable.tar.gz` |
-| Linux portable (ARM64) | `codebase-memory-mcp-linux-arm64-portable.tar.gz` | `codebase-memory-mcp-ui-linux-arm64-portable.tar.gz` |
-| Windows (x86_64) | `codebase-memory-mcp-windows-amd64.zip` | `codebase-memory-mcp-ui-windows-amd64.zip` |
-| Windows (ARM64) | `codebase-memory-mcp-windows-arm64.zip` | `codebase-memory-mcp-ui-windows-arm64.zip` |
+| Platform | Archive |
+|----------|---------|
+| macOS (Apple Silicon) | `codebase-memory-mcp-darwin-arm64.tar.gz` |
+| macOS (Intel) | `codebase-memory-mcp-darwin-amd64.tar.gz` |
+| Linux (x86_64) | `codebase-memory-mcp-linux-amd64.tar.gz` |
+| Linux (ARM64) | `codebase-memory-mcp-linux-arm64.tar.gz` |
+| Linux portable (x86_64) | `codebase-memory-mcp-linux-amd64-portable.tar.gz` |
+| Linux portable (ARM64) | `codebase-memory-mcp-linux-arm64-portable.tar.gz` |
+| Windows (x86_64) | `codebase-memory-mcp-windows-amd64.zip` |
+| Windows (ARM64) | `codebase-memory-mcp-windows-arm64.zip` |
 
 Every release includes `checksums.txt` with SHA-256 hashes, and the canonical
 installer refuses an unverified network download. The portable Linux archives
@@ -332,8 +308,7 @@ glibc. The installer selects portable Linux by default.
 ```bash
 git clone https://github.com/0ctacity/codebase-memory-mcp.git
 cd codebase-memory-mcp
-scripts/build.sh                    # standard binary
-scripts/build.sh --with-ui          # with graph visualization
+scripts/build.sh
 # Binary at: build/c/codebase-memory-mcp
 ```
 
@@ -692,7 +667,6 @@ per-project `.db` files are used only when the explicit compatibility mode
 | `trace_path` returns 0 results | Use `search_graph(name_pattern=".*PartialName.*")` first to find the exact name. |
 | Queries return wrong project results | Add `project="name"` parameter. Use `list_projects` to see names. |
 | Binary not found after install | Add to PATH: `export PATH="$HOME/.local/bin:$PATH"` |
-| UI not loading | Ensure you downloaded the `ui` variant and ran `--ui=true`. Check `http://localhost:9749`. |
 
 ## Hybrid LSP
 
@@ -749,7 +723,6 @@ src/
   discover/           File discovery (.gitignore, .cbmignore, symlink handling)
   watcher/            Background auto-sync (git polling, adaptive intervals)
   traces/             Runtime trace ingestion
-  ui/                 Embedded HTTP server + 3D graph visualization
   foundation/         Platform abstractions (threads, filesystem, logging, memory)
 internal/cbm/         Vendored tree-sitter grammars (158 languages) + AST extraction engine
 ```

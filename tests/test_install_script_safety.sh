@@ -24,7 +24,6 @@ esac
 PORTABLE=""
 [[ "$OS" == linux ]] && PORTABLE="-portable"
 ARCHIVE="codebase-memory-mcp-${OS}-${ARCH}${PORTABLE}.tar.gz"
-UI_ARCHIVE="codebase-memory-mcp-ui-${OS}-${ARCH}${PORTABLE}.tar.gz"
 
 make_release() {
     local marker=$1 stage="$TMP_ROOT/stage"
@@ -103,20 +102,6 @@ PATH="$FAKE_BIN_DIR:$PATH" CBM_DOWNLOAD_URL=http://localhost/releases \
     "$ROOT/install.sh"
 grep -qx 'install -y' "$INSTALL_LOG"
 
-# The UI variant must enable UI mode in the compiled installer.
-cp "$RELEASE_DIR/$ARCHIVE" "$RELEASE_DIR/$UI_ARCHIVE"
-if command -v sha256sum >/dev/null 2>&1; then
-    UI_HASH=$(sha256sum "$RELEASE_DIR/$UI_ARCHIVE" | awk '{print $1}')
-else
-    UI_HASH=$(shasum -a 256 "$RELEASE_DIR/$UI_ARCHIVE" | awk '{print $1}')
-fi
-printf '%s  ./%s\n' "$UI_HASH" "$UI_ARCHIVE" >> "$RELEASE_DIR/checksums.txt"
-: > "$INSTALL_LOG"
-HOME="$HOME_DIR" FAKE_RELEASE_DIR="$RELEASE_DIR" FAKE_INSTALL_LOG="$INSTALL_LOG" \
-PATH="$FAKE_BIN_DIR:$PATH" CBM_DOWNLOAD_URL=http://localhost/releases \
-    "$ROOT/install.sh" --ui
-grep -qx 'install -y --ui' "$INSTALL_LOG"
-
 # A source-hash receipt must not hide later modification of the installed file.
 printf '%s\n' tampered >> "$INSTALL_DIR/codebase-memory-mcp"
 if HOME="$HOME_DIR" FAKE_RELEASE_DIR="$RELEASE_DIR" \
@@ -157,7 +142,6 @@ fi
 grep -q 'REPO="0ctacity/codebase-memory-mcp"' "$ROOT/install.sh"
 grep -q '\$Repo = "0ctacity/codebase-memory-mcp"' "$ROOT/install.ps1"
 grep -q '\$AlreadyInstalled = \$true' "$ROOT/install.ps1"
-grep -q '\$ConfigArgs += "--ui"' "$ROOT/install.ps1"
 grep -q '\$PSScriptRoot' "$ROOT/install.ps1"
 grep -q 'canonical install.sh' "$ROOT/scripts/setup.sh"
 grep -q 'canonical install.ps1' "$ROOT/scripts/setup-windows.ps1"

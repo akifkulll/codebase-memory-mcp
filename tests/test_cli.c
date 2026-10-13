@@ -1849,12 +1849,6 @@ TEST(cli_install_refuses_conflicting_mcp_config_without_replace_config) {
     PASS();
 }
 
-TEST(cli_install_ui_rejects_non_ui_binary) {
-    char *args[] = {"--ui", "--dry-run"};
-    ASSERT_EQ(cbm_cmd_install(2, args), 1);
-    PASS();
-}
-
 TEST(cli_doctor_where_reports_paths) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-doctor-XXXXXX");
@@ -3650,7 +3644,6 @@ SUITE(cli) {
     RUN_TEST(cli_detect_agents_finds_cursor_issue222);
     RUN_TEST(cli_install_plan_receipt_no_mutation_issue388);
     RUN_TEST(cli_install_help_no_mutation);
-    RUN_TEST(cli_install_ui_rejects_non_ui_binary);
     RUN_TEST(cli_doctor_where_reports_paths);
     RUN_TEST(cli_codex_session_hook_issue330);
     RUN_TEST(cli_gemini_session_hook_parity);

@@ -59,9 +59,6 @@ export fn cbm_cli_zig_doctor_report(
     config_paths_ptr: [*:0]const u8,
     detected_agents_ptr: [*:0]const u8,
     path_ready: c_int,
-    ui_capable: c_int,
-    ui_enabled: c_int,
-    ui_port: c_int,
 ) callconv(.c) ?[*:0]u8 {
     const allocator = std.heap.c_allocator;
     var list: std.ArrayList(u8) = .empty;
@@ -85,12 +82,6 @@ export fn cbm_cli_zig_doctor_report(
 
     appendFmt(&list, allocator, "config paths\n", .{}) catch return null;
     appendLines(&list, allocator, cspan(config_paths_ptr), "(none)") catch return null;
-    appendFmt(&list, allocator, "\n", .{}) catch return null;
-
-    appendFmt(&list, allocator, "ui\n", .{}) catch return null;
-    appendFmt(&list, allocator, "  capable: {s}\n", .{yesNo(ui_capable)}) catch return null;
-    appendFmt(&list, allocator, "  enabled: {s}\n", .{yesNo(ui_enabled)}) catch return null;
-    appendFmt(&list, allocator, "  port: {d}\n", .{ui_port}) catch return null;
 
     return toCString(&list, allocator);
 }

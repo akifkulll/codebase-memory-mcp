@@ -107,8 +107,7 @@ else
     echo "OK: No subprocess calls (system/popen/exec/fork) in vendored code"
 fi
 
-# Network calls: not allowed in ANY vendored code. The graph-UI HTTP server
-# is first-party (src/ui/httpd.c) and audited separately by security-ui.sh.
+# Network calls: not allowed in ANY vendored code.
 NETWORK_FUNCS='[^a-z_]connect\(|[^a-z_]socket\(|[^a-z_]sendto\(|[^a-z_]bind\('
 VENDORED_NETWORK=$(grep -rn -E "$NETWORK_FUNCS" "$ROOT/vendored/" --include='*.c' --include='*.h' 2>/dev/null \
     | grep -v '^\s*//' | grep -v '^\s*\*' | grep -v '#define' | grep -v 'typedef' \

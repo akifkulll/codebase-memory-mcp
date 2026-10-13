@@ -41,16 +41,6 @@ mkdir -p "$(dirname "$OUT")"
         echo
         cat "$f"
     done
-
-    # With-ui packaging path: node_modules exists (make frontend ran npm ci),
-    # so append the license texts of the npm packages compiled into the UI
-    # bundle. Standard binaries carry no bundle — the section is skipped.
-    if [ -d "$ROOT/graph-ui/node_modules" ]; then
-        echo
-        echo "---"
-        echo
-        python3 "$ROOT/scripts/gen-ui-licenses.py" "$ROOT/graph-ui"
-    fi
 } > "$OUT"
 
 BYTES=$(wc -c < "$OUT" | tr -d ' ')
