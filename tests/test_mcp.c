@@ -1130,6 +1130,13 @@ TEST(tool_search_graph_flagged_reads_user_database_without_project_db) {
         "\"name\":\"search_graph\",\"arguments\":{\"project\":\"fixture\","
         "\"query\":\"alpha\"}}}");
     bool has_qn = response && strstr(response, "fixture.alpha");
+    char *words_response = cbm_mcp_server_handle(
+        srv,
+        "{\"jsonrpc\":\"2.0\",\"id\":910,\"method\":\"tools/call\",\"params\":{"
+        "\"name\":\"search_graph\",\"arguments\":{\"project\":\"fixture\","
+        "\"query\":\"alpha no-such-word\"}}}");
+    bool any_word_matches = words_response && strstr(words_response, "fixture.alpha");
+    free(words_response);
     char *metadata_response = cbm_mcp_server_handle(
         srv,
         "{\"jsonrpc\":\"2.0\",\"id\":909,\"method\":\"tools/call\",\"params\":{"
@@ -1490,6 +1497,7 @@ TEST(tool_search_graph_flagged_reads_user_database_without_project_db) {
     free(saved_cache_copy); free(saved_flag_copy); free(saved_mode_copy);
     ASSERT_NOT_NULL(response);
     ASSERT_TRUE(has_qn);
+    ASSERT_TRUE(any_word_matches);
     ASSERT_TRUE(has_properties);
     ASSERT_TRUE(has_vector_result);
     /* Semantic-only (no structural filter) must NOT run the unfiltered

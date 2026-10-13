@@ -1851,13 +1851,16 @@ static int bm25_build_match(const char *query, char *out, size_t out_size) {
         }
         const char *sep = (tokens > 0) ? " OR " : "";
         size_t sep_len = strlen(sep);
-        if (pos + sep_len + tok_len + BM25_SEP_RESERVE >= out_size) {
+        if (pos + sep_len + tok_len + 2 + BM25_SEP_RESERVE >= out_size) {
             break; /* out of room — stop cleanly, keep what we have */
         }
         memcpy(out + pos, sep, sep_len);
         pos += sep_len;
+        /* Quoted so a word such as OR or NOT is a term, not an FTS5 operator. */
+        out[pos++] = '"';
         memcpy(out + pos, tok_start, tok_len);
         pos += tok_len;
+        out[pos++] = '"';
         tokens++;
     }
     out[pos] = '\0';
@@ -2147,9 +2150,12 @@ static char *handle_search_graph_flagged(const char *args, char *project) {
                                   params.min_degree != CBM_NOT_FOUND ||
                                   params.max_degree != CBM_NOT_FOUND;
     int rc = CBM_STORE_OK;
+    char fts_query[BM25_QUERY_BUF];
     if (query && query[0]) {
-        rc = cbm_zova_repository_search_fts(repo, workspace_id, query, file_pattern,
-                                            params.limit, params.offset, &out);
+        if (bm25_build_match(query, fts_query, sizeof(fts_query)) > 0) {
+            rc = cbm_zova_repository_search_fts(repo, workspace_id, fts_query, file_pattern,
+                                                params.limit, params.offset, &out);
+        }
     } else if (has_structural_filters) {
         rc = cbm_zova_repository_search(repo, workspace_id, &params, &out);
     }
@@ -2418,9 +2424,12 @@ static char *handle_search_graph_catalog(const char *args,
                                   &semantic_total)
                             : CBM_STORE_ERR;
     } else if (!relationship || validate_edge_type(relationship)) {
+        char fts_query[BM25_QUERY_BUF];
         if (query && query[0]) {
-            search_status = cbm_zova_catalog_search_fts(
-                catalog, &scope, query, file_pattern, limit, offset, &output);
+            search_status = bm25_build_match(query, fts_query, sizeof(fts_query)) > 0
+                                ? cbm_zova_catalog_search_fts(catalog, &scope, fts_query,
+                                                              file_pattern, limit, offset, &output)
+                                : CBM_STORE_OK;
         } else {
             cbm_search_params_t params = {
                 .label = label,

@@ -2351,6 +2351,29 @@ static const char *json_extract_prop(const char *json, const char *key, char *bu
             buf[i++] = *p++;
         }
         buf[i] = '\0';
+    } else if (*p == '[' || *p == '{') {
+        /* Array or object value: copy through the matching close bracket */
+        size_t i = 0;
+        int depth = 0;
+        bool in_string = false;
+        while (*p && i < buf_sz - SKIP_ONE) {
+            char c = *p++;
+            buf[i++] = c;
+            if (in_string) {
+                if (c == '\\' && *p && i < buf_sz - SKIP_ONE) {
+                    buf[i++] = *p++;
+                } else if (c == '"') {
+                    in_string = false;
+                }
+            } else if (c == '"') {
+                in_string = true;
+            } else if (c == '[' || c == '{') {
+                depth++;
+            } else if ((c == ']' || c == '}') && --depth == 0) {
+                break;
+            }
+        }
+        buf[i] = '\0';
     } else {
         /* Numeric or other value */
         size_t i = 0;

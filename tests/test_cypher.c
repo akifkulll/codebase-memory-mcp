@@ -1756,7 +1756,8 @@ static cbm_store_t *setup_cypher_http_store(void) {
         .target_id = id3,
         .type = "HTTP_CALLS",
         .properties_json =
-            "{\"url_path\":\"/api/orders\",\"confidence\":0.85,\"method\":\"POST\"}"};
+            "{\"url_path\":\"/api/orders\",\"confidence\":0.85,\"method\":\"POST\","
+            "\"args\":[{\"i\":0,\"e\":\"a, b]\"},{\"i\":1,\"e\":\"c\"}],\"line\":7}"};
     cbm_store_insert_edge(s, &http);
 
     return s;
@@ -1837,7 +1838,7 @@ TEST(cypher_edge_prop_access) {
 
     int rc = cbm_cypher_execute(s,
                                 "MATCH (a:Function)-[r:HTTP_CALLS]->(b:Function) "
-                                "RETURN a.name, b.name, r.url_path, r.confidence",
+                                "RETURN a.name, b.name, r.url_path, r.confidence, r.args, r.line",
                                 "test", 0, &r);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(r.row_count, 1);
@@ -1845,6 +1846,9 @@ TEST(cypher_edge_prop_access) {
     ASSERT_STR_EQ(cypher_get_col(&r, 0, "b.name"), "SubmitOrder");
     ASSERT_STR_EQ(cypher_get_col(&r, 0, "r.url_path"), "/api/orders");
     ASSERT_STR_EQ(cypher_get_col(&r, 0, "r.confidence"), "0.85");
+    ASSERT_STR_EQ(cypher_get_col(&r, 0, "r.args"),
+                  "[{\"i\":0,\"e\":\"a, b]\"},{\"i\":1,\"e\":\"c\"}]");
+    ASSERT_STR_EQ(cypher_get_col(&r, 0, "r.line"), "7");
 
     cbm_cypher_result_free(&r);
     cbm_store_close(s);
