@@ -24,6 +24,7 @@
 #include <store/store.h>
 #include <pipeline/pipeline.h>
 #include <foundation/log.h>
+#include <yyjson/yyjson.h>
 
 #include <string.h>
 #include <stdlib.h>
@@ -1020,6 +1021,46 @@ TEST(contract_edge_async_calls) {
     PASS();
 }
 
+/* The sequential call pass must write parseable properties for broker edges
+ * and their Route nodes: the edges table derives url_path_gen with
+ * json_extract(), so one malformed row makes PRAGMA quick_check error out. */
+TEST(contract_async_calls_properties_are_json) {
+    static const LangFile f[] = {
+        {"pubsub/publisher.py",
+         "def publish_event(topic, payload):\n    return (topic, payload)\n\n\n"
+         "def enqueue_order(order):\n    return publish_event(\"order-events-topic\", order)\n"}};
+    LangProj lp;
+    cbm_store_t *store = lang_index_files(&lp, f, 1);
+    ASSERT_NOT_NULL(store);
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    ASSERT_EQ(cbm_store_find_edges_by_type(store, lp.project, "ASYNC_CALLS", &edges, &edge_count),
+              CBM_STORE_OK);
+    ASSERT_TRUE(edge_count >= 1);
+    for (int i = 0; i < edge_count; i++) {
+        yyjson_doc *doc = yyjson_read(edges[i].properties_json, strlen(edges[i].properties_json), 0);
+        ASSERT_NOT_NULL(doc);
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "broker")), "pubsub");
+        yyjson_doc_free(doc);
+    }
+    cbm_store_free_edges(edges, edge_count);
+    cbm_node_t *routes = NULL;
+    int route_count = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_label(store, lp.project, "Route", &routes, &route_count),
+              CBM_STORE_OK);
+    ASSERT_TRUE(route_count >= 1);
+    for (int i = 0; i < route_count; i++) {
+        yyjson_doc *doc =
+            yyjson_read(routes[i].properties_json, strlen(routes[i].properties_json), 0);
+        ASSERT_NOT_NULL(doc);
+        yyjson_doc_free(doc);
+    }
+    cbm_store_free_nodes(routes, route_count);
+    ASSERT_EQ(cbm_store_check_integrity_verdict(store), CBM_INTEGRITY_OK);
+    lang_cleanup(&lp, store);
+    PASS();
+}
+
 /* DATA_FLOWS — caller -> handler through a shared Route: a decorator handler
  * (HANDLES) and an HTTP call to the SAME ANY-method path (HTTP_CALLS) on a
  * Route whose QN matches (__route__ANY__/orders). create_data_flows then links
@@ -1405,6 +1446,7 @@ SUITE(lang_contract) {
     RUN_TEST(contract_edge_handles);
     RUN_TEST(contract_edge_http_calls);
     RUN_TEST(contract_edge_async_calls);
+    RUN_TEST(contract_async_calls_properties_are_json);
     RUN_TEST(contract_edge_data_flows);
     RUN_TEST(contract_edge_similar_to);
     RUN_TEST(contract_edge_semantically_related);

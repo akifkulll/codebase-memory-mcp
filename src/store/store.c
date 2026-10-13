@@ -982,6 +982,21 @@ static bool st_rc_is_transient(int rc) {
     }
 }
 
+/* Verdict for a quick_check statement that failed instead of reporting. */
+static cbm_integrity_verdict_t st_quick_check_error_verdict(cbm_store_t *s, int rc) {
+    if (st_rc_is_transient(rc)) {
+        return CBM_INTEGRITY_TRANSIENT;
+    }
+    int primary = rc & 0xff;
+    if (primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB) {
+        (void)fprintf(stderr, "ERROR store.corrupt quick_check_rc=%d\n", rc);
+        return CBM_INTEGRITY_CORRUPT;
+    }
+    (void)fprintf(stderr, "WARN store.quick_check_inconclusive rc=%d msg=%s\n", rc,
+                  sqlite3_errmsg(s->db));
+    return CBM_INTEGRITY_OK;
+}
+
 cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s) {
     if (!s || !s->db) {
         /* No handle at all — the caller could not even open the file. That is
@@ -1059,11 +1074,16 @@ cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s) {
     /* ── Deep check: walk the btrees for page-level damage (#1037) ──
      * The shallow check above passes for a DB whose projects table is intact
      * but whose node/edge btrees are torn. Only quick_check catches that.
-     * quick_check is O(db size); this function runs only on the quarantine
-     * decision path, never on hot opens. */
+     * quick_check is O(db size); resolve_store runs this once per legacy
+     * project-store open (project switch), not per query.
+     *
+     * Only what quick_check REPORTS is corruption evidence. A statement error
+     * that is not SQLITE_CORRUPT/NOTADB (e.g. a generated column raising
+     * "malformed JSON" on one row) says nothing about page damage, so the DB
+     * is kept. */
     rc = sqlite3_prepare_v2(s->db, "PRAGMA quick_check(1);", CBM_NOT_FOUND, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        return st_rc_is_transient(rc) ? CBM_INTEGRITY_TRANSIENT : CBM_INTEGRITY_CORRUPT;
+        return st_quick_check_error_verdict(s, rc);
     }
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *res = (const char *)sqlite3_column_text(stmt, 0);
@@ -1072,8 +1092,7 @@ cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s) {
             verdict = CBM_INTEGRITY_CORRUPT;
         }
     } else {
-        int step_rc = sqlite3_errcode(s->db);
-        verdict = st_rc_is_transient(step_rc) ? CBM_INTEGRITY_TRANSIENT : CBM_INTEGRITY_CORRUPT;
+        verdict = st_quick_check_error_verdict(s, sqlite3_errcode(s->db));
     }
     sqlite3_finalize(stmt);
     return verdict;

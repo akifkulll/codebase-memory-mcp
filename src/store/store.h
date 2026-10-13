@@ -242,8 +242,9 @@ typedef enum {
  *
  * This function runs the shallow check plus PRAGMA quick_check and classifies
  * the failure mode so the caller can quarantine ONLY on confirmed corruption.
- * quick_check is O(db size); use only on the recovery/quarantine decision
- * path, not hot opens. */
+ * A quick_check statement error other than SQLITE_CORRUPT/NOTADB is not
+ * corruption evidence and yields CBM_INTEGRITY_OK. quick_check is O(db size);
+ * call once per store open, never per query. */
 cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s);
 
 /* Open database for a named project in the default cache dir. */
