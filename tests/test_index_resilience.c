@@ -106,7 +106,7 @@ static cbm_store_t *ri_index_capture(RProj *lp, char **out_resp) {
     } else if (resp) {
         free(resp);
     }
-    return cbm_store_open_path(lp->dbpath);
+    return th_open_project_store(lp->project);
 }
 
 /* ── Tests ──────────────────────────────────────────────────────── */

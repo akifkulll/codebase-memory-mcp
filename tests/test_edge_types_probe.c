@@ -115,7 +115,7 @@ static cbm_store_t *et_index_files(EtProj *lp, const EtFile *files, int nfiles) 
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     if (resp) free(resp);
 
-    return cbm_store_open_path(lp->dbpath);
+    return th_open_project_store(lp->project);
 }
 
 static void et_cleanup(EtProj *lp, cbm_store_t *store) {

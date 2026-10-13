@@ -2168,6 +2168,9 @@ int cbm_store_find_edges_by_target_type(cbm_store_t *s, int64_t target_id, const
 
 int cbm_store_find_edges_by_type(cbm_store_t *s, const char *project, const char *type,
                                  cbm_edge_t **out, int *count) {
+    if (store_legacy_scope(s, &project, true) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
     bind_proj_type_t b = {project, type};
     return find_edges_generic(s, &s->stmt_find_edges_by_type,
                               "SELECT id, project, source_id, target_id, type, properties "

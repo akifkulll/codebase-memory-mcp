@@ -86,7 +86,7 @@ static cbm_store_t *gpa_open_indexed(GpaProj *lp) {
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     if (resp) free(resp);
-    return cbm_store_open_path(lp->dbpath);
+    return th_open_project_store(lp->project);
 }
 
 static cbm_store_t *gpa_index_files(GpaProj *lp, const GpaFile *files, int nfiles) {

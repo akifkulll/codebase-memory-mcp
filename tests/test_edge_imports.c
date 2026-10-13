@@ -120,7 +120,7 @@ static cbm_store_t *ei_index_files(EILangProj *lp, const EILangFile *files, int 
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     if (resp) free(resp);
 
-    return cbm_store_open_path(lp->dbpath);
+    return th_open_project_store(lp->project);
 }
 
 static void ei_cleanup(EILangProj *lp, cbm_store_t *store) {

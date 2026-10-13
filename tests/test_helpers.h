@@ -14,6 +14,10 @@
 
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h"
+#include "../src/store/store.h"
+#include "../src/zova/cbm_zova.h"
+#include "../src/zova/cbm_zova_route.h"
+#include "../src/zova/cbm_zova_repository.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -166,6 +170,25 @@ static inline void th_cleanup(const char *path) {
     if (path && path[0]) {
         th_rmtree(path);
     }
+}
+
+/* ── Indexed project access ───────────────────────────────────── */
+
+/* Open the read-only store view of an indexed project in the shared cbm.zova.
+ * Returns NULL when the project is not indexed. Caller closes the store. */
+static inline cbm_store_t *th_open_project_store(const char *project) {
+    char path[1024];
+    if (!project || cbm_zova_user_database_path(path, sizeof(path)) != 0) {
+        return NULL;
+    }
+    cbm_zova_repository_t *repo = cbm_zova_repository_open(path, project);
+    if (!repo) {
+        return NULL;
+    }
+    char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
+    snprintf(workspace_id, sizeof(workspace_id), "%s", cbm_zova_repository_workspace_id(repo));
+    cbm_zova_repository_close(repo);
+    return cbm_store_open_zova_workspace_query(path, workspace_id);
 }
 
 #endif /* TEST_HELPERS_H */

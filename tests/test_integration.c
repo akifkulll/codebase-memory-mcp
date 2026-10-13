@@ -175,7 +175,7 @@ static char *call_tool(const char *tool, const char *args) {
 
 TEST(integ_index_has_nodes) {
     /* Open the indexed db directly and check node counts */
-    cbm_store_t *store = cbm_store_open_path(g_dbpath);
+    cbm_store_t *store = th_open_project_store(g_project);
     ASSERT_NOT_NULL(store);
 
     int nodes = cbm_store_count_nodes(store, g_project);
@@ -188,7 +188,7 @@ TEST(integ_index_has_nodes) {
 }
 
 TEST(integ_index_has_edges) {
-    cbm_store_t *store = cbm_store_open_path(g_dbpath);
+    cbm_store_t *store = th_open_project_store(g_project);
     ASSERT_NOT_NULL(store);
 
     int edges = cbm_store_count_edges(store, g_project);
@@ -200,7 +200,7 @@ TEST(integ_index_has_edges) {
 }
 
 TEST(integ_index_has_functions) {
-    cbm_store_t *store = cbm_store_open_path(g_dbpath);
+    cbm_store_t *store = th_open_project_store(g_project);
     ASSERT_NOT_NULL(store);
 
     cbm_node_t *funcs = NULL;
@@ -230,7 +230,7 @@ TEST(integ_index_has_functions) {
 }
 
 TEST(integ_index_has_files) {
-    cbm_store_t *store = cbm_store_open_path(g_dbpath);
+    cbm_store_t *store = th_open_project_store(g_project);
     ASSERT_NOT_NULL(store);
 
     cbm_node_t *files = NULL;
@@ -258,7 +258,7 @@ TEST(integ_index_has_files) {
 }
 
 TEST(integ_index_has_calls) {
-    cbm_store_t *store = cbm_store_open_path(g_dbpath);
+    cbm_store_t *store = th_open_project_store(g_project);
     ASSERT_NOT_NULL(store);
 
     int call_count = cbm_store_count_edges_by_type(store, g_project, "CALLS");
@@ -462,7 +462,7 @@ TEST(integ_pipeline_cancel) {
  * ══════════════════════════════════════════════════════════════════ */
 
 TEST(integ_store_search_by_degree) {
-    cbm_store_t *store = cbm_store_open_path(g_dbpath);
+    cbm_store_t *store = th_open_project_store(g_project);
     ASSERT_NOT_NULL(store);
 
     /* Find functions with at least 1 outbound call */
@@ -485,7 +485,7 @@ TEST(integ_store_search_by_degree) {
 }
 
 TEST(integ_store_find_by_file) {
-    cbm_store_t *store = cbm_store_open_path(g_dbpath);
+    cbm_store_t *store = th_open_project_store(g_project);
     ASSERT_NOT_NULL(store);
 
     cbm_node_t *nodes = NULL;
@@ -501,7 +501,7 @@ TEST(integ_store_find_by_file) {
 }
 
 TEST(integ_store_bfs_traversal) {
-    cbm_store_t *store = cbm_store_open_path(g_dbpath);
+    cbm_store_t *store = th_open_project_store(g_project);
     ASSERT_NOT_NULL(store);
 
     /* Find a function node to start BFS from */

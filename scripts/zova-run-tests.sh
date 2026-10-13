@@ -26,6 +26,20 @@ runner_group_for_suite() {
   esac
 }
 
+# Suites that read their indexed graph through the shared cbm.zova and so run
+# on the default store route. Every other suite still runs with the legacy
+# per-project store until its fixtures are converted.
+suite_reads_zova() {
+  case "$1" in
+    integration|index_resilience|lang_contract|edge_imports|edge_structural|\
+    lsp_resolution_probe|node_creation_probe|edge_types_probe|convergence_probe|\
+    matrix_known_classes|matrix_new_constructs|grammar_probe_[a-g])
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 runner_for_group() {
   if [[ "${CBM_ZOVA_BUILD_SKIP:-0}" == "1" ]]; then
     printf '%s\n' "${CBM_ZOVA_REAL_TEST_RUNNER:-"$RUNNER_DIR/test-runner"}"
@@ -74,7 +88,7 @@ for suite in "$@"; do
   group=$(runner_group_for_suite "$suite")
   ensure_runner "$group"
   echo "TEST SUITE: $suite" >&2
-  if [[ -n "${CBM_ZOVA_MODE+x}" || "$group" == "zova" ]]; then
+  if [[ -n "${CBM_ZOVA_MODE+x}" || "$group" == "zova" ]] || suite_reads_zova "$suite"; then
     HOME="$TEST_HOME" CBM_CACHE_DIR="$TEST_CACHE" "$RUNNER" "$suite"
   else
     HOME="$TEST_HOME" CBM_CACHE_DIR="$TEST_CACHE" CBM_ZOVA_MODE=off "$RUNNER" "$suite"

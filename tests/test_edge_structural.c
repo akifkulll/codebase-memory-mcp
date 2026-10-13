@@ -188,7 +188,7 @@ static cbm_store_t *es_lang_open_indexed(ES_LangProj *lp) {
     if (resp) {
         free(resp);
     }
-    return cbm_store_open_path(lp->dbpath);
+    return th_open_project_store(lp->project);
 }
 
 static cbm_store_t *es_lang_index_files(ES_LangProj *lp, const ES_LangFile *files, int nfiles) {

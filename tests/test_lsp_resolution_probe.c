@@ -137,7 +137,7 @@ static cbm_store_t *lrp_open_indexed(LRP_Proj *lp) {
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     if (resp) free(resp);
-    return cbm_store_open_path(lp->dbpath);
+    return th_open_project_store(lp->project);
 }
 
 static cbm_store_t *lrp_index(LRP_Proj *lp, const LRP_File *files, int nfiles) {

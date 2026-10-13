@@ -95,7 +95,7 @@ static cbm_store_t *gpg_open_indexed(GpgProj *lp) {
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     if (resp)
         free(resp);
-    return cbm_store_open_path(lp->dbpath);
+    return th_open_project_store(lp->project);
 }
 
 static cbm_store_t *gpg_index_files(GpgProj *lp, const GpgFile *files, int nfiles) {

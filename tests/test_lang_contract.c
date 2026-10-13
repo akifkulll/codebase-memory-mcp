@@ -96,7 +96,7 @@ static cbm_store_t *lang_open_indexed(LangProj *lp) {
     if (resp) {
         free(resp);
     }
-    return cbm_store_open_path(lp->dbpath);
+    return th_open_project_store(lp->project);
 }
 
 /* Write each fixture file into a fresh temp project, index it via the MCP
@@ -1022,8 +1022,7 @@ TEST(contract_edge_async_calls) {
 }
 
 /* The sequential call pass must write parseable properties for broker edges
- * and their Route nodes: the edges table derives url_path_gen with
- * json_extract(), so one malformed row makes PRAGMA quick_check error out. */
+ * and their Route nodes. */
 TEST(contract_async_calls_properties_are_json) {
     static const LangFile f[] = {
         {"pubsub/publisher.py",
@@ -1056,7 +1055,6 @@ TEST(contract_async_calls_properties_are_json) {
         yyjson_doc_free(doc);
     }
     cbm_store_free_nodes(routes, route_count);
-    ASSERT_EQ(cbm_store_check_integrity_verdict(store), CBM_INTEGRITY_OK);
     lang_cleanup(&lp, store);
     PASS();
 }

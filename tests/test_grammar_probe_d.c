@@ -84,7 +84,7 @@ static cbm_store_t *gpd_open_indexed(GpdProj *lp) {
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     if (resp) free(resp);
-    return cbm_store_open_path(lp->dbpath);
+    return th_open_project_store(lp->project);
 }
 
 static cbm_store_t *gpd_index_files(GpdProj *lp, const GpdFile *files, int nfiles) {

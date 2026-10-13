@@ -70,7 +70,7 @@ static inline cbm_store_t *rh_open_indexed(RProj *lp) {
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     if (resp)
         free(resp);
-    return cbm_store_open_path(lp->dbpath);
+    return th_open_project_store(lp->project);
 }
 
 /* Write each fixture file into a fresh temp project, index it via the MCP
