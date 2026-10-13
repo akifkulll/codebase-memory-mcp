@@ -43,6 +43,7 @@ grep -q '^  build:' "$WORKFLOWS/ci.yml"
 grep -q '^  test-build:' "$WORKFLOWS/ci.yml"
 grep -q '^  test:' "$WORKFLOWS/ci.yml"
 grep -q 'scripts/ci-test-shard.sh' "$WORKFLOWS/ci.yml"
+grep -q 'scripts/smoke-test.sh' "$WORKFLOWS/ci.yml"
 test_build_job=$(sed -n '/^  test-build:/,/^  test:/p' "$WORKFLOWS/ci.yml")
 [[ $(grep -c 'cpu: baseline' <<<"$test_build_job") -eq 1 ]] || {
   echo "error: the shared test runner must use one baseline-CPU Zova build" >&2

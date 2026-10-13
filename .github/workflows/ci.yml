@@ -57,6 +57,8 @@ jobs:
         run: |
           nm build/c/codebase-memory-mcp > zova-symbols.txt
           grep -q 'zova_fresh_build_begin' zova-symbols.txt
+      - name: Run binary smoke test
+        run: bash scripts/smoke-test.sh "$GITHUB_WORKSPACE/build/c/codebase-memory-mcp"
       - name: Test installer safety
         run: bash tests/test_install_script_safety.sh
 
