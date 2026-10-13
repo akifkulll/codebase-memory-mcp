@@ -5720,6 +5720,42 @@ TEST(zova_workspace_store_reports_schema_counts_and_architecture) {
     ASSERT_GT(arch.file_tree_count, 0);
     cbm_store_architecture_free(&arch);
 
+    char **files = NULL;
+    int file_count = 0;
+    ASSERT_EQ(cbm_store_list_files(store, "any-selector", &files, &file_count), CBM_STORE_OK);
+    ASSERT_EQ(file_count, 3);
+    for (int i = 0; i < file_count; i++) free(files[i]);
+    free(files);
+
+    /* A short name resolves to the same node as its full qualified name. */
+    cbm_node_t exact = {0};
+    ASSERT_EQ(cbm_store_find_node_by_qn(store, "proj", "proj.src.a.Beta", &exact), CBM_STORE_OK);
+    cbm_node_t *matches = NULL;
+    int match_count = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_qn_suffix(store, "any-selector", "Beta", &matches,
+                                                &match_count),
+              CBM_STORE_OK);
+    ASSERT_EQ(match_count, 1);
+    ASSERT_STR_EQ(matches[0].qualified_name, "proj.src.a.Beta");
+    ASSERT_EQ(matches[0].id, exact.id);
+    cbm_store_free_nodes(matches, match_count);
+
+    char **callers = NULL;
+    char **callees = NULL;
+    int caller_count = 0;
+    int callee_count = 0;
+    ASSERT_EQ(cbm_store_node_neighbor_names(store, exact.id, 10, &callers, &caller_count,
+                                            &callees, &callee_count),
+              0);
+    ASSERT_EQ(caller_count, 2);
+    ASSERT_STR_EQ(callers[0], "Alpha");
+    ASSERT_STR_EQ(callers[1], "Gamma");
+    ASSERT_EQ(callee_count, 0);
+    for (int i = 0; i < caller_count; i++) free(callers[i]);
+    free(callers);
+    free(callees);
+    cbm_node_free_fields(&exact);
+
     cbm_store_close(store);
     cbm_unlink(path);
     PASS();

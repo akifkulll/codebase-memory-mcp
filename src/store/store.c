@@ -2418,6 +2418,9 @@ int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const
     if (!s || !s->db) {
         return CBM_STORE_ERR;
     }
+    if (store_legacy_scope(s, &project, false) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
     /* Match QNs ending with ".suffix" or exactly equal to suffix */
     char like_pattern[CBM_SZ_512];
     snprintf(like_pattern, sizeof(like_pattern), "%%.%s", suffix);
@@ -2460,6 +2463,21 @@ int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const
         n++;
     }
     sqlite3_finalize(stmt);
+    if (s->zova_workspace_query && s->zova_repository) {
+        /* The view's ids are Zova node keys; callers expect repository ids. */
+        for (int i = 0; i < n; i++) {
+            cbm_node_t resolved = {0};
+            if (cbm_zova_repository_find_node_by_qn(s->zova_repository,
+                                                    s->zova_graph_workspace_id,
+                                                    nodes[i].qualified_name,
+                                                    &resolved) != CBM_STORE_OK) {
+                cbm_store_free_nodes(nodes, n);
+                return CBM_STORE_ERR;
+            }
+            cbm_node_free_fields(&nodes[i]);
+            nodes[i] = resolved;
+        }
+    }
     *out = nodes;
     *count = n;
     return CBM_STORE_OK;
@@ -2542,6 +2560,9 @@ int cbm_store_list_files(cbm_store_t *s, const char *project, char ***out, int *
     if (!s || !s->db || !project) {
         return CBM_STORE_ERR;
     }
+    if (store_legacy_scope(s, &project, false) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
 
     const char *sql = "SELECT DISTINCT file_path FROM nodes "
                       "WHERE project = ?1 AND file_path IS NOT NULL AND file_path != ''";
@@ -2613,6 +2634,32 @@ int cbm_store_node_neighbor_names(cbm_store_t *s, int64_t node_id, int limit, ch
     *caller_count = 0;
     *out_callees = NULL;
     *callee_count = 0;
+
+    if (s->zova_workspace_query && s->zova_repository) {
+        /* The edge copy is keyed by Zova node key; map the repository id to it. */
+        const char *project = NULL;
+        cbm_node_t node = {0};
+        if (store_legacy_scope(s, &project, true) != CBM_STORE_OK ||
+            cbm_zova_repository_find_node_by_numeric_id(
+                s->zova_repository, s->zova_graph_workspace_id, node_id, &node) != CBM_STORE_OK) {
+            return CBM_STORE_ERR;
+        }
+        sqlite3_stmt *stmt = NULL;
+        int64_t key = 0;
+        if (sqlite3_prepare_v2(s->db, "SELECT id FROM nodes WHERE qualified_name = ?1",
+                               CBM_NOT_FOUND, &stmt, NULL) == SQLITE_OK) {
+            bind_text(stmt, SKIP_ONE, node.qualified_name);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                key = sqlite3_column_int64(stmt, 0);
+            }
+        }
+        sqlite3_finalize(stmt);
+        cbm_node_free_fields(&node);
+        if (key == 0) {
+            return CBM_STORE_ERR;
+        }
+        node_id = key;
+    }
 
     query_neighbor_names(
         s->db,
