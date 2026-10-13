@@ -59,6 +59,7 @@ enum {
 #include "foundation/dump_verify.h"
 #include "foundation/compat_regex.h"
 #include "pipeline/artifact.h"
+#include "zova/cbm_zova_operations.h"
 #include "zova/cbm_zova_repository.h"
 #include "zova/cbm_zova_route.h"
 
@@ -2933,33 +2934,57 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
     /* Wait for any in-progress pipeline to finish before deleting */
     cbm_pipeline_lock();
 
-    /* Delete the .db file + WAL/SHM */
     char path[CBM_SZ_1K];
-    project_db_path(name, path, sizeof(path));
-
-    char wal[CBM_SZ_1K];
-    char shm[CBM_SZ_1K];
-    snprintf(wal, sizeof(wal), "%s-wal", path);
-    snprintf(shm, sizeof(shm), "%s-shm", path);
-
-    bool exists = (access(path, F_OK) == 0);
     const char *status = "not_found";
     const char *error_detail = NULL;
     bool is_error = false;
+    cbm_zova_operation_report_t report = {0};
 
-    if (exists) {
-        int rc = cbm_unlink(path);
-        (void)cbm_unlink(wal);
-        (void)cbm_unlink(shm);
-        if (rc == 0) {
+    if (cbm_zova_route_for_project(name) == CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
+        /* The project is a workspace inside the shared cbm.zova file. */
+        char workspace_id[CBM_SZ_256] = {0};
+        cbm_zova_repository_t *repo = NULL;
+        if (cbm_zova_user_database_path(path, sizeof(path)) == 0 &&
+            (repo = cbm_zova_repository_open(path, name))) {
+            snprintf(workspace_id, sizeof(workspace_id), "%s",
+                     cbm_zova_repository_workspace_id(repo));
+            cbm_zova_repository_close(repo);
+        }
+        cbm_zova_operation_code_t code =
+            workspace_id[0] ? cbm_zova_workspace_delete(path, workspace_id, workspace_id, &report)
+                            : CBM_ZOVA_OPERATION_NOOP;
+        if (code == CBM_ZOVA_OPERATION_OK) {
             status = "deleted";
+        } else if (code == CBM_ZOVA_OPERATION_NOOP) {
+            is_error = true;
         } else {
             status = "delete_failed";
-            error_detail = strerror(errno);
+            error_detail = report.reason;
             is_error = true;
         }
     } else {
-        is_error = true;
+        /* Delete the .db file + WAL/SHM */
+        project_db_path(name, path, sizeof(path));
+
+        char wal[CBM_SZ_1K];
+        char shm[CBM_SZ_1K];
+        snprintf(wal, sizeof(wal), "%s-wal", path);
+        snprintf(shm, sizeof(shm), "%s-shm", path);
+
+        if (access(path, F_OK) == 0) {
+            int rc = cbm_unlink(path);
+            (void)cbm_unlink(wal);
+            (void)cbm_unlink(shm);
+            if (rc == 0) {
+                status = "deleted";
+            } else {
+                status = "delete_failed";
+                error_detail = strerror(errno);
+                is_error = true;
+            }
+        } else {
+            is_error = true;
+        }
     }
 
     cbm_pipeline_unlock();

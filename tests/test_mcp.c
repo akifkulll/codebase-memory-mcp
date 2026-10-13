@@ -1733,6 +1733,20 @@ TEST(tool_index_repository_reports_zova_committed_counts) {
     bool shared_exists = access(user_db, F_OK) == 0;
     bool project_db_exists = access(project_db, F_OK) == 0;
 
+    char *deleted_response =
+        cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"zova-status\"}");
+    bool deleted = deleted_response &&
+                   response_contains_json_fragment(deleted_response, "\"status\":\"deleted\"");
+    char *status_response =
+        cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"zova-status\"}");
+    bool gone = status_response && strstr(status_response, "not indexed");
+    char *repeated_response =
+        cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"zova-status\"}");
+    bool repeated_not_found = repeated_response && strstr(repeated_response, "not_found");
+    free(deleted_response);
+    free(status_response);
+    free(repeated_response);
+
     free(response);
     cbm_mcp_server_free(srv);
     if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
@@ -1760,6 +1774,9 @@ TEST(tool_index_repository_reports_zova_committed_counts) {
     ASSERT_FALSE(degraded);
     ASSERT_TRUE(shared_exists);
     ASSERT_FALSE(project_db_exists);
+    ASSERT_TRUE(deleted);
+    ASSERT_TRUE(gone);
+    ASSERT_TRUE(repeated_not_found);
     PASS();
 #endif
 }
