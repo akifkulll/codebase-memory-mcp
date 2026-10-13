@@ -14,6 +14,7 @@ const struct zova_plugin_descriptor_v1 *cbm_zova_plugin_descriptor(void) {
 
 #else
 
+#include "zova/cbm_zova_edge_payload.h"
 #include "zova_plugin.h"
 
 #include <stdint.h>
@@ -33,6 +34,10 @@ enum {
     PLUGIN_TRACE_ARGUMENTS = 6,
     PLUGIN_TRACE_COLUMNS = 9,
     PLUGIN_NEIGHBOR_COLUMNS = 6,
+    PLUGIN_PAYLOAD_BATCH = 256,
+    PLUGIN_PAYLOAD_COLUMNS = 4,
+    PLUGIN_EDGES_ARGUMENTS = 4,
+    PLUGIN_EDGES_COLUMNS = 6,
 };
 
 /* One reached node. text holds label, name, qualified_name, file_path and
@@ -271,9 +276,11 @@ static int plugin_row_compare(const void *left, const void *right) {
     return (a->key > b->key) - (a->key < b->key);
 }
 
-/* Splits "A,B" into at most PLUGIN_EDGE_TYPES_MAX non-empty names. */
+/* Splits "A,B" into at most PLUGIN_EDGE_TYPES_MAX non-empty names. An empty
+ * list yields 0; a malformed one -1. */
 static int plugin_edge_types(const zova_plugin_value_v1 *value, zova_plugin_bytes_v1 *out) {
     int count = 0;
+    if (value->bytes_len == 0) return 0;
     uint64_t start = 0;
     for (uint64_t i = 0; i <= value->bytes_len; i++) {
         if (i < value->bytes_len && value->bytes[i] != ',') continue;
@@ -289,6 +296,29 @@ static int plugin_text_equals(const zova_plugin_value_v1 *value, const char *tex
     return value->bytes_len == len && memcmp(value->bytes, text, len) == 0;
 }
 
+/* No names means every edge type. */
+static void plugin_request_edge_types(zova_plugin_data_request_v1 *request,
+                                      const zova_plugin_bytes_v1 *edge_types, int count) {
+    if (count == 1) {
+        request->edge_type = edge_types[0];
+    } else if (count > 1) {
+        request->ids = edge_types;
+        request->id_count = (uint64_t)count;
+    }
+}
+
+static int plugin_direction(const zova_plugin_value_v1 *value, uint32_t *out) {
+    if (plugin_text_equals(value, "outbound")) {
+        *out = ZOVA_PLUGIN_OUTGOING;
+    } else if (plugin_text_equals(value, "inbound")) {
+        *out = ZOVA_PLUGIN_INCOMING;
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
+
 static int32_t ZOVA_PLUGIN_CALL plugin_trace_open(const zova_plugin_host_v1 *host,
                                                   void *connection, void *state,
                                                   const zova_plugin_value_v1 *arguments,
@@ -303,13 +333,7 @@ static int32_t ZOVA_PLUGIN_CALL plugin_trace_open(const zova_plugin_host_v1 *hos
     zova_plugin_bytes_v1 edge_types[PLUGIN_EDGE_TYPES_MAX];
     int edge_type_count = plugin_edge_types(&arguments[3], edge_types);
     uint32_t direction;
-    if (plugin_text_equals(&arguments[2], "outbound")) {
-        direction = ZOVA_PLUGIN_OUTGOING;
-    } else if (plugin_text_equals(&arguments[2], "inbound")) {
-        direction = ZOVA_PLUGIN_INCOMING;
-    } else {
-        return ZOVA_PLUGIN_INVALID_ARGUMENT;
-    }
+    if (plugin_direction(&arguments[2], &direction) != 0) return ZOVA_PLUGIN_INVALID_ARGUMENT;
     if (graph->bytes_len == 0 || graph->bytes_len > PLUGIN_NAME_MAX || start_key <= 0 ||
         edge_type_count <= 0 || max_depth < 0 || max_results <= 0 ||
         max_results > PLUGIN_MAX_RESULTS) {
@@ -343,12 +367,7 @@ static int32_t ZOVA_PLUGIN_CALL plugin_trace_open(const zova_plugin_host_v1 *hos
         .row = plugin_neighbor_row,
         .user_data = trace,
     };
-    if (edge_type_count == 1) {
-        request.edge_type = edge_types[0];
-    } else {
-        request.ids = edge_types;
-        request.id_count = (uint64_t)edge_type_count;
-    }
+    plugin_request_edge_types(&request, edge_types, edge_type_count);
 
     size_t level_start = 0;
     size_t level_end = 1;
@@ -405,6 +424,248 @@ static void ZOVA_PLUGIN_CALL plugin_trace_close(void *cursor) {
     plugin_trace_free(cursor);
 }
 
+/* ── edges ─────────────────────────────────────────────────────── */
+
+/* One adjacency entry; type is copied because row bytes are borrowed. */
+typedef struct {
+    int64_t edge_key;
+    int64_t neighbor_key;
+    char *type;
+    uint64_t type_len;
+} plugin_neighbor_t;
+
+/* One cbm edge. text holds local_name then properties. A graph edge carries
+ * one or more of these in its payload. */
+typedef struct {
+    size_t neighbor;
+    char *text;
+    uint64_t local_name_len;
+    uint64_t properties_len;
+} plugin_edge_t;
+
+typedef struct {
+    plugin_neighbor_t *neighbors;
+    size_t neighbor_count;
+    size_t neighbor_cap;
+    plugin_edge_t *edges;
+    size_t edge_count;
+    size_t edge_cap;
+    size_t next;
+    int64_t node_key;
+    uint32_t direction;
+    /* First neighbor of the payload batch being read, and the one being decoded. */
+    size_t batch_first;
+    size_t batch_count;
+    size_t current;
+} plugin_edges_t;
+
+static void plugin_edges_truncate(plugin_edges_t *state, size_t count) {
+    while (state->edge_count > count) free(state->edges[--state->edge_count].text);
+}
+
+static void plugin_edges_free(plugin_edges_t *state) {
+    if (!state) return;
+    plugin_edges_truncate(state, 0);
+    for (size_t i = 0; i < state->neighbor_count; i++) free(state->neighbors[i].type);
+    free(state->neighbors);
+    free(state->edges);
+    free(state);
+}
+
+static int32_t ZOVA_PLUGIN_CALL plugin_edges_neighbor_row(void *user_data,
+                                                          const zova_plugin_value_v1 *values,
+                                                          uint64_t count) {
+    plugin_edges_t *state = user_data;
+    if (count != PLUGIN_NEIGHBOR_COLUMNS || values[2].kind != ZOVA_PLUGIN_VALUE_INTEGER ||
+        values[3].kind != ZOVA_PLUGIN_VALUE_INTEGER || values[4].kind != ZOVA_PLUGIN_VALUE_TEXT) {
+        return ZOVA_PLUGIN_ERROR;
+    }
+    if (state->neighbor_count == state->neighbor_cap) {
+        size_t cap = state->neighbor_cap ? state->neighbor_cap * 2 : 64;
+        plugin_neighbor_t *neighbors = realloc(state->neighbors, cap * sizeof(*neighbors));
+        if (!neighbors) return ZOVA_PLUGIN_OUT_OF_MEMORY;
+        state->neighbors = neighbors;
+        state->neighbor_cap = cap;
+    }
+    char *type = malloc(values[4].bytes_len ? (size_t)values[4].bytes_len : 1);
+    if (!type) return ZOVA_PLUGIN_OUT_OF_MEMORY;
+    if (values[4].bytes_len) memcpy(type, values[4].bytes, (size_t)values[4].bytes_len);
+    state->neighbors[state->neighbor_count++] = (plugin_neighbor_t){
+        .edge_key = values[2].integer,
+        .neighbor_key = values[3].integer,
+        .type = type,
+        .type_len = values[4].bytes_len,
+    };
+    return ZOVA_PLUGIN_OK;
+}
+
+static int plugin_edges_record(const cbm_zova_edge_payload_record_t *record, void *context) {
+    plugin_edges_t *state = context;
+    if (state->edge_count == state->edge_cap) {
+        size_t cap = state->edge_cap ? state->edge_cap * 2 : 64;
+        plugin_edge_t *edges = realloc(state->edges, cap * sizeof(*edges));
+        if (!edges) return -1;
+        state->edges = edges;
+        state->edge_cap = cap;
+    }
+    size_t total = record->local_name.len + record->properties.len;
+    char *text = malloc(total ? total : 1);
+    if (!text) return -1;
+    if (record->local_name.len) memcpy(text, record->local_name.data, record->local_name.len);
+    if (record->properties.len) {
+        memcpy(text + record->local_name.len, record->properties.data, record->properties.len);
+    }
+    state->edges[state->edge_count++] = (plugin_edge_t){
+        .neighbor = state->current,
+        .text = text,
+        .local_name_len = record->local_name.len,
+        .properties_len = record->properties.len,
+    };
+    return 0;
+}
+
+/* EDGE_PAYLOADS_GET row: ordinal, found, input_key, payload. */
+static int32_t ZOVA_PLUGIN_CALL plugin_edges_payload_row(void *user_data,
+                                                         const zova_plugin_value_v1 *values,
+                                                         uint64_t count) {
+    plugin_edges_t *state = user_data;
+    if (count != PLUGIN_PAYLOAD_COLUMNS || values[0].kind != ZOVA_PLUGIN_VALUE_INTEGER ||
+        values[0].integer < 0 || (uint64_t)values[0].integer >= state->batch_count ||
+        values[1].kind != ZOVA_PLUGIN_VALUE_INTEGER || values[1].integer != 1 ||
+        values[3].kind != ZOVA_PLUGIN_VALUE_BLOB) {
+        return ZOVA_PLUGIN_ERROR;
+    }
+    state->current = state->batch_first + (size_t)values[0].integer;
+    if (values[2].integer != state->neighbors[state->current].edge_key) return ZOVA_PLUGIN_ERROR;
+    return cbm_zova_edge_payload_visit(values[3].bytes, (size_t)values[3].bytes_len,
+                                       plugin_edges_record, state, NULL) == 0
+               ? ZOVA_PLUGIN_OK
+               : ZOVA_PLUGIN_ERROR;
+}
+
+/* Decodes the payloads of every collected neighbor edge. A batch over the byte
+ * budget is retried in halves. */
+static int32_t plugin_edges_payloads(const zova_plugin_data_service_v1 *data, void *connection,
+                                     plugin_edges_t *state, zova_plugin_bytes_v1 graph) {
+    int64_t keys[PLUGIN_PAYLOAD_BATCH];
+    size_t batch = PLUGIN_PAYLOAD_BATCH;
+    size_t first = 0;
+    while (first < state->neighbor_count) {
+        size_t n = state->neighbor_count - first;
+        if (n > batch) n = batch;
+        for (size_t i = 0; i < n; i++) keys[i] = state->neighbors[first + i].edge_key;
+        zova_plugin_data_request_v1 request = {
+            .struct_size = sizeof(request),
+            .operation = ZOVA_PLUGIN_GRAPH_EDGE_PAYLOADS_GET,
+            .name = graph,
+            .keys = keys,
+            .key_count = n,
+            .row_limit = n,
+            .byte_limit = PLUGIN_PAGE_BYTES,
+            .row = plugin_edges_payload_row,
+            .user_data = state,
+        };
+        zova_plugin_data_page_v1 page = {0};
+        size_t before = state->edge_count;
+        state->batch_first = first;
+        state->batch_count = n;
+        int32_t status = data->read(connection, &request, &page);
+        if (status == ZOVA_PLUGIN_LIMIT && n > 1) {
+            plugin_edges_truncate(state, before);
+            batch = n / 2;
+            continue;
+        }
+        if (status != ZOVA_PLUGIN_OK) return status;
+        if (page.rows != n) return ZOVA_PLUGIN_ERROR;
+        first += n;
+    }
+    return ZOVA_PLUGIN_OK;
+}
+
+static int32_t ZOVA_PLUGIN_CALL plugin_edges_open(const zova_plugin_host_v1 *host,
+                                                  void *connection, void *unused,
+                                                  const zova_plugin_value_v1 *arguments,
+                                                  uint64_t argument_count, void **out_cursor) {
+    (void)unused;
+    *out_cursor = NULL;
+    if (argument_count != PLUGIN_EDGES_ARGUMENTS) return ZOVA_PLUGIN_INVALID_ARGUMENT;
+    zova_plugin_bytes_v1 graph = {arguments[0].bytes, arguments[0].bytes_len};
+    zova_plugin_bytes_v1 edge_types[PLUGIN_EDGE_TYPES_MAX];
+    int edge_type_count = plugin_edge_types(&arguments[3], edge_types);
+    uint32_t direction;
+    if (plugin_direction(&arguments[2], &direction) != 0 || graph.len == 0 ||
+        graph.len > PLUGIN_NAME_MAX || arguments[1].integer <= 0 || edge_type_count < 0) {
+        return ZOVA_PLUGIN_INVALID_ARGUMENT;
+    }
+    const void *raw = NULL;
+    int32_t status = plugin_service(host, connection, ZOVA_PLUGIN_SERVICE_DATA,
+                                    sizeof(zova_plugin_data_service_v1), &raw);
+    if (status != ZOVA_PLUGIN_OK) return status;
+    const zova_plugin_data_service_v1 *data = raw;
+
+    plugin_edges_t *state = calloc(1, sizeof(*state));
+    if (!state) return ZOVA_PLUGIN_OUT_OF_MEMORY;
+    *out_cursor = state;
+    state->node_key = arguments[1].integer;
+    state->direction = direction;
+
+    zova_plugin_data_request_v1 request = {
+        .struct_size = sizeof(request),
+        .operation = ZOVA_PLUGIN_GRAPH_NEIGHBORS_KEYED,
+        .name = graph,
+        .keys = &state->node_key,
+        .key_count = 1,
+        .direction = direction,
+        .row_limit = PLUGIN_PAGE_ROWS,
+        .byte_limit = PLUGIN_PAGE_BYTES,
+        .row = plugin_edges_neighbor_row,
+        .user_data = state,
+    };
+    plugin_request_edge_types(&request, edge_types, edge_type_count);
+    for (;;) {
+        zova_plugin_data_page_v1 page = {0};
+        status = data->read(connection, &request, &page);
+        if (status != ZOVA_PLUGIN_OK) return status;
+        if (!page.has_more) break;
+        if (page.rows == 0) return ZOVA_PLUGIN_ERROR;
+        request.after = page.next;
+    }
+    return plugin_edges_payloads(data, connection, state, graph);
+}
+
+static int32_t ZOVA_PLUGIN_CALL plugin_edges_next(const zova_plugin_host_v1 *host,
+                                                  void *connection, void *cursor,
+                                                  zova_plugin_row_v1 row, void *row_context,
+                                                  uint32_t *out_has_row) {
+    (void)host;
+    (void)connection;
+    plugin_edges_t *state = cursor;
+    *out_has_row = 0;
+    if (state->next >= state->edge_count) return ZOVA_PLUGIN_OK;
+    const plugin_edge_t *edge = &state->edges[state->next++];
+    const plugin_neighbor_t *neighbor = &state->neighbors[edge->neighbor];
+    int outgoing = state->direction == ZOVA_PLUGIN_OUTGOING;
+    const uint8_t *text = (const uint8_t *)edge->text;
+    zova_plugin_value_v1 values[PLUGIN_EDGES_COLUMNS] = {
+        {.kind = ZOVA_PLUGIN_VALUE_INTEGER, .integer = neighbor->edge_key},
+        {.kind = ZOVA_PLUGIN_VALUE_INTEGER,
+         .integer = outgoing ? state->node_key : neighbor->neighbor_key},
+        {.kind = ZOVA_PLUGIN_VALUE_INTEGER,
+         .integer = outgoing ? neighbor->neighbor_key : state->node_key},
+        {.kind = ZOVA_PLUGIN_VALUE_TEXT, .bytes = (const uint8_t *)neighbor->type,
+         .bytes_len = neighbor->type_len},
+        {.kind = ZOVA_PLUGIN_VALUE_TEXT, .bytes = text, .bytes_len = edge->local_name_len},
+        {.kind = ZOVA_PLUGIN_VALUE_TEXT, .bytes = text + edge->local_name_len,
+         .bytes_len = edge->properties_len},
+    };
+    *out_has_row = 1;
+    return row(row_context, values, PLUGIN_EDGES_COLUMNS);
+}
+
+static void ZOVA_PLUGIN_CALL plugin_edges_close(void *cursor) {
+    plugin_edges_free(cursor);
+}
+
 #define PLUGIN_COLUMN(text, kind) {{(const uint8_t *)(text), sizeof(text) - 1}, (kind), 0}
 
 static int32_t ZOVA_PLUGIN_CALL plugin_register_sql(const zova_plugin_host_v1 *host,
@@ -445,8 +706,38 @@ static int32_t ZOVA_PLUGIN_CALL plugin_register_sql(const zova_plugin_host_v1 *h
         .next = plugin_trace_next,
         .close = plugin_trace_close,
     };
-    return ((const zova_plugin_operation_service_v1 *)raw)->register_operation(connection,
-                                                                                &operation);
+    const zova_plugin_operation_service_v1 *operations = raw;
+    status = operations->register_operation(connection, &operation);
+    if (status != ZOVA_PLUGIN_OK) return status;
+
+    static const zova_plugin_operation_column_v1 edges_arguments[PLUGIN_EDGES_ARGUMENTS] = {
+        PLUGIN_COLUMN("graph", ZOVA_PLUGIN_VALUE_TEXT),
+        PLUGIN_COLUMN("node_key", ZOVA_PLUGIN_VALUE_INTEGER),
+        PLUGIN_COLUMN("direction", ZOVA_PLUGIN_VALUE_TEXT),
+        PLUGIN_COLUMN("edge_types", ZOVA_PLUGIN_VALUE_TEXT),
+    };
+    static const zova_plugin_operation_column_v1 edges_columns[PLUGIN_EDGES_COLUMNS] = {
+        PLUGIN_COLUMN("edge_key", ZOVA_PLUGIN_VALUE_INTEGER),
+        PLUGIN_COLUMN("source_key", ZOVA_PLUGIN_VALUE_INTEGER),
+        PLUGIN_COLUMN("target_key", ZOVA_PLUGIN_VALUE_INTEGER),
+        PLUGIN_COLUMN("edge_type", ZOVA_PLUGIN_VALUE_TEXT),
+        PLUGIN_COLUMN("local_name", ZOVA_PLUGIN_VALUE_TEXT),
+        PLUGIN_COLUMN("properties", ZOVA_PLUGIN_VALUE_TEXT),
+    };
+    zova_plugin_operation_v1 edges = {
+        .struct_size = sizeof(edges),
+        .kind = ZOVA_PLUGIN_OPERATION_TABLE,
+        .flags = ZOVA_PLUGIN_OPERATION_EXACT | ZOVA_PLUGIN_OPERATION_ORDERED,
+        .name = {(const uint8_t *)"edges", sizeof("edges") - 1},
+        .arguments = edges_arguments,
+        .argument_count = PLUGIN_EDGES_ARGUMENTS,
+        .column_count = PLUGIN_EDGES_COLUMNS,
+        .columns = edges_columns,
+        .open = plugin_edges_open,
+        .next = plugin_edges_next,
+        .close = plugin_edges_close,
+    };
+    return operations->register_operation(connection, &edges);
 }
 
 /* The plugin owns no tables. data_version names the cbm tables and graph layout

@@ -45,7 +45,9 @@ typedef struct {
 } plugin_hit_t;
 
 /* Alpha -CALLS-> Beta -CALLS-> Gamma -CALLS-> Alpha,
- * Alpha -HTTP_CALLS-> Delta -ASYNC_CALLS-> Epsilon. */
+ * Alpha -HTTP_CALLS-> Delta -ASYNC_CALLS-> Epsilon.
+ * Alpha calls Beta twice (local names Beta and BetaAlias): one graph edge
+ * carrying two cbm edges. */
 static int plugin_publish(plugin_fixture_t *fx) {
     static const char *const names[] = {"Alpha", "Beta", "Gamma", "Delta", "Epsilon"};
     static const char *const files[] = {"alpha.c", "beta.c", "gamma.c", "delta.c", "epsilon.c"};
@@ -61,7 +63,9 @@ static int plugin_publish(plugin_fixture_t *fx) {
     }
     const CBMDumpEdge edges[] = {
         {.id = 1, .project = "proj", .source_id = 1, .target_id = 2, .type = "CALLS",
-         .properties = "{}"},
+         .properties = "{\"args\":\"x\"}", .local_name = "Beta"},
+        {.id = 6, .project = "proj", .source_id = 1, .target_id = 2, .type = "CALLS",
+         .properties = "{\"args\":\"y\"}", .local_name = "BetaAlias"},
         {.id = 2, .project = "proj", .source_id = 2, .target_id = 3, .type = "CALLS",
          .properties = "{}"},
         {.id = 3, .project = "proj", .source_id = 3, .target_id = 1, .type = "CALLS",
@@ -75,7 +79,7 @@ static int plugin_publish(plugin_fixture_t *fx) {
         .root_path = "/tmp/plugin-trace", .project = "proj",
         .indexed_at = "2026-10-13T00:00:00Z",
         .model_fingerprint = CBM_ZOVA_MODEL_FINGERPRINT, .vector_dimensions = 2,
-        .nodes = nodes, .node_count = 5, .edges = edges, .edge_count = 5,
+        .nodes = nodes, .node_count = 5, .edges = edges, .edge_count = 6,
     };
     cbm_zova_workspace_generation_result_t published = {0};
     if (cbm_zova_user_database_publish_workspace(fx->path, &input, &published) != 0) return -1;
@@ -265,6 +269,160 @@ TEST(zova_plugin_trace_path_rejects_invalid_arguments) {
     PASS();
 }
 
+typedef struct {
+    int64_t source;
+    int64_t target;
+    char type[TZP_TEXT_MAX];
+    char local_name[TZP_TEXT_MAX];
+    char properties[TZP_TEXT_MAX];
+} plugin_edge_hit_t;
+
+/* Returns the row count, or -1 when the statement fails. */
+static int plugin_edges(const plugin_fixture_t *fx, int64_t node_key, const char *direction,
+                        const char *edge_types, plugin_edge_hit_t *hits) {
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "SELECT source_key,target_key,edge_type,local_name,properties "
+             "FROM zova_cbm_edges('%s',%lld,'%s','%s') ORDER BY edge_type,local_name",
+             fx->graph_name, (long long)node_key, direction, edge_types);
+    zova_statement *stmt = NULL;
+    if (zova_database_prepare(&(zova_database_prepare_request){
+            .db = fx->db, .sql = sql, .out_statement = &stmt}) != ZOVA_OK) return -1;
+    int count = 0;
+    while (count < TZP_ROWS_MAX) {
+        zova_step_result step = 0;
+        if (zova_statement_step(&(zova_statement_step_request){
+                .statement = stmt, .out_result = &step}) != ZOVA_OK) {
+            count = -1;
+            break;
+        }
+        if (step != ZOVA_STEP_ROW) break;
+        plugin_edge_hit_t *hit = &hits[count++];
+        (void)zova_statement_column_int64(&(zova_statement_column_int64_request){
+            .statement = stmt, .index = 0, .out_value = &hit->source});
+        (void)zova_statement_column_int64(&(zova_statement_column_int64_request){
+            .statement = stmt, .index = 1, .out_value = &hit->target});
+        plugin_copy_text(stmt, 2, hit->type, sizeof(hit->type));
+        plugin_copy_text(stmt, 3, hit->local_name, sizeof(hit->local_name));
+        plugin_copy_text(stmt, 4, hit->properties, sizeof(hit->properties));
+    }
+    zova_statement_finalize(stmt);
+    return count;
+}
+
+TEST(zova_plugin_edges_return_relationship_properties) {
+    plugin_fixture_t fx;
+    ASSERT_EQ(plugin_fixture_create(&fx), 0);
+    int64_t alpha = plugin_node_key(&fx, "proj.Alpha");
+    int64_t beta = plugin_node_key(&fx, "proj.Beta");
+    int64_t delta = plugin_node_key(&fx, "proj.Delta");
+    plugin_edge_hit_t hits[TZP_ROWS_MAX];
+
+    /* Every type: both cbm edges of the Alpha->Beta graph edge, then Delta. */
+    ASSERT_EQ(plugin_edges(&fx, alpha, "outbound", "", hits), 3);
+    ASSERT_STR_EQ(hits[0].type, "CALLS");
+    ASSERT_STR_EQ(hits[0].local_name, "Beta");
+    ASSERT_STR_EQ(hits[0].properties, "{\"args\":\"x\"}");
+    ASSERT_EQ(hits[0].source, alpha);
+    ASSERT_EQ(hits[0].target, beta);
+    ASSERT_STR_EQ(hits[1].local_name, "BetaAlias");
+    ASSERT_STR_EQ(hits[1].properties, "{\"args\":\"y\"}");
+    ASSERT_EQ(hits[1].target, beta);
+    ASSERT_STR_EQ(hits[2].type, "HTTP_CALLS");
+    ASSERT_EQ(hits[2].target, delta);
+
+    ASSERT_EQ(plugin_edges(&fx, alpha, "outbound", "HTTP_CALLS", hits), 1);
+    ASSERT_EQ(hits[0].target, delta);
+    ASSERT_EQ(plugin_edges(&fx, alpha, "outbound", "HTTP_CALLS,ASYNC_CALLS", hits), 1);
+    ASSERT_EQ(plugin_edges(&fx, alpha, "outbound", "NO_SUCH_TYPE", hits), 0);
+
+    /* Inbound keeps source and target in edge direction. */
+    ASSERT_EQ(plugin_edges(&fx, beta, "inbound", "CALLS", hits), 2);
+    ASSERT_EQ(hits[0].source, alpha);
+    ASSERT_EQ(hits[0].target, beta);
+    ASSERT_STR_EQ(hits[0].properties, "{\"args\":\"x\"}");
+
+    ASSERT_EQ(plugin_edges(&fx, alpha, "both", "", hits), -1);
+    ASSERT_EQ(plugin_edges(&fx, alpha, "outbound", "CALLS,", hits), -1);
+    ASSERT_EQ(plugin_edges(&fx, 0, "outbound", "", hits), -1);
+    plugin_fixture_cleanup(&fx);
+    PASS();
+}
+
+/* 300 edges with 6 KB of properties each: a 256-key payload batch is over the
+ * 1 MiB read budget and has to be retried in halves. */
+TEST(zova_plugin_edges_retry_payload_batches_over_budget) {
+    enum { LEAVES = 300, NODES = LEAVES + 1, PROPS = 6000 };
+    plugin_fixture_t fx;
+    memset(&fx, 0, sizeof(fx));
+    snprintf(fx.path, sizeof(fx.path), "%s/cbm-plugin-big-%d-%p.zova", cbm_tmpdir(),
+             (int)getpid(), (void *)&fx);
+    cbm_unlink(fx.path);
+    CBMDumpNode *nodes = calloc(NODES, sizeof(*nodes));
+    CBMDumpEdge *edges = calloc(LEAVES, sizeof(*edges));
+    char (*text)[2][32] = calloc(NODES, sizeof(*text));
+    char *properties = malloc(PROPS + 1);
+    ASSERT_NOT_NULL(nodes);
+    ASSERT_NOT_NULL(edges);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(properties);
+    memset(properties, 'p', PROPS);
+    memcpy(properties, "{\"a\":\"", 6);
+    memcpy(properties + PROPS - 2, "\"}", 2);
+    properties[PROPS] = '\0';
+    for (int i = 0; i < NODES; i++) {
+        snprintf(text[i][0], sizeof(text[i][0]), "B%05d", i);
+        snprintf(text[i][1], sizeof(text[i][1]), "proj.B%05d", i);
+        nodes[i] = (CBMDumpNode){.id = i + 1, .project = "proj", .label = "Function",
+                                 .name = text[i][0], .qualified_name = text[i][1],
+                                 .file_path = "big.c", .start_line = i + 1, .end_line = i + 1,
+                                 .properties = "{}"};
+    }
+    for (int i = 0; i < LEAVES; i++) {
+        edges[i] = (CBMDumpEdge){.id = i + 1, .project = "proj", .source_id = 1,
+                                 .target_id = i + 2, .type = "CALLS", .properties = properties};
+    }
+    cbm_zova_workspace_generation_input_t input = {
+        .root_path = "/tmp/plugin-trace-big", .project = "proj",
+        .indexed_at = "2026-10-13T00:00:00Z",
+        .model_fingerprint = CBM_ZOVA_MODEL_FINGERPRINT, .vector_dimensions = 2,
+        .nodes = nodes, .node_count = NODES, .edges = edges, .edge_count = LEAVES,
+    };
+    cbm_zova_workspace_generation_result_t published = {0};
+    ASSERT_EQ(cbm_zova_user_database_publish_workspace(fx.path, &input, &published), 0);
+    free(nodes);
+    free(edges);
+    free(text);
+    free(properties);
+    ASSERT_EQ(cbm_zova_workspace_graph_name(published.workspace_id, fx.graph_name,
+                                            sizeof(fx.graph_name)), 0);
+    ASSERT_EQ(plugin_open(fx.path, 1, &fx.db), ZOVA_OK);
+    ASSERT_EQ(zova_database_extension_install(&(zova_database_extension_request){
+                  .db = fx.db, .name = "cbm"}), ZOVA_OK);
+
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "SELECT count(*),count(DISTINCT target_key),sum(length(properties)=%d) "
+             "FROM zova_cbm_edges('%s',%lld,'outbound','CALLS')",
+             PROPS, fx.graph_name, (long long)plugin_node_key(&fx, "proj.B00000"));
+    zova_statement *stmt = NULL;
+    ASSERT_EQ(zova_database_prepare(&(zova_database_prepare_request){
+                  .db = fx.db, .sql = sql, .out_statement = &stmt}), ZOVA_OK);
+    zova_step_result step = 0;
+    ASSERT_EQ(zova_statement_step(&(zova_statement_step_request){
+                  .statement = stmt, .out_result = &step}), ZOVA_OK);
+    ASSERT_EQ(step, ZOVA_STEP_ROW);
+    for (int i = 0; i < 3; i++) {
+        int64_t value = 0;
+        (void)zova_statement_column_int64(&(zova_statement_column_int64_request){
+            .statement = stmt, .index = i, .out_value = &value});
+        ASSERT_EQ(value, LEAVES);
+    }
+    zova_statement_finalize(stmt);
+    plugin_fixture_cleanup(&fx);
+    PASS();
+}
+
 /* 5000 callees exceed one adjacency page (4096 rows), one frontier batch (1024
  * keys) and one node-read batch (128 keys). */
 TEST(zova_plugin_trace_path_pages_wide_fanout) {
@@ -340,6 +498,24 @@ TEST(zova_plugin_trace_path_pages_wide_fanout) {
     ASSERT_EQ(counts[3], 1);
     ASSERT_STR_EQ(sink, "N05001");
 
+    /* 5000 edges: paged adjacency and batched payload reads. */
+    snprintf(sql, sizeof(sql),
+             "SELECT count(*),count(DISTINCT target_key),sum(properties='{}'),"
+             "sum(edge_type='CALLS') FROM zova_cbm_edges('%s',%lld,'outbound','')",
+             fx.graph_name, (long long)plugin_node_key(&fx, "proj.N00000"));
+    stmt = NULL;
+    ASSERT_EQ(zova_database_prepare(&(zova_database_prepare_request){
+                  .db = fx.db, .sql = sql, .out_statement = &stmt}), ZOVA_OK);
+    ASSERT_EQ(zova_statement_step(&(zova_statement_step_request){
+                  .statement = stmt, .out_result = &step}), ZOVA_OK);
+    ASSERT_EQ(step, ZOVA_STEP_ROW);
+    for (int i = 0; i < 4; i++) {
+        (void)zova_statement_column_int64(&(zova_statement_column_int64_request){
+            .statement = stmt, .index = i, .out_value = &counts[i]});
+        ASSERT_EQ(counts[i], LEAVES);
+    }
+    zova_statement_finalize(stmt);
+
     /* max_results keeps the first rows of the full ordering. */
     plugin_hit_t hits[TZP_ROWS_MAX];
     ASSERT_EQ(plugin_trace(&fx, plugin_node_key(&fx, "proj.N00000"), "outbound", "CALLS", 5, 2,
@@ -378,6 +554,8 @@ SUITE(zova_plugin) {
     RUN_TEST(zova_plugin_trace_path_follows_one_edge_type);
     RUN_TEST(zova_plugin_trace_path_follows_edge_type_set);
     RUN_TEST(zova_plugin_trace_path_rejects_invalid_arguments);
+    RUN_TEST(zova_plugin_edges_return_relationship_properties);
+    RUN_TEST(zova_plugin_edges_retry_payload_batches_over_budget);
     RUN_TEST(zova_plugin_trace_path_pages_wide_fanout);
     RUN_TEST(zova_plugin_installed_database_requires_linked_plugin);
 #endif

@@ -1,7 +1,7 @@
 #ifndef CBM_ZOVA_PLUGIN_H
 #define CBM_ZOVA_PLUGIN_H
 
-/* Statically linked Zova plugin "cbm". Registers the read-only table operation
+/* Statically linked Zova plugin "cbm". Registers two read-only table operations.
  *
  *   zova_cbm_trace_path(graph, start_key, direction, edge_types, max_depth, max_results)
  *
@@ -10,6 +10,13 @@
  * 'outbound' or 'inbound'; edge_types is a comma-separated list of 1..16 names.
  * Rows are ordered like cbm_store_bfs: hop, file_path, qualified_name, label,
  * start_line, end_line, node_key.
+ *
+ *   zova_cbm_edges(graph, node_key, direction, edge_types)
+ *
+ * returns the cbm edges leaving ('outbound') or entering ('inbound') one node,
+ * in adjacency order, with the relationship properties decoded from the edge
+ * payload. An empty edge_types means every type. One graph edge yields one row
+ * per cbm edge it carries; local_name tells those apart.
  *
  * Not installed in user databases: a database with the plugin installed can
  * only be opened by a host that links it. */
