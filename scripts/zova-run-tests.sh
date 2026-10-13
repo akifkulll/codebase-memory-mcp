@@ -8,7 +8,7 @@ RUNNER_DIR=${CBM_ZOVA_TEST_RUNNER_DIR:-"$ROOT/build/c"}
 runner_group_for_suite() {
   case "$1" in
     zova|zova_normalization_benchmark|zova_operations|zova_migration|\
-    zova_c_sql_functions|zova_bridge|zova_real_repo|zova_graph_real_repo|\
+    zova_c_sql_functions|zova_bridge|zova_plugin|zova_real_repo|zova_graph_real_repo|\
     zova_single_file_real_repo|zova_single_file_promotion_real_repo|\
     zova_incremental_native)
       printf 'zova\n'

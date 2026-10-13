@@ -252,6 +252,7 @@ extern void suite_zova_operations(void);
 extern void suite_zova_migration(void);
 extern void suite_zova_c_sql_functions(void);
 extern void suite_zova_bridge(void);
+extern void suite_zova_plugin(void);
 extern void suite_zova_real_repo(void);
 extern void suite_zova_graph_real_repo(void);
 extern void suite_zova_single_file_real_repo(void);
@@ -294,6 +295,7 @@ int main(int argc, char **argv) {
     RUN_EXPLICIT_SUITE(zova_normalization_benchmark);
     RUN_SELECTED_SUITE(zova_c_sql_functions);
     RUN_SELECTED_SUITE(zova_bridge);
+    RUN_SELECTED_SUITE(zova_plugin);
     RUN_EXPLICIT_SUITE(zova_real_repo);
     RUN_EXPLICIT_SUITE(zova_graph_real_repo);
     RUN_EXPLICIT_SUITE(zova_single_file_real_repo);
@@ -453,6 +455,7 @@ int main(int argc, char **argv) {
     RUN_EXPLICIT_SUITE(zova_normalization_benchmark);
     RUN_SELECTED_SUITE(zova_c_sql_functions);
     RUN_SELECTED_SUITE(zova_bridge);
+    RUN_SELECTED_SUITE(zova_plugin);
     RUN_EXPLICIT_SUITE(zova_real_repo);
     RUN_EXPLICIT_SUITE(zova_graph_real_repo);
     RUN_EXPLICIT_SUITE(zova_single_file_real_repo);
