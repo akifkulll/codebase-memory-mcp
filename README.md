@@ -168,10 +168,6 @@ Removes the installed binary, agent configs, skills, hooks, and instructions. Th
 - **gRPC, GraphQL, tRPC** service detection with protobuf Route extraction
 - **Channel detection** (`EMITS` / `LISTENS_ON`) for Socket.IO, EventEmitter, and generic pub-sub patterns across 8 languages with constant resolution
 
-### Cross-repo intelligence
-- **`CROSS_*` edges** link nodes across multiple repos indexed under the same store
-- **Cross-repo architecture summary** combining services, routes, and dependencies across the indexed fleet
-
 ### Edge types (selected)
 - `CALLS`, `IMPORTS`, `DEFINES`, `IMPLEMENTS`, `INHERITS`
 - `HTTP_CALLS`, `ASYNC_CALLS` (cross-service)
@@ -193,22 +189,6 @@ Removes the installed binary, agent configs, skills, hooks, and instructions. Th
 - **Route nodes**: REST endpoints are first-class graph entities
 - **CLI mode**: `codebase-memory-mcp cli search_graph '{"name_pattern": ".*Handler.*"}'`
 - **Release archives**: signed-by-checksum binaries and installers for macOS, Linux, and Windows on amd64 and arm64.
-
-## Team-Shared Graph Artifact
-
-Commit a single compressed file to your repo and your teammates skip the reindex.
-
-`.codebase-memory/graph.db.zst` is a zstd-compressed snapshot of the knowledge graph that lives next to your source. When you index, the artifact is written or refreshed; when a teammate clones the repo and runs `codebase-memory-mcp` for the first time, the artifact is decompressed and incremental indexing fills in their local diff.
-
-- **Format**: SQLite database, indexes stripped, `VACUUM INTO` compacted, then zstd 1.5.7 compressed (8–13:1 ratio typical)
-- **Two tiers**:
-  - **Best** (`zstd -9` + index strip + `VACUUM INTO`) — written on explicit `index_repository`
-  - **Fast** (`zstd -3`) — written by the watcher for low-latency incremental updates
-- **Bootstrap**: when no local DB exists but the artifact is present, `index_repository` imports the artifact first, then runs incremental indexing — avoiding the full reindex cost
-- **No merge pain**: a `.gitattributes` line with `merge=ours` is auto-created on first export, so concurrent edits don't produce conflicts on the binary artifact
-- **Optional**: never committed unless you want it. Add `.codebase-memory/` to `.gitignore` if you prefer everyone to reindex from scratch.
-
-The result is similar in spirit to graphify's `graphify-out/` directory, but as a single compressed file with explicit two-tier export, integrity-checked import, and zero merge friction.
 
 ## How It Works
 

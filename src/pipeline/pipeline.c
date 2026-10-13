@@ -15,7 +15,6 @@
 enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6, PL_WAL_BUF = 1040 };
 #define PL_NSEC_PER_SEC 1000000000LL
 #include "pipeline/pipeline.h"
-#include "pipeline/artifact.h"
 #include "pipeline/pipeline_internal.h"
 #include "pipeline/pass_lsp_cross.h"
 #include "pipeline/worker_pool.h"
@@ -83,7 +82,6 @@ struct cbm_pipeline {
     char *branch_qn;
     cbm_index_mode_t mode;
     atomic_int cancelled;
-    bool persistence; /* write .codebase-memory/graph.db.zst after indexing */
 
     /* Indexing state (set during run) */
     cbm_gbuf_t *gbuf;
@@ -183,18 +181,11 @@ cbm_pipeline_t *cbm_pipeline_new(const char *repo_path, const char *db_path,
     (void)cbm_git_context_resolve(repo_path, &p->git_ctx);
     p->branch_qn = cbm_git_context_branch_qn(p->project_name, &p->git_ctx);
     p->mode = mode;
-    p->persistence = false;
     p->committed_nodes = -1;
     p->committed_edges = -1;
     atomic_init(&p->cancelled, 0);
 
     return p;
-}
-
-void cbm_pipeline_set_persistence(cbm_pipeline_t *p, bool enabled) {
-    if (p) {
-        p->persistence = enabled;
-    }
 }
 
 bool cbm_pipeline_set_project_name(cbm_pipeline_t *p, const char *name) {
@@ -1414,19 +1405,6 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
     if (rc != 0) {
         cbm_log_error("pipeline.err", "phase", "zova_single_file", "path", db_path);
         return rc;
-    }
-
-    /* Export persistent artifact if enabled */
-    if (p->persistence) {
-        CBM_PROF_START(t_art);
-        int arc = cbm_artifact_export(db_path, p->repo_path, p->project_name, CBM_ARTIFACT_BEST);
-        CBM_PROF_END("persist", "6_artifact_export", t_art);
-        if (arc != 0) {
-            const char *err = cbm_artifact_export_last_error();
-            cbm_log_error("pipeline.err", "phase", "artifact_export", "err", err ? err : "unknown");
-            /* A failed persistence export intentionally fails the run; this used to be ignored. */
-            return arc;
-        }
     }
 
     return 0;

@@ -12,7 +12,7 @@ mcp_query=(
 pipeline=(
   graph_buffer registry pipeline index_resilience fqn route_canon path_alias watcher
   configlink infrascan worker_pool parallel incremental discover language userconfig
-  gitignore git_context traces artifact
+  gitignore git_context traces
 )
 languages=(
   extraction extraction_inheritance extraction_imports grammar_regression grammar_labels
