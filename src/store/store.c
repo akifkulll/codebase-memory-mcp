@@ -2625,6 +2625,57 @@ static int query_neighbor_names(sqlite3 *db, const char *sql, int64_t node_id, i
     return 0;
 }
 
+static int store_name_compare(const void *left, const void *right) {
+    return strcmp(*(char *const *)left, *(char *const *)right);
+}
+
+/* Distinct, sorted names of the call neighbors of a Zova node, from the graph's
+ * own adjacency index and the workspace nodes view. */
+static int store_zova_neighbor_names(cbm_store_t *s, const char *stable_id, bool inbound,
+                                     int limit, char ***out, int *out_count) {
+    int64_t *keys = NULL;
+    int key_count = 0;
+    if (cbm_zova_repository_call_neighbor_keys(s->zova_repository, s->zova_graph_workspace_id,
+                                               stable_id, inbound, &keys,
+                                               &key_count) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (key_count == 0 || sqlite3_prepare_v2(s->db, "SELECT name FROM nodes WHERE id = ?1",
+                                             CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        free(keys);
+        return key_count == 0 ? CBM_STORE_OK : CBM_STORE_ERR;
+    }
+    char **names = malloc((size_t)key_count * sizeof(char *));
+    int count = 0;
+    for (int i = 0; names && i < key_count; i++) {
+        sqlite3_reset(stmt);
+        sqlite3_bind_int64(stmt, SKIP_ONE, keys[i]);
+        const char *name =
+            sqlite3_step(stmt) == SQLITE_ROW ? (const char *)sqlite3_column_text(stmt, 0) : NULL;
+        if (name) {
+            names[count++] = heap_strdup(name);
+        }
+    }
+    sqlite3_finalize(stmt);
+    free(keys);
+    if (!names) {
+        return CBM_STORE_ERR;
+    }
+    qsort(names, (size_t)count, sizeof(char *), store_name_compare);
+    int kept = 0;
+    for (int i = 0; i < count; i++) {
+        if (kept < limit && (kept == 0 || strcmp(names[kept - 1], names[i]) != 0)) {
+            names[kept++] = names[i];
+        } else {
+            free(names[i]);
+        }
+    }
+    *out = names;
+    *out_count = kept;
+    return CBM_STORE_OK;
+}
+
 int cbm_store_node_neighbor_names(cbm_store_t *s, int64_t node_id, int limit, char ***out_callers,
                                   int *caller_count, char ***out_callees, int *callee_count) {
     if (!s) {
@@ -2636,29 +2687,21 @@ int cbm_store_node_neighbor_names(cbm_store_t *s, int64_t node_id, int limit, ch
     *callee_count = 0;
 
     if (s->zova_workspace_query && s->zova_repository) {
-        /* The edge copy is keyed by Zova node key; map the repository id to it. */
         const char *project = NULL;
-        cbm_node_t node = {0};
-        if (store_legacy_scope(s, &project, true) != CBM_STORE_OK ||
-            cbm_zova_repository_find_node_by_numeric_id(
-                s->zova_repository, s->zova_graph_workspace_id, node_id, &node) != CBM_STORE_OK) {
+        char stable[CBM_ZOVA_WORKSPACE_ID_MAX + 96] = {0};
+        if (store_legacy_scope(s, &project, false) != CBM_STORE_OK ||
+            cbm_zova_repository_stable_id_for_numeric_id(s->zova_repository,
+                                                         s->zova_graph_workspace_id, node_id,
+                                                         stable, sizeof(stable)) != CBM_STORE_OK) {
             return CBM_STORE_ERR;
         }
-        sqlite3_stmt *stmt = NULL;
-        int64_t key = 0;
-        if (sqlite3_prepare_v2(s->db, "SELECT id FROM nodes WHERE qualified_name = ?1",
-                               CBM_NOT_FOUND, &stmt, NULL) == SQLITE_OK) {
-            bind_text(stmt, SKIP_ONE, node.qualified_name);
-            if (sqlite3_step(stmt) == SQLITE_ROW) {
-                key = sqlite3_column_int64(stmt, 0);
-            }
-        }
-        sqlite3_finalize(stmt);
-        cbm_node_free_fields(&node);
-        if (key == 0) {
+        if (store_zova_neighbor_names(s, stable, true, limit, out_callers, caller_count) !=
+                CBM_STORE_OK ||
+            store_zova_neighbor_names(s, stable, false, limit, out_callees, callee_count) !=
+                CBM_STORE_OK) {
             return CBM_STORE_ERR;
         }
-        node_id = key;
+        return 0;
     }
 
     query_neighbor_names(

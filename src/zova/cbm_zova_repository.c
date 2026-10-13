@@ -1624,6 +1624,41 @@ static int repo_append_payload_edge(
     return 0;
 }
 
+int cbm_zova_repository_call_neighbor_keys(cbm_zova_repository_t *repo, const char *workspace_id,
+                                           const char *stable_id, bool inbound, int64_t **out,
+                                           int *out_count) {
+    if (repo_workspace_required(repo, workspace_id) != CBM_STORE_OK || !stable_id || !out ||
+        !out_count) return CBM_STORE_ERR;
+    *out = NULL; *out_count = 0;
+    char graph_name[REPO_GRAPH_NAME_CAP];
+    if (repo_graph_name(repo, graph_name, sizeof(graph_name)) != 0) return CBM_STORE_ERR;
+    zova_graph_keyed_neighbor_results neighbors = {0};
+    if (zova_graph_neighbors_keyed(&(zova_graph_neighbors_keyed_request){
+            .db=repo->db,.graph_name=graph_name,.node_id=stable_id,
+            .direction=inbound ? ZOVA_GRAPH_NEIGHBOR_INCOMING : ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+            .edge_type=NULL,.limit=(size_t)INT64_MAX,.out_results=&neighbors}) != ZOVA_OK) {
+        zova_graph_keyed_neighbor_results_free(&neighbors);
+        return CBM_STORE_ERR;
+    }
+    int64_t *keys = neighbors.len ? calloc(neighbors.len, sizeof(*keys)) : NULL;
+    if (neighbors.len && !keys) {
+        zova_graph_keyed_neighbor_results_free(&neighbors);
+        return CBM_STORE_ERR;
+    }
+    int count = 0;
+    for (size_t i = 0; i < neighbors.len; i++) {
+        const char *type = neighbors.items[i].edge_type;
+        size_t len = neighbors.items[i].edge_type_len;
+        if (type && ((len == 5 && memcmp(type, "CALLS", 5) == 0) ||
+                     (len == 10 && memcmp(type, "HTTP_CALLS", 10) == 0) ||
+                     (len == 11 && memcmp(type, "ASYNC_CALLS", 11) == 0)))
+            keys[count++] = neighbors.items[i].neighbor_node_key;
+    }
+    zova_graph_keyed_neighbor_results_free(&neighbors);
+    *out = keys; *out_count = count;
+    return CBM_STORE_OK;
+}
+
 int cbm_zova_repository_find_edges(cbm_zova_repository_t *repo, const char *workspace_id,
                                    const char *stable_id,
                                    const char *direction, cbm_edge_t **out, int *out_count) {
@@ -3048,6 +3083,7 @@ int cbm_zova_repository_find_nodes_by_keys(cbm_zova_repository_t*r,const char*w,
 int cbm_zova_repository_find_node_by_numeric_id(cbm_zova_repository_t*r,const char*w,int64_t n,cbm_node_t*o){(void)r;(void)w;(void)n;(void)o;return CBM_STORE_ERR;}
 int cbm_zova_repository_find_nodes_by_file_overlap(cbm_zova_repository_t*r,const char*w,const char*f,int s,int e,cbm_node_t**o,int*c){(void)r;(void)w;(void)f;(void)s;(void)e;(void)o;(void)c;return CBM_STORE_ERR;}
 int cbm_zova_repository_stable_id_for_numeric_id(cbm_zova_repository_t*r,const char*w,int64_t n,char*o,size_t z){(void)r;(void)w;(void)n;if(o&&z)o[0]='\0';return CBM_STORE_ERR;}
+int cbm_zova_repository_call_neighbor_keys(cbm_zova_repository_t*r,const char*w,const char*s,bool i,int64_t**o,int*c){(void)r;(void)w;(void)s;(void)i;(void)o;(void)c;return CBM_STORE_ERR;}
 int cbm_zova_repository_find_edges(cbm_zova_repository_t*r,const char*w,const char*s,const char*d,cbm_edge_t**o,int*c){(void)r;(void)w;(void)s;(void)d;(void)o;(void)c;return CBM_STORE_ERR;}
 int cbm_zova_repository_visit_edges(cbm_zova_repository_t*r,const char*w,cbm_zova_repository_edge_visitor_t v,void*c){(void)r;(void)w;(void)v;(void)c;return CBM_STORE_ERR;}
 int cbm_zova_repository_search(cbm_zova_repository_t*r,const char*w,const cbm_search_params_t*p,cbm_search_output_t*o){(void)r;(void)w;(void)p;(void)o;return CBM_STORE_ERR;}
