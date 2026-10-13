@@ -5632,6 +5632,100 @@ TEST(zova_prepared_view_normalization_benchmark) {
     PASS();
 }
 
+#if CBM_WITH_ZOVA
+/* Schema, counts and architecture read the workspace through the legacy
+ * nodes/edges shape. src/a.c: Alpha, Beta; src/b.c: Gamma; lib/c.py: Widget.
+ * Alpha calls Beta twice (one graph edge, two cbm edges). */
+TEST(zova_workspace_store_reports_schema_counts_and_architecture) {
+    char path[TZ_PATH_MAX];
+    snprintf(path, sizeof(path), "%s/cbm-zova-schema-%d.zova", cbm_tmpdir(), getpid());
+    cbm_unlink(path);
+    const CBMDumpNode nodes[] = {
+        {.id = 1, .project = "proj", .label = "Function", .name = "Alpha",
+         .qualified_name = "proj.src.a.Alpha", .file_path = "src/a.c", .start_line = 1,
+         .end_line = 2, .properties = "{\"complexity\":3}"},
+        {.id = 2, .project = "proj", .label = "Function", .name = "Beta",
+         .qualified_name = "proj.src.a.Beta", .file_path = "src/a.c", .start_line = 3,
+         .end_line = 4, .properties = "{}"},
+        {.id = 3, .project = "proj", .label = "Function", .name = "Gamma",
+         .qualified_name = "proj.src.b.Gamma", .file_path = "src/b.c", .start_line = 1,
+         .end_line = 2, .properties = "{}"},
+        {.id = 4, .project = "proj", .label = "Class", .name = "Widget",
+         .qualified_name = "proj.lib.c.Widget", .file_path = "lib/c.py", .start_line = 1,
+         .end_line = 9, .properties = "{}"},
+        {.id = 5, .project = "proj", .label = "File", .name = "a.c",
+         .qualified_name = "proj.src.a", .file_path = "src/a.c", .properties = "{}"},
+        {.id = 6, .project = "proj", .label = "File", .name = "c.py",
+         .qualified_name = "proj.lib.c", .file_path = "lib/c.py", .properties = "{}"},
+    };
+    const CBMDumpEdge edges[] = {
+        {.id = 1, .project = "proj", .source_id = 1, .target_id = 2, .type = "CALLS",
+         .properties = "{\"args\":\"x\"}", .local_name = "Beta"},
+        {.id = 2, .project = "proj", .source_id = 1, .target_id = 2, .type = "CALLS",
+         .properties = "{}", .local_name = "BetaAlias"},
+        {.id = 3, .project = "proj", .source_id = 3, .target_id = 2, .type = "CALLS",
+         .properties = "{}"},
+        {.id = 4, .project = "proj", .source_id = 4, .target_id = 1, .type = "USAGE",
+         .properties = "{}"},
+    };
+    cbm_zova_workspace_generation_input_t input = {
+        .root_path = "/tmp/zova-schema", .project = "proj",
+        .indexed_at = "2026-10-13T00:00:00Z",
+        .model_fingerprint = CBM_ZOVA_MODEL_FINGERPRINT, .vector_dimensions = 2,
+        .nodes = nodes, .node_count = 6, .edges = edges, .edge_count = 4,
+    };
+    cbm_zova_workspace_generation_result_t published = {0};
+    ASSERT_EQ(cbm_zova_user_database_publish_workspace(path, &input, &published), 0);
+    cbm_store_t *store = cbm_store_open_zova_workspace_query(path, published.workspace_id);
+    ASSERT_NOT_NULL(store);
+
+    /* The store is one workspace, so the project selector does not filter. */
+    ASSERT_EQ(cbm_store_count_nodes(store, "any-selector"), 6);
+    ASSERT_EQ(cbm_store_count_edges(store, "any-selector"), 4);
+    ASSERT_EQ(cbm_store_count_edges_by_type(store, "proj", "CALLS"), 3);
+    ASSERT_EQ(cbm_store_count_nodes_scoped(store, "proj", "src"), 4);
+    ASSERT_EQ(cbm_store_count_edges_scoped(store, "proj", "src"), 3);
+
+    cbm_schema_info_t schema = {0};
+    ASSERT_EQ(cbm_store_get_schema(store, "proj", &schema), CBM_STORE_OK);
+    ASSERT_EQ(schema.node_label_count, 3);
+    ASSERT_STR_EQ(schema.node_labels[0].label, "Function");
+    ASSERT_EQ(schema.node_labels[0].count, 3);
+    bool has_complexity = false;
+    for (int i = 0; i < schema.node_labels[0].property_count; i++) {
+        has_complexity |= strcmp(schema.node_labels[0].properties[i], "complexity") == 0;
+    }
+    ASSERT_TRUE(has_complexity);
+    ASSERT_EQ(schema.edge_type_count, 2);
+    ASSERT_STR_EQ(schema.edge_types[0].type, "CALLS");
+    ASSERT_EQ(schema.edge_types[0].count, 3);
+    bool has_args = false;
+    for (int i = 0; i < schema.edge_types[0].property_count; i++) {
+        has_args |= strcmp(schema.edge_types[0].properties[i], "args") == 0;
+    }
+    ASSERT_TRUE(has_args);
+    cbm_store_schema_free(&schema);
+
+    ASSERT_EQ(cbm_store_get_schema_counts_scoped(store, "proj", "lib", &schema), CBM_STORE_OK);
+    ASSERT_EQ(schema.node_label_count, 2);
+    ASSERT_EQ(schema.edge_type_count, 0);
+    cbm_store_schema_free(&schema);
+
+    cbm_architecture_info_t arch = {0};
+    ASSERT_EQ(cbm_store_get_architecture(store, "proj", NULL, NULL, 0, &arch), CBM_STORE_OK);
+    ASSERT_EQ(arch.language_count, 2);
+    ASSERT_GT(arch.hotspot_count, 0);
+    ASSERT_STR_EQ(arch.hotspots[0].name, "Beta");
+    ASSERT_EQ(arch.hotspots[0].fan_in, 3);
+    ASSERT_GT(arch.file_tree_count, 0);
+    cbm_store_architecture_free(&arch);
+
+    cbm_store_close(store);
+    cbm_unlink(path);
+    PASS();
+}
+#endif
+
 SUITE(zova_normalization_benchmark) {
     RUN_TEST(zova_prepared_view_normalization_benchmark);
 }
@@ -5704,5 +5798,6 @@ SUITE(zova) {
     RUN_TEST(zova_publish_model_uses_bounded_row_storage_allocations);
     RUN_TEST(zova_prepared_view_uses_implicit_default_edge_payload);
     RUN_TEST(zova_prepared_view_encodes_single_metadata_edge_without_group_scratch);
+    RUN_TEST(zova_workspace_store_reports_schema_counts_and_architecture);
 #endif
 }

@@ -1720,6 +1720,64 @@ int cbm_zova_repository_find_edges(cbm_zova_repository_t *repo, const char *work
     *out=edges;*out_count=count;return CBM_STORE_OK;
 }
 
+typedef struct {
+    const zova_graph_scan_edge *native;
+    cbm_zova_repository_edge_visitor_t visitor;
+    void *context;
+} repo_visit_edge_context_t;
+
+static int repo_visit_payload_edge(const cbm_zova_edge_payload_record_t *record,
+                                   void *context_ptr) {
+    const repo_visit_edge_context_t *context = context_ptr;
+    return context->visitor(context->native->source_node_key, context->native->target_node_key,
+                            context->native->edge_type, context->native->edge_type_len,
+                            record->properties.data, record->properties.len, context->context);
+}
+
+int cbm_zova_repository_visit_edges(cbm_zova_repository_t *repo, const char *workspace_id,
+                                    cbm_zova_repository_edge_visitor_t visitor, void *context) {
+    char graph_name[REPO_GRAPH_NAME_CAP];
+    if (repo_workspace_required(repo, workspace_id) != CBM_STORE_OK || !visitor ||
+        repo_graph_name(repo, graph_name, sizeof(graph_name)) != 0) {
+        return CBM_STORE_ERR;
+    }
+    zova_graph_scan_cursor cursor = {0};
+    int64_t edge_keys[REPO_EDGE_SCAN_PAGE];
+    for (;;) {
+        zova_graph_scan_results page = {0};
+        zova_graph_edge_payload_results payloads = {0};
+        int ok = zova_graph_scan(&(zova_graph_scan_request){
+                     .db = repo->db, .graph_name = graph_name, .edge_after = cursor,
+                     .node_limit = 0, .edge_limit = REPO_EDGE_SCAN_PAGE,
+                     .out_results = &page}) == ZOVA_OK &&
+                 page.edges_len <= REPO_EDGE_SCAN_PAGE;
+        for (size_t i = 0; ok && i < page.edges_len; i++) edge_keys[i] = page.edges[i].edge_key;
+        ok = ok && (page.edges_len == 0 ||
+                    (zova_graph_edge_payload_get_many(&(zova_graph_edge_payload_get_many_request){
+                         .db = repo->db, .graph_name = graph_name, .edge_keys = edge_keys,
+                         .key_count = page.edges_len, .out_results = &payloads}) == ZOVA_OK &&
+                     payloads.len == page.edges_len));
+        for (size_t i = 0; ok && i < page.edges_len; i++) {
+            repo_visit_edge_context_t edge = {&page.edges[i], visitor, context};
+            ok = payloads.items[i].found &&
+                 payloads.items[i].edge_key == page.edges[i].edge_key &&
+                 cbm_zova_edge_payload_visit(payloads.items[i].payload,
+                                             payloads.items[i].payload_len,
+                                             repo_visit_payload_edge, &edge, NULL) == 0;
+        }
+        if (page.edges_len) {
+            const zova_graph_scan_edge *last = &page.edges[page.edges_len - 1];
+            cursor = (zova_graph_scan_cursor){.created_order = last->created_order,
+                                              .key = last->edge_key};
+        }
+        uint8_t more = page.has_more_edges;
+        zova_graph_edge_payload_results_free(&payloads);
+        zova_graph_scan_results_free(&page);
+        if (!ok) return CBM_STORE_ERR;
+        if (!more) return CBM_STORE_OK;
+    }
+}
+
 int cbm_zova_repository_search_fts(cbm_zova_repository_t *repo, const char *workspace_id,
                                    const char *query,
                                    const char *file_pattern, int limit, int offset,
@@ -2991,6 +3049,7 @@ int cbm_zova_repository_find_node_by_numeric_id(cbm_zova_repository_t*r,const ch
 int cbm_zova_repository_find_nodes_by_file_overlap(cbm_zova_repository_t*r,const char*w,const char*f,int s,int e,cbm_node_t**o,int*c){(void)r;(void)w;(void)f;(void)s;(void)e;(void)o;(void)c;return CBM_STORE_ERR;}
 int cbm_zova_repository_stable_id_for_numeric_id(cbm_zova_repository_t*r,const char*w,int64_t n,char*o,size_t z){(void)r;(void)w;(void)n;if(o&&z)o[0]='\0';return CBM_STORE_ERR;}
 int cbm_zova_repository_find_edges(cbm_zova_repository_t*r,const char*w,const char*s,const char*d,cbm_edge_t**o,int*c){(void)r;(void)w;(void)s;(void)d;(void)o;(void)c;return CBM_STORE_ERR;}
+int cbm_zova_repository_visit_edges(cbm_zova_repository_t*r,const char*w,cbm_zova_repository_edge_visitor_t v,void*c){(void)r;(void)w;(void)v;(void)c;return CBM_STORE_ERR;}
 int cbm_zova_repository_search(cbm_zova_repository_t*r,const char*w,const cbm_search_params_t*p,cbm_search_output_t*o){(void)r;(void)w;(void)p;(void)o;return CBM_STORE_ERR;}
 int cbm_zova_repository_search_fts(cbm_zova_repository_t*r,const char*w,const char*q,const char*f,int l,int x,cbm_search_output_t*o){(void)r;(void)w;(void)q;(void)f;(void)l;(void)x;(void)o;return CBM_STORE_ERR;}
 int cbm_zova_repository_index_status(cbm_zova_repository_t*r,const char*w,int64_t*g,char**i){(void)r;(void)w;(void)g;(void)i;return CBM_STORE_ERR;}

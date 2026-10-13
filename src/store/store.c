@@ -129,6 +129,9 @@ struct cbm_store {
     cbm_zova_graph_metrics_t zova_graph_last_metrics;
     bool zova_workspace_query;
     cbm_zova_repository_t *zova_repository;
+    /* Legacy nodes/edges shape over the workspace; see store_legacy_scope. */
+    char *zova_legacy_project;
+    bool zova_legacy_edges;
     int zova_native_topology_ops;
 
     /* Prepared statements (lazily initialized, cached for lifetime) */
@@ -1150,6 +1153,8 @@ void cbm_store_close(cbm_store_t *s) {
     store_clear_zova_graph_workspace(s);
     cbm_zova_repository_close(s->zova_repository);
     s->zova_repository = NULL;
+    free(s->zova_legacy_project);
+    s->zova_legacy_project = NULL;
 
     /* Checkpoint WAL before close to prevent orphan WAL accumulation.
      * Best-effort — silently skips if concurrent reader holds a lock. */
@@ -1796,9 +1801,96 @@ int cbm_store_find_nodes_by_file(cbm_store_t *s, const char *project, const char
                               project, file_path, out, count);
 }
 
+typedef struct {
+    sqlite3_stmt *insert;
+    const char *project;
+} legacy_edge_context_t;
+
+static int store_legacy_edge(int64_t source_key, int64_t target_key, const char *type,
+                             size_t type_len, const uint8_t *properties, size_t properties_len,
+                             void *context_ptr) {
+    const legacy_edge_context_t *context = context_ptr;
+    sqlite3_stmt *insert = context->insert;
+    sqlite3_reset(insert);
+    return sqlite3_bind_text(insert, 1, context->project, -1, SQLITE_STATIC) == SQLITE_OK &&
+                   sqlite3_bind_int64(insert, 2, source_key) == SQLITE_OK &&
+                   sqlite3_bind_int64(insert, 3, target_key) == SQLITE_OK &&
+                   sqlite3_bind_text(insert, 4, type, (int)type_len, SQLITE_STATIC) == SQLITE_OK &&
+                   sqlite3_bind_text(insert, 5, (const char *)properties, (int)properties_len,
+                                     SQLITE_STATIC) == SQLITE_OK &&
+                   sqlite3_step(insert) == SQLITE_DONE
+               ? 0
+               : -1;
+}
+
+/* A Zova workspace store has no legacy nodes and edges tables. The schema,
+ * count and architecture queries below still read that shape, so it is
+ * provided in the temp schema: nodes as a view over the workspace's rows and,
+ * when with_edges is set, edges as a copy of the workspace graph's edges read
+ * once per store. Node ids are Zova node keys on both sides. The store holds
+ * one workspace, so *project is replaced by the name the rows carry. Does
+ * nothing for other stores. */
+static int store_legacy_scope(cbm_store_t *s, const char **project, bool with_edges) {
+    if (!s || !s->db || !s->zova_workspace_query || !s->zova_repository) return CBM_STORE_OK;
+    if (!s->zova_legacy_project) {
+        cbm_project_t row = {0};
+        if (cbm_zova_repository_get_project(s->zova_repository, s->zova_graph_workspace_id,
+                                            &row) != CBM_STORE_OK) {
+            return CBM_STORE_ERR;
+        }
+        char *sql = sqlite3_mprintf(
+            "CREATE TEMP VIEW nodes AS SELECT n.zova_node_key AS id,%Q AS project,n.label,"
+            "n.name,n.qualified_name,f.file_path,n.start_line,n.end_line,n.properties "
+            "FROM main.cbm_nodes_v1 n JOIN main.cbm_files_v1 f ON f.file_key=n.file_key "
+            "WHERE n.workspace_key=(SELECT workspace_key FROM main.cbm_workspace_registry "
+            "WHERE workspace_id=%Q)",
+            row.name, s->zova_graph_workspace_id);
+        int rc = sql ? sqlite3_exec(s->db, sql, NULL, NULL, NULL) : SQLITE_NOMEM;
+        sqlite3_free(sql);
+        if (rc == SQLITE_OK) s->zova_legacy_project = heap_strdup(row.name);
+        cbm_project_free_fields(&row);
+        if (!s->zova_legacy_project) {
+            store_set_error_sqlite(s, "zova legacy nodes");
+            return CBM_STORE_ERR;
+        }
+    }
+    if (with_edges && !s->zova_legacy_edges) {
+        legacy_edge_context_t context = {.project = s->zova_legacy_project};
+        int ok = sqlite3_exec(s->db,
+                              "DROP TABLE IF EXISTS temp.edges;"
+                              "CREATE TEMP TABLE edges(id INTEGER PRIMARY KEY,project TEXT,"
+                              "source_id INTEGER,target_id INTEGER,type TEXT,properties TEXT);"
+                              "BEGIN",
+                              NULL, NULL, NULL) == SQLITE_OK &&
+                 sqlite3_prepare_v2(s->db,
+                                    "INSERT INTO temp.edges(project,source_id,target_id,type,"
+                                    "properties) VALUES(?1,?2,?3,?4,?5)",
+                                    -1, &context.insert, NULL) == SQLITE_OK &&
+                 cbm_zova_repository_visit_edges(s->zova_repository, s->zova_graph_workspace_id,
+                                                 store_legacy_edge, &context) == CBM_STORE_OK;
+        sqlite3_finalize(context.insert);
+        ok = sqlite3_exec(s->db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK && ok;
+        ok = ok && sqlite3_exec(s->db,
+                                "CREATE INDEX temp.idx_edges_source ON edges(source_id,type);"
+                                "CREATE INDEX temp.idx_edges_target ON edges(target_id,type);"
+                                "CREATE INDEX temp.idx_edges_type ON edges(project,type);",
+                                NULL, NULL, NULL) == SQLITE_OK;
+        if (!ok) {
+            store_set_error_sqlite(s, "zova legacy edges");
+            return CBM_STORE_ERR;
+        }
+        s->zova_legacy_edges = true;
+    }
+    *project = s->zova_legacy_project;
+    return CBM_STORE_OK;
+}
+
 int cbm_store_count_nodes(cbm_store_t *s, const char *project) {
     if (!s || !s->db) {
         return 0;
+    }
+    if (store_legacy_scope(s, &project, false) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
     }
     sqlite3_stmt *stmt =
         prepare_cached(s, &s->stmt_count_nodes, "SELECT COUNT(*) FROM nodes WHERE project = ?1;");
@@ -2087,6 +2179,14 @@ int cbm_store_count_edges(cbm_store_t *s, const char *project) {
     if (!s || !s->db) {
         return 0;
     }
+    if (s->zova_workspace_query && s->zova_repository) {
+        int nodes = 0;
+        int edges = 0;
+        return cbm_zova_repository_counts(s->zova_repository, s->zova_graph_workspace_id, &nodes,
+                                          &edges) == CBM_STORE_OK
+                   ? edges
+                   : CBM_STORE_ERR;
+    }
     sqlite3_stmt *stmt =
         prepare_cached(s, &s->stmt_count_edges, "SELECT COUNT(*) FROM edges WHERE project = ?1;");
     if (!stmt) {
@@ -2101,6 +2201,9 @@ int cbm_store_count_edges(cbm_store_t *s, const char *project) {
 }
 
 int cbm_store_count_edges_by_type(cbm_store_t *s, const char *project, const char *type) {
+    if (store_legacy_scope(s, &project, true) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
     sqlite3_stmt *stmt =
         prepare_cached(s, &s->stmt_count_edges_by_type,
                        "SELECT COUNT(*) FROM edges WHERE project = ?1 AND type = ?2;");
@@ -3736,6 +3839,9 @@ int cbm_store_count_nodes_scoped(cbm_store_t *s, const char *project, const char
     if (!s || !s->db || !project) {
         return 0;
     }
+    if (store_legacy_scope(s, &project, false) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
     char norm[CBM_SZ_512];
     char like[CBM_SZ_512];
     if (!arch_path_prepare(path, norm, sizeof(norm), like, sizeof(like))) {
@@ -3763,6 +3869,9 @@ int cbm_store_count_nodes_scoped(cbm_store_t *s, const char *project, const char
 int cbm_store_count_edges_scoped(cbm_store_t *s, const char *project, const char *path) {
     if (!s || !s->db || !project) {
         return 0;
+    }
+    if (store_legacy_scope(s, &project, true) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
     }
     char norm[CBM_SZ_512];
     char like[CBM_SZ_512];
@@ -3800,6 +3909,9 @@ static int get_schema_impl(cbm_store_t *s, const char *project, cbm_schema_info_
     memset(out, 0, sizeof(*out));
     if (!s || !s->db) {
         return CBM_NOT_FOUND;
+    }
+    if (store_legacy_scope(s, &project, true) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
     }
 
     /* Node labels */
@@ -3950,6 +4062,9 @@ int cbm_store_get_schema_counts_scoped(cbm_store_t *s, const char *project, cons
     memset(out, 0, sizeof(*out));
     if (!s || !s->db) {
         return CBM_NOT_FOUND;
+    }
+    if (store_legacy_scope(s, &project, true) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
     }
     char norm[CBM_SZ_512];
     char like[CBM_SZ_512];
@@ -6103,7 +6218,10 @@ int cbm_store_get_architecture(cbm_store_t *s, const char *project, const char *
                                const char **aspects, int aspect_count,
                                cbm_architecture_info_t *out) {
     memset(out, 0, sizeof(*out));
-    int rc;
+    int rc = store_legacy_scope(s, &project, true);
+    if (rc != CBM_STORE_OK) {
+        return rc;
+    }
 
     if (want_aspect(aspects, aspect_count, "languages")) {
         rc = arch_languages(s, project, path, out);

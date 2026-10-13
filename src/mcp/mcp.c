@@ -1674,7 +1674,10 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
     }
 
     cbm_schema_info_t schema = {0};
-    cbm_store_get_schema(store, project, &schema);
+    if (cbm_store_get_schema(store, project, &schema) != CBM_STORE_OK) {
+        free(project);
+        return cbm_mcp_text_result("failed to read the graph schema", true);
+    }
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -3136,15 +3139,26 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
     /* Counts-only: this handler renders label/type counts but never property
      * keys, and full key discovery json_each-scans every row (seconds-to-
      * minutes on multi-million-node graphs). */
-    cbm_store_get_schema_counts_scoped(store, project, scope_path, &schema);
+    int schema_rc = cbm_store_get_schema_counts_scoped(store, project, scope_path, &schema);
 
     cbm_architecture_info_t arch = {0};
-    cbm_store_get_architecture(store, project, scope_path,
-                               aspects_strs_count > 0 ? aspects_strs : NULL, aspects_strs_count,
-                               &arch);
+    int arch_rc = cbm_store_get_architecture(store, project, scope_path,
+                                             aspects_strs_count > 0 ? aspects_strs : NULL,
+                                             aspects_strs_count, &arch);
 
     int node_count = cbm_store_count_nodes_scoped(store, project, scope_path);
     int edge_count = cbm_store_count_edges_scoped(store, project, scope_path);
+    if (schema_rc != CBM_STORE_OK || arch_rc != CBM_STORE_OK || node_count < 0 ||
+        edge_count < 0) {
+        cbm_store_schema_free(&schema);
+        cbm_store_architecture_free(&arch);
+        free(project);
+        free(scope_path);
+        if (aspects_doc) {
+            yyjson_doc_free(aspects_doc);
+        }
+        return cbm_mcp_text_result("failed to read the project architecture", true);
+    }
     char norm_path[CBM_SZ_512];
     bool path_scoped = cbm_store_normalize_arch_path(scope_path, norm_path, sizeof(norm_path));
 

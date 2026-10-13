@@ -168,6 +168,14 @@ int cbm_zova_repository_stable_id_for_numeric_id(cbm_zova_repository_t *repo,
 int cbm_zova_repository_find_edges(cbm_zova_repository_t *repo, const char *workspace_id,
                                    const char *stable_id,
                                    const char *direction, cbm_edge_t **out, int *out_count);
+/* One cbm edge of the workspace graph; endpoints are Zova node keys. The
+ * pointers are borrowed for the call. Return nonzero to stop with an error. */
+typedef int (*cbm_zova_repository_edge_visitor_t)(int64_t source_key, int64_t target_key,
+                                                  const char *type, size_t type_len,
+                                                  const uint8_t *properties,
+                                                  size_t properties_len, void *context);
+int cbm_zova_repository_visit_edges(cbm_zova_repository_t *repo, const char *workspace_id,
+                                    cbm_zova_repository_edge_visitor_t visitor, void *context);
 int cbm_zova_repository_search(cbm_zova_repository_t *repo, const char *workspace_id,
                                const cbm_search_params_t *params, cbm_search_output_t *out);
 int cbm_zova_repository_search_fts(cbm_zova_repository_t *repo, const char *workspace_id,
