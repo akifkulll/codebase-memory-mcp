@@ -51,7 +51,7 @@ if [[ -e "$test_home_first" || -e "$test_cache_first" ]]; then
 fi
 echo "PASS: zova test workflow builds once and runs requested suites directly"
 
-grep -q 'Zova C ABI, v0.' "$ROOT/build.zig"
+grep -q 'Zova C ABI, v1.' "$ROOT/build.zig"
 grep -q 'zova_graph_edge_delete_many' "$ROOT/build.zig"
 grep -q 'zova_vector_delete_many' "$ROOT/build.zig"
 grep -q 'zova_graph_build_fresh_keyed' "$ROOT/build.zig"
