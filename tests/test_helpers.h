@@ -19,6 +19,7 @@
 #include "../src/zova/cbm_zova_route.h"
 #include "../src/zova/cbm_zova_repository.h"
 
+#include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -189,6 +190,115 @@ static inline cbm_store_t *th_open_project_store(const char *project) {
     snprintf(workspace_id, sizeof(workspace_id), "%s", cbm_zova_repository_workspace_id(repo));
     cbm_zova_repository_close(repo);
     return cbm_store_open_zova_workspace_query(path, workspace_id);
+}
+
+/* Remove the shared cbm.zova so a fixture starts from an empty catalog. */
+static inline void th_remove_zova_user_database(void) {
+    char path[1024];
+    char side[1040];
+    if (cbm_zova_user_database_path(path, sizeof(path)) != 0) {
+        return;
+    }
+    cbm_unlink(path);
+    snprintf(side, sizeof(side), "%s-wal", path);
+    cbm_unlink(side);
+    snprintf(side, sizeof(side), "%s-shm", path);
+    cbm_unlink(side);
+}
+
+static inline char *th_strdup_column(sqlite3_stmt *stmt, int column) {
+    const char *text = (const char *)sqlite3_column_text(stmt, column);
+    return strdup(text ? text : "");
+}
+
+/* Publish one project of a fixture store (nodes, edges, root path) as a
+ * workspace generation in the shared cbm.zova, so MCP handlers can serve it.
+ * Returns 0 on success. */
+static inline int th_publish_store_project(cbm_store_t *store, const char *project) {
+    char path[1024];
+    sqlite3 *db = store ? cbm_store_get_db(store) : NULL;
+    if (!db || !project || cbm_zova_user_database_path(path, sizeof(path)) != 0) {
+        return -1;
+    }
+    cbm_project_t row = {0};
+    if (cbm_store_get_project(store, project, &row) != CBM_STORE_OK) {
+        return -1;
+    }
+    int rc = -1;
+    int node_count = 0;
+    int edge_count = 0;
+    CBMDumpNode *nodes = NULL;
+    CBMDumpEdge *edges = NULL;
+    sqlite3_stmt *node_stmt = NULL;
+    sqlite3_stmt *edge_stmt = NULL;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT id,label,name,qualified_name,file_path,start_line,end_line,"
+                           "properties FROM nodes WHERE project=?1 ORDER BY id",
+                           -1, &node_stmt, NULL) != SQLITE_OK ||
+        sqlite3_prepare_v2(db,
+                           "SELECT id,source_id,target_id,type,properties FROM edges "
+                           "WHERE project=?1 ORDER BY id",
+                           -1, &edge_stmt, NULL) != SQLITE_OK) {
+        goto done;
+    }
+    sqlite3_bind_text(node_stmt, 1, project, -1, SQLITE_STATIC);
+    sqlite3_bind_text(edge_stmt, 1, project, -1, SQLITE_STATIC);
+    while (sqlite3_step(node_stmt) == SQLITE_ROW) {
+        nodes = realloc(nodes, (size_t)(node_count + 1) * sizeof(*nodes));
+        nodes[node_count++] = (CBMDumpNode){
+            .id = sqlite3_column_int64(node_stmt, 0),
+            .project = project,
+            .label = th_strdup_column(node_stmt, 1),
+            .name = th_strdup_column(node_stmt, 2),
+            .qualified_name = th_strdup_column(node_stmt, 3),
+            .file_path = th_strdup_column(node_stmt, 4),
+            .start_line = sqlite3_column_int(node_stmt, 5),
+            .end_line = sqlite3_column_int(node_stmt, 6),
+            .properties = th_strdup_column(node_stmt, 7),
+        };
+    }
+    while (sqlite3_step(edge_stmt) == SQLITE_ROW) {
+        edges = realloc(edges, (size_t)(edge_count + 1) * sizeof(*edges));
+        edges[edge_count++] = (CBMDumpEdge){
+            .id = sqlite3_column_int64(edge_stmt, 0),
+            .project = project,
+            .source_id = sqlite3_column_int64(edge_stmt, 1),
+            .target_id = sqlite3_column_int64(edge_stmt, 2),
+            .type = th_strdup_column(edge_stmt, 3),
+            .properties = th_strdup_column(edge_stmt, 4),
+        };
+    }
+    cbm_zova_workspace_generation_input_t input = {
+        .root_path = row.root_path,
+        .project = project,
+        .indexed_at = "2026-01-01T00:00:00Z",
+        .model_fingerprint = CBM_ZOVA_MODEL_FINGERPRINT,
+        .vector_dimensions = 768,
+        .nodes = nodes,
+        .node_count = node_count,
+        .edges = edges,
+        .edge_count = edge_count,
+    };
+    cbm_zova_workspace_generation_result_t result = {0};
+    rc = cbm_zova_user_database_publish_workspace(path, &input, &result);
+done:
+    sqlite3_finalize(node_stmt);
+    sqlite3_finalize(edge_stmt);
+    for (int i = 0; i < node_count; i++) {
+        free((char *)nodes[i].label);
+        free((char *)nodes[i].name);
+        free((char *)nodes[i].qualified_name);
+        free((char *)nodes[i].file_path);
+        free((char *)nodes[i].properties);
+    }
+    for (int i = 0; i < edge_count; i++) {
+        free((char *)edges[i].type);
+        free((char *)edges[i].properties);
+    }
+    free(nodes);
+    free(edges);
+    cbm_project_free_fields(&row);
+    return rc;
 }
 
 #endif /* TEST_HELPERS_H */

@@ -4023,6 +4023,8 @@ static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz) {
                 "}\n");
     fclose(fp);
 
+    th_remove_zova_user_database();
+
     /* Create server with in-memory store */
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     if (!srv)
@@ -4094,6 +4096,10 @@ static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz) {
     cbm_store_insert_edge(st, &e2);
     (void)id_run1; /* run1 used for edge above */
 
+    if (th_publish_store_project(st, proj_name) != 0) {
+        cbm_mcp_server_free(srv);
+        return NULL;
+    }
     return srv;
 }
 
