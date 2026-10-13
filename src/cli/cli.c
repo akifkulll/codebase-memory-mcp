@@ -3702,19 +3702,6 @@ typedef enum {
     CBM_INSTALL_CONFIG_CONFLICT,
 } cbm_install_config_decision_t;
 
-static bool cbm_config_has_mcp_entry(const char *config_path) {
-    size_t len = 0;
-    char *content = read_file_str(config_path, &len);
-    if (!content) {
-        return false;
-    }
-    bool found = strstr(content, "\"codebase-memory-mcp\"") != NULL ||
-                 strstr(content, "[mcp_servers.codebase-memory-mcp]") != NULL;
-    free(content);
-    (void)len;
-    return found;
-}
-
 static bool cbm_config_contains_command(const char *content, const char *binary_path) {
     if (strstr(content, binary_path) != NULL) {
         return true;
@@ -3807,16 +3794,16 @@ static void install_claude_code_config(const char *home, const char *binary_path
     char legacy_mcp_path[CLI_BUF_1K];
     snprintf(mcp_path, sizeof(mcp_path), "%s/.mcp.json", config_dir);
     snprintf(legacy_mcp_path, sizeof(legacy_mcp_path), "%s/.claude.json", user_root);
-    bool primary_has_entry = cbm_config_has_mcp_entry(mcp_path);
-    bool legacy_has_entry = cbm_config_has_mcp_entry(legacy_mcp_path);
-    const char *selected_mcp_path =
-        (primary_has_entry || !legacy_has_entry) ? mcp_path : legacy_mcp_path;
+    /* Claude Code reads user-scope MCP servers from .claude.json; .mcp.json in
+     * the config dir is kept for older setups. Write both. */
+    const char *mcp_paths[] = {legacy_mcp_path, mcp_path};
 
     /* Plan mode: record the planned writes and return without mutating (#388). */
     if (g_install_plan) {
         char p[CLI_BUF_1K];
         plan_record("Claude Code", "skills", skills_dir);
-        plan_record("Claude Code", "mcp_config", selected_mcp_path);
+        plan_record("Claude Code", "mcp_config", legacy_mcp_path);
+        plan_record("Claude Code", "mcp_config", mcp_path);
         snprintf(p, sizeof(p), "%s/settings.json", config_dir);
         plan_record("Claude Code", "mcp_config", p);
         snprintf(p, sizeof(p), "%s/hooks/%s", config_dir, CMM_HOOK_GATE_SCRIPT);
@@ -3837,20 +3824,17 @@ static void install_claude_code_config(const char *home, const char *binary_path
         printf("  removed old monolithic skill\n");
     }
 
-    cbm_install_config_decision_t decision =
-        cbm_install_config_decision("Claude Code", selected_mcp_path, binary_path);
-    if (!dry_run && decision == CBM_INSTALL_CONFIG_WRITE) {
-        cbm_install_editor_mcp(binary_path, selected_mcp_path);
-    }
-    if (decision == CBM_INSTALL_CONFIG_UNCHANGED) {
-        printf("  mcp: already configured (%s)\n", selected_mcp_path);
-    } else if (decision == CBM_INSTALL_CONFIG_WRITE) {
-        printf("  mcp: %s\n", selected_mcp_path);
-    }
-    if (primary_has_entry && legacy_has_entry) {
-        (void)fprintf(stderr,
-                      "  note: Claude MCP entries exist in both %s and %s; only %s was selected.\n",
-                      mcp_path, legacy_mcp_path, selected_mcp_path);
+    for (size_t i = 0; i < sizeof(mcp_paths) / sizeof(mcp_paths[0]); i++) {
+        cbm_install_config_decision_t decision =
+            cbm_install_config_decision("Claude Code", mcp_paths[i], binary_path);
+        if (!dry_run && decision == CBM_INSTALL_CONFIG_WRITE) {
+            cbm_install_editor_mcp(binary_path, mcp_paths[i]);
+        }
+        if (decision == CBM_INSTALL_CONFIG_UNCHANGED) {
+            printf("  mcp: already configured (%s)\n", mcp_paths[i]);
+        } else if (decision == CBM_INSTALL_CONFIG_WRITE) {
+            printf("  mcp: %s\n", mcp_paths[i]);
+        }
     }
 
     char settings_path[CLI_BUF_1K];
