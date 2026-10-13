@@ -51,8 +51,7 @@ mkdir -p "$ZIG_GLOBAL_CACHE"
 # files; all valid cached objects remain reusable.
 mkdir -p "$CBM_ZIG_CACHE"
 "$ROOT/scripts/zova-cache-repair.sh" "$CBM_ZIG_CACHE" "$ZIG_GLOBAL_CACHE"
-zig build --cache-dir "$CBM_ZIG_CACHE" \
-  --global-cache-dir "$ZIG_GLOBAL_CACHE" \
+ZIG_GLOBAL_CACHE_DIR="$ZIG_GLOBAL_CACHE" zig build --cache-dir "$CBM_ZIG_CACHE" \
   cbm -Dwith-zova=true -Dzova-root="$ZOVA_ROOT"
 
 [[ -x "$BINARY" ]] || { echo "error: build did not produce $BINARY" >&2; exit 1; }

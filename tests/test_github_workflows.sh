@@ -21,9 +21,9 @@ for path in \
 done
 
 grep -q 'repository: ata-sesli/zova' "$ROOT/.github/actions/setup-zova/action.yml"
-grep -q 'ref: e492609d480a60781c106012f11b17b2a1c9e330' \
+grep -q 'ref: ea6fbc2890b795090c0b2d5e9ed363b248e289ef' \
   "$ROOT/.github/actions/setup-zova/action.yml"
-grep -q 'version: 0.16.0' "$ROOT/.github/actions/setup-zova/action.yml"
+grep -q 'version: 0.17.0' "$ROOT/.github/actions/setup-zova/action.yml"
 grep -q '^  cpu:' "$ROOT/.github/actions/setup-zova/action.yml"
 grep -Fq '${{ inputs.cpu }}' "$ROOT/.github/actions/setup-zova/action.yml"
 grep -q 'BUILD_ARGS=(c-abi' "$ROOT/.github/actions/setup-zova/action.yml"
@@ -85,7 +85,7 @@ grep -q 'CBM_PREBUILT_ZIG_DIR' "$ROOT/scripts/build.sh"
 grep -q 'export CBM_PREBUILT_ZIG=1' "$ROOT/scripts/build.sh"
 
 BRIDGE="$ROOT/src/zova/cbm_zova_bridge.zig"
-grep -q '@cInclude("foundation/compat_regex.h")' "$BRIDGE"
+grep -q 'extern fn cbm_regcomp' "$BRIDGE"
 if grep -q '@cInclude("regex.h")' "$BRIDGE"; then
   echo "error: Zova bridge must use CBM's portable regex abstraction" >&2
   exit 1

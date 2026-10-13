@@ -48,9 +48,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/.zova-build-cache
-          key: cbm-prod-${{ runner.os }}-${{ runner.arch }}-zig-0.16.0-zova-e492609d-${{ hashFiles('build.zig', 'src/**', 'internal/**', 'vendored/**', 'scripts/zova-build-once.sh', 'scripts/zova-cache-repair.sh') }}
+          key: cbm-prod-${{ runner.os }}-${{ runner.arch }}-zig-0.17.0-zova-ea6fbc28-${{ hashFiles('build.zig', 'src/**', 'internal/**', 'vendored/**', 'scripts/zova-build-once.sh', 'scripts/zova-cache-repair.sh') }}
           restore-keys: |
-            cbm-prod-${{ runner.os }}-${{ runner.arch }}-zig-0.16.0-zova-e492609d-
+            cbm-prod-${{ runner.os }}-${{ runner.arch }}-zig-0.17.0-zova-ea6fbc28-
       - name: Build production Zova-CBM
         run: scripts/zova-build-once.sh
       - name: Verify Zova is linked
@@ -75,9 +75,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/.zova-build-cache
-          key: cbm-tests-${{ runner.os }}-${{ runner.arch }}-cpu-baseline-zig-0.16.0-zova-e492609d-${{ hashFiles('build.zig', 'src/**', 'internal/**', 'vendored/**', 'tests/**', 'scripts/zova-build-test-runner.sh', 'scripts/zova-cache-repair.sh') }}
+          key: cbm-tests-${{ runner.os }}-${{ runner.arch }}-cpu-baseline-zig-0.17.0-zova-ea6fbc28-${{ hashFiles('build.zig', 'src/**', 'internal/**', 'vendored/**', 'tests/**', 'scripts/zova-build-test-runner.sh', 'scripts/zova-cache-repair.sh') }}
           restore-keys: |
-            cbm-tests-${{ runner.os }}-${{ runner.arch }}-cpu-baseline-zig-0.16.0-zova-e492609d-
+            cbm-tests-${{ runner.os }}-${{ runner.arch }}-cpu-baseline-zig-0.17.0-zova-ea6fbc28-
       - name: Build complete C test runner
         env:
           CBM_ZOVA_TEST_CPU: baseline

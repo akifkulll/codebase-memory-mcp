@@ -21,6 +21,9 @@
 #include "store/store.h"
 #include "cli/cli.h"
 #include "cli/progress_sink.h"
+#include "zova/cbm_zova.h"
+#include "zova/cbm_zova_operations.h"
+#include "zova/cbm_zova_route.h"
 #include "foundation/constants.h"
 
 enum {
@@ -667,6 +670,27 @@ static char **cbm_win_utf8_argv(int *out_argc) {
 }
 #endif /* _WIN32 */
 
+/* A cbm.zova written by an older release uses an older Zova storage format,
+ * which this binary refuses to open. Convert it once before the server touches
+ * it; the conversion writes a new verified file and then swaps it in. */
+static void migrate_zova_format_at_startup(void) {
+    char path[CBM_SZ_1K];
+    cbm_zova_operation_report_t report = {0};
+    if (!cbm_zova_single_file_enabled() ||
+        cbm_zova_user_database_path(path, sizeof(path)) != 0 || !cbm_file_exists(path) ||
+        cbm_zova_database_format_status(path) != CBM_ZOVA_DATABASE_MIGRATION_REQUIRED) {
+        return;
+    }
+    cbm_log_info("zova.migrate_format", "path", path, "status", "started");
+    cbm_zova_operation_code_t code = cbm_zova_database_migrate_format(path, &report);
+    if (code == CBM_ZOVA_OPERATION_OK || code == CBM_ZOVA_OPERATION_NOOP) {
+        cbm_log_info("zova.migrate_format", "path", path, "status", "ok");
+    } else {
+        cbm_log_error("zova.migrate_format", "path", path, "status", report.reason, "fix",
+                      "codebase-memory-mcp zova-ops migrate-format --json");
+    }
+}
+
 int main(int argc, char **argv) {
     /* Defense-in-depth: bind tree-sitter and sqlite3 to mimalloc so a
      * correct binary does not rely on the fragile MI_OVERRIDE symbol override
@@ -734,6 +758,7 @@ int main(int argc, char **argv) {
     cbm_http_server_set_binary_path(argv[0]);
     cbm_log_set_sink_ex(cbm_ui_log_append, CBM_LOG_SINK_TEE);
     cbm_log_info("server.start", "version", CBM_VERSION);
+    migrate_zova_format_at_startup();
     cbm_diag_start(); /* starts if CBM_DIAGNOSTICS=1 */
 
     /* Parse --ui and --port flags (persisted config) */

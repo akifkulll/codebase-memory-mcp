@@ -1032,6 +1032,27 @@ static int operations_checkpoint_truncate(zova_database *db) {
     return rc;
 }
 
+/* Bytes available to this user on the filesystem holding `path`. */
+static int operations_free_bytes(const char *path, uint64_t *out) {
+#ifdef _WIN32
+    char parent[4096];
+    ULARGE_INTEGER available = {0};
+    if (operations_parent_directory(path, parent, sizeof(parent)) != 0 ||
+        !GetDiskFreeSpaceExA(parent, &available, NULL, NULL))
+        return -1;
+    *out = (uint64_t)available.QuadPart;
+#else
+    struct statvfs filesystem = {0};
+    if (statvfs(path, &filesystem) != 0) return -1;
+    uint64_t fragment_size = filesystem.f_frsize ? (uint64_t)filesystem.f_frsize
+                                                 : (uint64_t)filesystem.f_bsize;
+    if (fragment_size == 0 || (uint64_t)filesystem.f_bavail > UINT64_MAX / fragment_size)
+        return -1;
+    *out = (uint64_t)filesystem.f_bavail * fragment_size;
+#endif
+    return 0;
+}
+
 static int operations_raw_sqlite_checkpoint_truncate(const char *path) {
     sqlite3 *db=NULL;
     int log_frames=0,checkpointed_frames=0;
@@ -1280,6 +1301,142 @@ replacement_failed:
                       "replacement_failed");
     cbm_zova_writer_guard_release(&guard);
     return CBM_ZOVA_OPERATION_VERIFY_FAILED;
+#endif
+}
+
+/* Zova 1.2.0 stages a migration in "<destination>.migration-recovery/" and
+ * removes it on success, but for a WAL database the staged copy's empty -wal
+ * and -shm stay behind and keep the directory alive. Remove exactly those. */
+static void operations_remove_migration_staging(const char *destination) {
+    const char *name = strrchr(destination, '/');
+    name = name ? name + 1 : destination;
+    char directory[4096 + 32], sidecar[sizeof(directory) + 512];
+    snprintf(directory, sizeof(directory), "%s.migration-recovery", destination);
+    snprintf(sidecar, sizeof(sidecar), "%s/%s-wal", directory, name);
+    (void)cbm_unlink(sidecar);
+    snprintf(sidecar, sizeof(sidecar), "%s/%s-shm", directory, name);
+    (void)cbm_unlink(sidecar);
+    (void)cbm_rmdir(directory);
+}
+
+cbm_zova_operation_code_t cbm_zova_database_migrate_format(
+    const char *path, cbm_zova_operation_report_t *out) {
+    operations_report(out, CBM_ZOVA_OPERATION_INVALID, "migrate-format", "invalid_argument");
+    if (!path || !path[0] || !out) return CBM_ZOVA_OPERATION_INVALID;
+#if !CBM_WITH_ZOVA
+    return CBM_ZOVA_OPERATION_INCOMPATIBLE;
+#else
+    size_t path_len = strlen(path);
+    char temporary[4096], recovery[4096], parent[4096];
+    if (path_len <= 5 || strcmp(path + path_len - 5, ".zova") != 0 || path_len - 5 > 4000 ||
+        snprintf(temporary, sizeof(temporary), "%.*s.format.tmp.zova",
+                 (int)(path_len - 5), path) >= (int)sizeof(temporary) ||
+        snprintf(recovery, sizeof(recovery), "%.*s.format.recovery.zova",
+                 (int)(path_len - 5), path) >= (int)sizeof(recovery) ||
+        operations_parent_directory(path, parent, sizeof(parent)) != 0)
+        return CBM_ZOVA_OPERATION_INVALID;
+
+    cbm_zova_writer_guard_t guard = {0};
+    if (cbm_zova_writer_guard_try_acquire(path, &guard) != 0) {
+        operations_report(out, CBM_ZOVA_OPERATION_BUSY, "migrate-format", "writer_busy");
+        return CBM_ZOVA_OPERATION_BUSY;
+    }
+    cbm_zova_operation_code_t code = CBM_ZOVA_OPERATION_VERIFY_FAILED;
+    const char *reason = "invalid_recovery_state";
+    int live_state = operations_restore_path_state(path);
+    int temp_state = operations_restore_path_state(temporary);
+    int recovery_state = operations_restore_path_state(recovery);
+    int valid_state = (live_state == 1 && temp_state == 0 && recovery_state == 0) ||
+                      (live_state == 1 && temp_state == 1 && recovery_state == 0) ||
+                      (live_state == 0 && temp_state == 1 && recovery_state == 1) ||
+                      (live_state == 1 && temp_state == 0 && recovery_state == 1);
+    if (live_state < 0 || temp_state < 0 || recovery_state < 0 || !valid_state) goto done;
+
+    if (live_state == 1 && temp_state == 0 && recovery_state == 0) {
+        cbm_zova_database_format_status_t format = cbm_zova_database_format_status(path);
+        if (format == CBM_ZOVA_DATABASE_COMPATIBLE) {
+            code = CBM_ZOVA_OPERATION_NOOP;
+            reason = "current_format";
+            goto done;
+        }
+        if (format != CBM_ZOVA_DATABASE_MIGRATION_REQUIRED) {
+            code = CBM_ZOVA_OPERATION_INCOMPATIBLE;
+            reason = "unsupported_format";
+            goto done;
+        }
+        /* Zova writes the migrated copy next to the source, so the directory
+         * briefly holds both files. */
+        struct stat source_stat = {0};
+        uint64_t free_bytes = 0;
+        const uint64_t reserve = 1ULL * 1024ULL * 1024ULL * 1024ULL;
+        if (cbm_lstat(path, &source_stat) != 0 || source_stat.st_size < 0 ||
+            operations_free_bytes(path, &free_bytes) != 0) {
+            reason = "free_space_unavailable";
+            goto done;
+        }
+        if (free_bytes < (uint64_t)source_stat.st_size + reserve) {
+            code = CBM_ZOVA_OPERATION_DISK_REFUSED;
+            reason = "insufficient_disk";
+            goto done;
+        }
+        /* The replacement drops the source sidecars, so the WAL must be empty. */
+        if (operations_raw_sqlite_checkpoint_truncate(path) != 0) {
+            code = CBM_ZOVA_OPERATION_BUSY;
+            reason = "checkpoint_busy";
+            goto done;
+        }
+        zova_message error = {0};
+        zova_status migrated = zova_database_migrate(&(zova_database_migrate_request){
+            .source_path = path, .destination_path = temporary, .flags = 0,
+            .out_error_message = &error});
+        if (migrated != ZOVA_OK) {
+            cbm_log_error("zova.migrate_format", "path", path, "error",
+                          error.data ? (const char *)error.data : "unknown");
+            zova_message_free(&error);
+            (void)operations_remove_closed_database_sidecars(temporary);
+            (void)cbm_unlink(temporary);
+            reason = "zova_migrate_failed";
+            goto done;
+        }
+        zova_message_free(&error);
+        operations_remove_migration_staging(temporary);
+        if (operations_replacement_fault("migrate-format", "migrate_format_after_temp_creation",
+                                         out))
+            goto interrupted;
+    }
+
+    const operations_replacement_options_t replacement = {
+        .operation = "migrate-format",
+        .after_temp_verification = "migrate_format_after_temp_verification",
+        .after_live_to_recovery = "migrate_format_after_live_to_recovery",
+        .after_temp_to_live = "migrate_format_after_temp_to_live",
+        .before_recovery_cleanup = "migrate_format_before_recovery_cleanup",
+        .remove_sidecars = true,
+        /* The current SDK cannot open the old-format source to verify it. */
+        .require_source_verified = false,
+    };
+    int replacement_result = operations_replace_verified_database(
+        path, temporary, recovery, parent, &replacement, NULL, out);
+    if (replacement_result > 0) goto interrupted;
+    if (replacement_result < 0) {
+        reason = "replacement_failed";
+        goto done;
+    }
+    cbm_zova_operation_report_t after = {0};
+    if (cbm_zova_database_status(path, &after) != CBM_ZOVA_OPERATION_OK) {
+        reason = "replacement_failed";
+        goto done;
+    }
+    operations_report(out, CBM_ZOVA_OPERATION_OK, "migrate-format", "ok");
+    operations_copy_status_metrics(out, &after);
+    cbm_zova_writer_guard_release(&guard);
+    return CBM_ZOVA_OPERATION_OK;
+
+done:
+    operations_report(out, code, "migrate-format", reason);
+interrupted:
+    cbm_zova_writer_guard_release(&guard);
+    return out->code;
 #endif
 }
 

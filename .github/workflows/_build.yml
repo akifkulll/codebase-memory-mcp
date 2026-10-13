@@ -142,13 +142,20 @@ jobs:
             --global-cache-dir "$RUNNER_TEMP/cbm-zig-global" \
             -femit-bin=.ci/windows-zig/libcbm_cli_zig.a \
             src/cli_zig/cbm_cli_zig.zig
+          # Zova 1.x imports its SQLite bindings and build options by name.
+          zig translate-c -lc -target "$TARGET" vendored/sqlite3/sqlite3.h \
+            > "$RUNNER_TEMP/sqlite_c.zig"
+          printf 'pub const enable_dynamic_extensions = false;\n' \
+            > "$RUNNER_TEMP/zova_build_options.zig"
           zig build-obj -O ReleaseFast -lc -target "$TARGET" \
             --cache-dir "$RUNNER_TEMP/cbm-zig-local" \
             --global-cache-dir "$RUNNER_TEMP/cbm-zig-global" \
-            -Isrc -Ivendored/sqlite3 \
+            -Isrc \
             -femit-bin=.ci/windows-zig/cbm_zova_bridge.o \
             --dep zova -Mroot=src/zova/cbm_zova_bridge.zig \
-            -Isrc -Ivendored/sqlite3 -Mzova="$ZOVA_ROOT/src/root.zig"
+            --dep sqlite_c --dep zova_build_options -Mzova="$ZOVA_ROOT/src/root.zig" \
+            -Msqlite_c="$RUNNER_TEMP/sqlite_c.zig" \
+            -Mzova_build_options="$RUNNER_TEMP/zova_build_options.zig"
           cp "$ZOVA_ROOT/zig-out/lib/libzova_c.a" .ci/windows-zig/
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -192,7 +199,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ata-sesli/zova
-          ref: e492609d480a60781c106012f11b17b2a1c9e330
+          ref: ea6fbc2890b795090c0b2d5e9ed363b248e289ef
           path: .ci/zova
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -205,7 +212,7 @@ jobs:
           test -f .ci/windows-zig/libzova_c.a
           test -f .ci/windows-zig/libcbm_cli_zig.a
           test -f .ci/windows-zig/cbm_zova_bridge.o
-          grep -q 'Zova C ABI, v0.24.0 pre-1.0' .ci/zova/include/zova.h
+          grep -q 'Zova C ABI, v1.2.0' .ci/zova/include/zova.h
           mkdir -p .ci/zova/zig-out/lib
           cp .ci/windows-zig/libzova_c.a .ci/zova/zig-out/lib/
           ZOVA_ROOT_PATH=$(cygpath -m "$GITHUB_WORKSPACE/.ci/zova")

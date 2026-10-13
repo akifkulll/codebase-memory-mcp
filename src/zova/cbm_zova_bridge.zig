@@ -3,9 +3,17 @@ const zova = @import("zova");
 const sqlite = zova.sqlite;
 const c = sqlite.c;
 
-const compat = @cImport({
-    @cInclude("foundation/compat_regex.h");
-});
+// Mirrors src/foundation/compat_regex.h (Zig 0.17 has no @cImport).
+const compat = struct {
+    const CBM_REG_EXTENDED: c_int = 1;
+    const CBM_REG_ICASE: c_int = 2;
+    const CBM_REG_NOSUB: c_int = 4;
+    const CBM_REG_OK: c_int = 0;
+    const cbm_regex_t = extern struct { bytes: [256]u8 };
+    extern fn cbm_regcomp(r: *cbm_regex_t, pattern: [*:0]const u8, flags: c_int) c_int;
+    extern fn cbm_regexec(r: *const cbm_regex_t, str: [*:0]const u8, nmatch: c_int, matches: ?*anyopaque, eflags: c_int) c_int;
+    extern fn cbm_regfree(r: *cbm_regex_t) void;
+};
 
 const HookError = sqlite.Error || error{
     ExtensionExists,
@@ -23,7 +31,7 @@ const manifest = zova.ExtensionManifest{
     .name = "codebase_memory",
     .version = "0.1.0",
     .storage_prefix = "_zova_ext_codebase_memory_",
-    .zova_abi_min = "0.21.0",
+    .zova_abi_min = "1.2.0",
     .capabilities = "sql,codebase-memory",
     .manifest_json = "{\"extension\":\"codebase_memory\",\"version\":\"0.1.0\"}",
 };

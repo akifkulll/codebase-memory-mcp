@@ -572,8 +572,8 @@ check-zova:
 		echo "       Build Zova first with: cd $(ZOVA_ROOT) && zig build" >&2; \
 		exit 1; \
 	}
-	@grep -q "Zova C ABI, v0.24.0 pre-1.0" "$(ZOVA_ROOT)/include/zova.h" || { \
-		echo "error: Zova C ABI 0.24.0 is required: $(ZOVA_ROOT)/include/zova.h" >&2; \
+	@grep -q "Zova C ABI, v1.2.0" "$(ZOVA_ROOT)/include/zova.h" || { \
+		echo "error: Zova C ABI 1.2.0 is required: $(ZOVA_ROOT)/include/zova.h" >&2; \
 		exit 1; \
 	}
 	@grep -q "zova_database_register_function" "$(ZOVA_ROOT)/include/zova.h" || { \
@@ -612,9 +612,17 @@ $(BUILD_DIR)/cbm_zova_bridge.o: $(CBM_ZOVA_BRIDGE_ZIG_SRC) src/zova/cbm_zova_bri
 	mkdir -p "$(ZIG_GLOBAL_CACHE_DIR)" "$(ZIG_LOCAL_CACHE_DIR)"
 	ZIG_GLOBAL_CACHE_DIR="$(ZIG_GLOBAL_CACHE_DIR)" \
 	ZIG_LOCAL_CACHE_DIR="$(ZIG_LOCAL_CACHE_DIR)" \
+		$(ZIG) translate-c -lc $(ZIG_TARGET_FLAGS) vendored/sqlite3/sqlite3.h \
+			> $(BUILD_DIR)/sqlite_c.zig
+	printf 'pub const enable_dynamic_extensions = false;\n' > $(BUILD_DIR)/zova_build_options.zig
+	ZIG_GLOBAL_CACHE_DIR="$(ZIG_GLOBAL_CACHE_DIR)" \
+	ZIG_LOCAL_CACHE_DIR="$(ZIG_LOCAL_CACHE_DIR)" \
 		$(ZIG) build-obj -O ReleaseFast -lc $(ZIG_TARGET_FLAGS) \
-			-Isrc -Ivendored/sqlite3 \
-			-femit-bin=$@ --dep zova -Mroot=$< -Isrc -Ivendored/sqlite3 -Mzova=$(ZOVA_ROOT)/src/root.zig
+			-Isrc \
+			-femit-bin=$@ --dep zova -Mroot=$< \
+			--dep sqlite_c --dep zova_build_options -Mzova=$(ZOVA_ROOT)/src/root.zig \
+			-Msqlite_c=$(BUILD_DIR)/sqlite_c.zig \
+			-Mzova_build_options=$(BUILD_DIR)/zova_build_options.zig
 endif
 
 # ── Foundation-only test (fast, no extraction) ───────────────────

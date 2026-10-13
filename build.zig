@@ -118,20 +118,20 @@ fn checkZovaInputs(b: *std.Build, cfg: Config) void {
     const include_path = b.pathJoin(&.{ cfg.zova_root, "include" });
     const lib_path = b.pathJoin(&.{ cfg.zova_root, "zig-out/lib/libzova_c.a" });
     const root_path = b.pathJoin(&.{ cfg.zova_root, "src/root.zig" });
-    b.build_root.handle.access(b.graph.io, include_path, .{}) catch {
+    b.root.root_dir.handle.access(b.graph.io, include_path, .{}) catch {
         std.debug.panic("error: ZOVA_ROOT not found or incomplete: {s}", .{cfg.zova_root});
     };
-    b.build_root.handle.access(b.graph.io, lib_path, .{}) catch {
+    b.root.root_dir.handle.access(b.graph.io, lib_path, .{}) catch {
         std.debug.panic("error: Zova C static library not found: {s}\n       Build Zova first with: cd {s} && zig build", .{ lib_path, cfg.zova_root });
     };
-    b.build_root.handle.access(b.graph.io, root_path, .{}) catch {
+    b.root.root_dir.handle.access(b.graph.io, root_path, .{}) catch {
         std.debug.panic("error: Zova Zig root not found: {s}", .{root_path});
     };
     const header_path = b.pathJoin(&.{ cfg.zova_root, "include/zova.h" });
-    const header = b.build_root.handle.readFileAlloc(b.graph.io, header_path, b.allocator, .limited(1024 * 1024)) catch {
+    const header = b.root.root_dir.handle.readFileAlloc(b.graph.io, header_path, b.allocator, .limited(1024 * 1024)) catch {
         std.debug.panic("error: unable to read Zova C ABI header: {s}", .{header_path});
     };
-    if (!std.mem.containsAtLeast(u8, header, 1, "Zova C ABI, v0.") or
+    if (!std.mem.containsAtLeast(u8, header, 1, "Zova C ABI, v1.") or
         !std.mem.containsAtLeast(u8, header, 1, "zova_database_register_function") or
         !std.mem.containsAtLeast(u8, header, 1, "zova_vector_search_in") or
         !std.mem.containsAtLeast(u8, header, 1, "zova_vector_search_by_id_in") or
@@ -144,7 +144,7 @@ fn checkZovaInputs(b: *std.Build, cfg: Config) void {
         !std.mem.containsAtLeast(u8, header, 1, "zova_graph_edge_payload_replace_many") or
         !std.mem.containsAtLeast(u8, header, 1, "zova_fresh_build_begin"))
     {
-        std.debug.panic("error: a pinned format-9 Zova C ABI header with SQL callbacks, candidate vector search, batch deletion, prepared payload graph builds, edge payload access, and fresh-build sessions is required: {s}", .{header_path});
+        std.debug.panic("error: a Zova 1.x C ABI header with SQL callbacks, candidate vector search, batch deletion, prepared payload graph builds, edge payload access, and fresh-build sessions is required: {s}", .{header_path});
     }
 }
 
@@ -402,7 +402,15 @@ fn addZovaBridgeObject(b: *std.Build, cfg: Config) *std.Build.Step.Compile {
         .target = cfg.target,
         .optimize = .ReleaseFast,
     });
-    zova_module.addIncludePath(b.path("vendored/sqlite3"));
+    // Zova 1.x resolves its SQLite bindings and build options as named imports.
+    zova_module.addImport("sqlite_c", b.addTranslateC(.{
+        .root_source_file = b.path("vendored/sqlite3/sqlite3.h"),
+        .target = cfg.target,
+        .optimize = .ReleaseFast,
+    }).createModule());
+    const zova_build_options = b.addOptions();
+    zova_build_options.addOption(bool, "enable_dynamic_extensions", false);
+    zova_module.addOptions("zova_build_options", zova_build_options);
     const bridge_module = b.createModule(.{
         .root_source_file = b.path("src/zova/cbm_zova_bridge.zig"),
         .target = cfg.target,
@@ -493,7 +501,7 @@ fn addUiStep(b: *std.Build, name: []const u8, desc: []const u8, argv: []const []
 }
 
 fn grammarSources(b: *std.Build) []const []const u8 {
-    var dir = b.build_root.handle.openDir(b.graph.io, "internal/cbm", .{ .iterate = true }) catch @panic("unable to open internal/cbm");
+    var dir = b.root.root_dir.handle.openDir(b.graph.io, "internal/cbm", .{ .iterate = true }) catch @panic("unable to open internal/cbm");
     defer dir.close(b.graph.io);
     var list = std.ArrayList([]const u8).empty;
     var it = dir.iterate();

@@ -17,7 +17,7 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 
 ## This fork
 
-The current development version uses **CBM schema 7** with a pinned **Zova format 9 / ABI 0.25.0** SDK. Compared with the original pure-SQLite implementation, it adds:
+The current development version uses **CBM schema 7** with a pinned **Zova format 12 / ABI 1.2.0** SDK. Compared with the original pure-SQLite implementation, it adds:
 
 - **One shared database** — multiple repositories live as isolated workspaces in `cbm.zova`.
 - **Cross-repository discovery** — one `search_graph` request can search selected projects or every healthy workspace and identifies the owning project for each result.
@@ -458,6 +458,7 @@ codebase-memory-mcp zova-ops export-workspace --workspace-id WORKSPACE_ID --outp
 codebase-memory-mcp zova-ops import-workspace --input /safe/path/workspace-archive --json
 codebase-memory-mcp zova-ops delete-workspace --workspace-id WORKSPACE_ID --confirm-workspace WORKSPACE_ID --json
 codebase-memory-mcp zova-ops compact --json
+codebase-memory-mcp zova-ops migrate-format --json
 codebase-memory-mcp zova-ops health --workspace-id WORKSPACE_ID --json
 codebase-memory-mcp zova-ops recover-workspace --workspace-id WORKSPACE_ID --repo-path /absolute/repository --json
 ```

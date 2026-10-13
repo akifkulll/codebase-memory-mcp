@@ -3014,6 +3014,7 @@ static bool cli_zova_ops_action_known(const char *action) {
         "status",          "backup",          "restore",         "export-database",
         "import-database", "export-workspace", "import-workspace", "delete-workspace",
         "compact",         "health",          "recover-workspace",
+        "migrate-format",
     };
     if (!action) return false;
     for (size_t i = 0; i < sizeof(actions) / sizeof(actions[0]); i++)
@@ -3063,7 +3064,8 @@ int cbm_cmd_zova_ops(int argc, char **argv) {
         return cli_zova_ops_usage_error(action, "invalid --confirm-workspace");
 
     bool valid = false;
-    if (strcmp(action, "status") == 0 || strcmp(action, "compact") == 0)
+    if (strcmp(action, "status") == 0 || strcmp(action, "compact") == 0 ||
+        strcmp(action, "migrate-format") == 0)
         valid = !input && !output && !workspace && !confirmation && !repo &&
                 !confirm_replace && !replace;
     else if (strcmp(action, "backup") == 0 || strcmp(action, "export-database") == 0)
@@ -3118,6 +3120,8 @@ int cbm_cmd_zova_ops(int argc, char **argv) {
         code = cbm_zova_workspace_delete(database_path, workspace, confirmation, &report);
     } else if (strcmp(action, "compact") == 0) {
         code = cbm_zova_database_compact(database_path, &report);
+    } else if (strcmp(action, "migrate-format") == 0) {
+        code = cbm_zova_database_migrate_format(database_path, &report);
     } else if (is_health) {
         code = cbm_zova_database_health(database_path, workspace, &health, &report);
     } else {

@@ -1,7 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("stdlib.h");
-});
+const c = std.c;
 
 fn cspan(ptr: [*:0]const u8) []const u8 {
     return std.mem.span(ptr);

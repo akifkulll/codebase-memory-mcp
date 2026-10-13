@@ -16,12 +16,12 @@ runs:
   steps:
     - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
       with:
-        version: 0.16.0
+        version: 0.17.0
 
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       with:
         repository: ata-sesli/zova
-        ref: e492609d480a60781c106012f11b17b2a1c9e330
+        ref: ea6fbc2890b795090c0b2d5e9ed363b248e289ef
         path: .ci/zova
         persist-credentials: false
 
@@ -33,7 +33,7 @@ runs:
           .ci/zova/zig-out
           ${{ runner.temp }}/zova-cache
           ${{ runner.temp }}/zig-global-cache
-        key: zova-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ inputs.cpu }}-zig-0.16.0-e492609d480a60781c106012f11b17b2a1c9e330
+        key: zova-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ inputs.cpu }}-zig-0.17.0-ea6fbc2890b795090c0b2d5e9ed363b248e289ef
 
     - name: Build pinned Zova
       if: steps.zova-cache.outputs.cache-hit != 'true'
@@ -50,11 +50,10 @@ runs:
         fi
         BUILD_ARGS=(c-abi
           --cache-dir "$CACHE_ROOT/zova-cache"
-          --global-cache-dir "$CACHE_ROOT/zig-global-cache"
           -Doptimize=ReleaseSafe)
         [[ -z "$TARGET" ]] || BUILD_ARGS+=(-Dtarget="$TARGET")
         [[ -z "$CPU" ]] || BUILD_ARGS+=(-Dcpu="$CPU")
-        zig build "${BUILD_ARGS[@]}"
+        ZIG_GLOBAL_CACHE_DIR="$CACHE_ROOT/zig-global-cache" zig build "${BUILD_ARGS[@]}"
 
     - name: Normalize Windows archive name
       shell: bash
@@ -68,13 +67,13 @@ runs:
     - name: Verify pinned Zova
       shell: bash
       env:
-        EXPECTED_COMMIT: e492609d480a60781c106012f11b17b2a1c9e330
+        EXPECTED_COMMIT: ea6fbc2890b795090c0b2d5e9ed363b248e289ef
       run: |
         set -euo pipefail
         ZOVA_ROOT="$GITHUB_WORKSPACE/.ci/zova"
         test "$(git -C "$ZOVA_ROOT" rev-parse HEAD)" = "$EXPECTED_COMMIT"
         test -f "$ZOVA_ROOT/zig-out/lib/libzova_c.a"
-        grep -q 'Zova C ABI, v0.24.0 pre-1.0' "$ZOVA_ROOT/include/zova.h"
+        grep -q 'Zova C ABI, v1.2.0' "$ZOVA_ROOT/include/zova.h"
         {
           echo "ZOVA_ROOT=$ZOVA_ROOT"
           echo "CBM_ZOVA_PIN_ROOT=$ZOVA_ROOT"

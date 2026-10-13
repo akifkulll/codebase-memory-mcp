@@ -135,6 +135,7 @@ typedef struct {
 typedef enum {
     CBM_ZOVA_DATABASE_COMPATIBLE = 0,
     CBM_ZOVA_DATABASE_REPACK_REQUIRED = 1,
+    CBM_ZOVA_DATABASE_MIGRATION_REQUIRED = 2,
     CBM_ZOVA_DATABASE_INCOMPATIBLE = -1,
 } cbm_zova_database_format_status_t;
 
@@ -165,7 +166,8 @@ bool cbm_zova_vector_read_is_enabled(void);
  * behavior and `off` selects pure SQLite. */
 bool cbm_zova_single_file_enabled(void);
 /* Raw, read-only compatibility check used before calling the pinned Zova SDK.
- * A v5/v7 file is valid source material but must be atomically repacked. */
+ * A v5/v7 file is valid source material but must be atomically repacked. A
+ * format 9-11 file with the current CBM schema needs a Zova format migration. */
 cbm_zova_database_format_status_t cbm_zova_database_format_status(const char *path);
 const char *cbm_zova_repack_phase_name(cbm_zova_repack_phase_t phase);
 

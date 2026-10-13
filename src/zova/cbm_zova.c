@@ -1365,9 +1365,15 @@ cbm_zova_database_format_status_t cbm_zova_database_format_status(const char *pa
     }
     const unsigned char *format = sqlite3_column_text(stmt, 0);
     int64_t schema = sqlite3_column_int64(stmt, 1);
-    if (format && strcmp((const char *)format, "9") == 0 &&
+    if (format && strcmp((const char *)format, "12") == 0 &&
         schema == CBM_ZOVA_DATABASE_SCHEMA_VERSION) {
         result = CBM_ZOVA_DATABASE_COMPATIBLE;
+    } else if (format &&
+               (strcmp((const char *)format, "9") == 0 ||
+                strcmp((const char *)format, "10") == 0 ||
+                strcmp((const char *)format, "11") == 0) &&
+               schema == CBM_ZOVA_DATABASE_SCHEMA_VERSION) {
+        result = CBM_ZOVA_DATABASE_MIGRATION_REQUIRED;
     } else if (format && strcmp((const char *)format, "7") == 0 && schema == 5) {
         result = CBM_ZOVA_DATABASE_REPACK_REQUIRED;
     }
@@ -1393,8 +1399,13 @@ static int open_zova(const char *path, bool read_only, cbm_zova_db_t *out) {
         return -1;
     }
     memset(out, 0, sizeof(*out));
-    if (cbm_zova_database_format_status(path) == CBM_ZOVA_DATABASE_REPACK_REQUIRED) {
+    cbm_zova_database_format_status_t format_status = cbm_zova_database_format_status(path);
+    if (format_status == CBM_ZOVA_DATABASE_REPACK_REQUIRED) {
         cbm_log_error("zova.open", "path", path, "status", "repack_required");
+        return -1;
+    }
+    if (format_status == CBM_ZOVA_DATABASE_MIGRATION_REQUIRED) {
+        cbm_log_error("zova.open", "path", path, "status", "format_migration_required");
         return -1;
     }
     zova_message err = {0};

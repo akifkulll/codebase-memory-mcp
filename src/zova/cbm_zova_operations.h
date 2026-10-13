@@ -68,6 +68,10 @@ cbm_zova_operation_code_t cbm_zova_workspace_delete(
     cbm_zova_operation_report_t *out);
 cbm_zova_operation_code_t cbm_zova_database_compact(
     const char *path, cbm_zova_operation_report_t *out);
+/* Replace a database written by an older Zova storage format with a copy
+ * migrated to the linked SDK's format. NOOP when the format is current. */
+cbm_zova_operation_code_t cbm_zova_database_migrate_format(
+    const char *path, cbm_zova_operation_report_t *out);
 cbm_zova_operation_code_t cbm_zova_database_backup(
     const char *source_path, const char *destination_path,
     cbm_zova_operation_report_t *out);
