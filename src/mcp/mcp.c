@@ -1867,6 +1867,37 @@ static int bm25_build_match(const char *query, char *out, size_t out_size) {
     return tokens;
 }
 
+/* True when the query uses FTS5 expression syntax (a phrase, a prefix, grouping
+ * or an uppercase operator) and should reach MATCH unchanged. */
+static bool bm25_is_expression(const char *query) {
+    if (strpbrk(query, "\"*()")) {
+        return true;
+    }
+    static const char *const operators[] = {"AND", "OR", "NOT", "NEAR"};
+    for (const char *p = query; *p;) {
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        size_t len = strcspn(p, " \t");
+        for (size_t i = 0; i < sizeof(operators) / sizeof(operators[0]); i++) {
+            if (len == strlen(operators[i]) && strncmp(p, operators[i], len) == 0) {
+                return true;
+            }
+        }
+        p += len;
+    }
+    return false;
+}
+
+/* Match expression for the shared cbm.zova FTS index: plain words match any
+ * word; FTS5 expressions pass through. Returns false when nothing is left. */
+static bool zova_fts_match(const char *query, char *out, size_t out_size) {
+    if (bm25_is_expression(query)) {
+        return snprintf(out, out_size, "%s", query) < (int)out_size;
+    }
+    return bm25_build_match(query, out, out_size) > 0;
+}
+
 static char *bm25_file_pattern_like(const char *file_pattern) {
     if (!file_pattern) {
         return NULL;
@@ -2152,7 +2183,7 @@ static char *handle_search_graph_flagged(const char *args, char *project) {
     int rc = CBM_STORE_OK;
     char fts_query[BM25_QUERY_BUF];
     if (query && query[0]) {
-        if (bm25_build_match(query, fts_query, sizeof(fts_query)) > 0) {
+        if (zova_fts_match(query, fts_query, sizeof(fts_query))) {
             rc = cbm_zova_repository_search_fts(repo, workspace_id, fts_query, file_pattern,
                                                 params.limit, params.offset, &out);
         }
@@ -2426,7 +2457,7 @@ static char *handle_search_graph_catalog(const char *args,
     } else if (!relationship || validate_edge_type(relationship)) {
         char fts_query[BM25_QUERY_BUF];
         if (query && query[0]) {
-            search_status = bm25_build_match(query, fts_query, sizeof(fts_query)) > 0
+            search_status = zova_fts_match(query, fts_query, sizeof(fts_query))
                                 ? cbm_zova_catalog_search_fts(catalog, &scope, fts_query,
                                                               file_pattern, limit, offset, &output)
                                 : CBM_STORE_OK;

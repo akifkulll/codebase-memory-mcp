@@ -1137,6 +1137,20 @@ TEST(tool_search_graph_flagged_reads_user_database_without_project_db) {
         "\"query\":\"alpha no-such-word\"}}}");
     bool any_word_matches = words_response && strstr(words_response, "fixture.alpha");
     free(words_response);
+    char *prefix_response = cbm_mcp_server_handle(
+        srv,
+        "{\"jsonrpc\":\"2.0\",\"id\":911,\"method\":\"tools/call\",\"params\":{"
+        "\"name\":\"search_graph\",\"arguments\":{\"project\":\"fixture\","
+        "\"query\":\"alph*\"}}}");
+    bool prefix_matches = prefix_response && strstr(prefix_response, "fixture.alpha");
+    free(prefix_response);
+    char *excluded_response = cbm_mcp_server_handle(
+        srv,
+        "{\"jsonrpc\":\"2.0\",\"id\":912,\"method\":\"tools/call\",\"params\":{"
+        "\"name\":\"search_graph\",\"arguments\":{\"project\":\"fixture\","
+        "\"query\":\"alpha NOT alpha\"}}}");
+    bool not_excludes = excluded_response && !strstr(excluded_response, "fixture.alpha");
+    free(excluded_response);
     char *metadata_response = cbm_mcp_server_handle(
         srv,
         "{\"jsonrpc\":\"2.0\",\"id\":909,\"method\":\"tools/call\",\"params\":{"
@@ -1498,6 +1512,8 @@ TEST(tool_search_graph_flagged_reads_user_database_without_project_db) {
     ASSERT_NOT_NULL(response);
     ASSERT_TRUE(has_qn);
     ASSERT_TRUE(any_word_matches);
+    ASSERT_TRUE(prefix_matches);
+    ASSERT_TRUE(not_excludes);
     ASSERT_TRUE(has_properties);
     ASSERT_TRUE(has_vector_result);
     /* Semantic-only (no structural filter) must NOT run the unfiltered
