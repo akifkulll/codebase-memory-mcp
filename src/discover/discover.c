@@ -1111,6 +1111,15 @@ int cbm_discover_ex(const char *repo_path, const cbm_discover_opts_t *opts, cbm_
         if (!realpath(cache, fl.cache_tree)) {
             snprintf(fl.cache_tree, sizeof(fl.cache_tree), "%s", cache);
         }
+        /* The walk builds paths from repo_path as given. When that path goes
+         * through a symlink (macOS /tmp -> /private/tmp), re-express a cache
+         * that lives inside the repository in the walk's own spelling. */
+        char root_real[CBM_SZ_4K];
+        if (realpath(repo_path, root_real) && dir_is_cache_tree(fl.cache_tree, root_real)) {
+            char inside[CBM_SZ_4K];
+            snprintf(inside, sizeof(inside), "%s", fl.cache_tree + strlen(root_real));
+            snprintf(fl.cache_tree, sizeof(fl.cache_tree), "%s%s", repo_path, inside);
+        }
 #endif
     }
     walk_dir(repo_path, "", opts, gitignore, global_gi, cbmignore, &fl);
