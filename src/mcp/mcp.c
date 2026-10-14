@@ -6516,8 +6516,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     yyjson_mut_val *changed = yyjson_mut_arr(doc);
     yyjson_mut_val *impacted = yyjson_mut_arr(doc);
 
-    /* resolve_store already called via get_project_root above */
-    cbm_store_t *store = srv->store;
+    cbm_store_t *store = resolve_store(srv, project);
 
     char line[CBM_SZ_1K];
     int file_count = 0;
@@ -6553,7 +6552,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         yyjson_mut_arr_add_strcpy(doc, changed, path_line);
         file_count++;
 
-        if (want_symbols) {
+        if (want_symbols && store) {
             detect_add_impacted_symbols(store, project, path_line, doc, impacted);
         }
     }

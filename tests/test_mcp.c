@@ -3469,6 +3469,51 @@ TEST(tool_detect_changes_not_found_rich_error) {
     PASS();
 }
 
+/* detect_changes must read symbols from the project's own store. The fixture
+ * is published to cbm.zova from a separate store so the server's placeholder
+ * store stays empty. */
+TEST(tool_detect_changes_reports_impacted_symbols) {
+    const char *proj = "detect-impact";
+    if (cbm_zova_route_for_project(proj) != CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
+        PASS();
+    }
+    char *tmp = th_mktempdir("cbm_detect_impact");
+    ASSERT_NOT_NULL(tmp);
+    char cmd[CBM_SZ_1K];
+    snprintf(cmd, sizeof(cmd), "git -C '%s' init -q >/dev/null 2>&1", tmp);
+    ASSERT_EQ(system(cmd), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "handler.go"),
+                            "package main\n\nfunc HandleRequest() error {\n\treturn nil\n}\n"),
+              0);
+
+    cbm_store_t *fixture = cbm_store_open_memory();
+    ASSERT_NOT_NULL(fixture);
+    ASSERT_EQ(cbm_store_upsert_project(fixture, proj, tmp), CBM_STORE_OK);
+    cbm_node_t n = {.project = proj,
+                    .label = "Function",
+                    .name = "HandleRequest",
+                    .qualified_name = "detect-impact.main.HandleRequest",
+                    .file_path = "handler.go",
+                    .start_line = 3,
+                    .end_line = 5};
+    ASSERT_GT(cbm_store_upsert_node(fixture, &n), 0);
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(fixture, proj), 0);
+    cbm_store_close(fixture);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *resp = cbm_mcp_handle_tool(srv, "detect_changes", "{\"project\":\"detect-impact\"}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "handler.go"));
+    ASSERT_NOT_NULL(strstr(resp, "HandleRequest"));
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    th_cleanup(tmp);
+    PASS();
+}
+
 TEST(tool_ingest_traces_basic) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
@@ -6310,6 +6355,7 @@ SUITE(mcp) {
     RUN_TEST(index_bg_paths_route_through_supervisor_issue832);
     RUN_TEST(index_recovery_parallel_quarantines_crasher);
     RUN_TEST(tool_detect_changes_not_found_rich_error);
+    RUN_TEST(tool_detect_changes_reports_impacted_symbols);
     RUN_TEST(tool_ingest_traces_basic);
     RUN_TEST(tool_ingest_traces_empty);
 
