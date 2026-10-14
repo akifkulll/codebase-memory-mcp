@@ -36,7 +36,6 @@
 
 static char g_tmpdir[256];
 static char g_repodir[512];
-static char g_dbpath[512];
 static cbm_mcp_server_t *g_srv = NULL;
 static char *g_project = NULL;
 
@@ -151,7 +150,7 @@ static int count_in_response(const char *resp, const char *key) {
 /* ── Direct store queries (more reliable than MCP for tests) ────── */
 
 static cbm_store_t *open_store(void) {
-    return cbm_store_open_path(g_dbpath);
+    return th_open_project_store(g_project);
 }
 
 static int get_node_count(void) {
@@ -245,10 +244,7 @@ static int incremental_setup(void) {
     const char *cache_dir = cbm_resolve_cache_dir();
     if (!cache_dir || !cache_dir[0])
         return -1;
-    snprintf(g_dbpath, sizeof(g_dbpath), "%s/%s.db", cache_dir, g_project);
     cbm_mkdir(cache_dir);
-
-    unlink(g_dbpath);
 
     g_srv = cbm_mcp_server_new(NULL);
     if (!g_srv)
@@ -263,14 +259,6 @@ static void incremental_teardown(void) {
     if (g_srv) {
         cbm_mcp_server_free(g_srv);
         g_srv = NULL;
-    }
-    if (g_project) {
-        unlink(g_dbpath);
-        char wal[520], shm[520];
-        snprintf(wal, sizeof(wal), "%s-wal", g_dbpath);
-        snprintf(shm, sizeof(shm), "%s-shm", g_dbpath);
-        unlink(wal);
-        unlink(shm);
     }
     free(g_project);
     g_project = NULL;
@@ -796,7 +784,7 @@ TEST(incr_batch_add_delete) {
 TEST(incr_db_deleted_recovery) {
     int nodes_before = get_node_count();
 
-    unlink(g_dbpath);
+    th_remove_zova_user_database();
 
     double ms = 0;
     size_t peak_mb = 0;
@@ -829,7 +817,7 @@ TEST(incr_accuracy_vs_full) {
     int incr_calls = get_edge_count_by_type("CALLS");
 
     /* Delete DB, force full reindex */
-    unlink(g_dbpath);
+    th_remove_zova_user_database();
     resp = index_repo();
     ASSERT(resp != NULL);
     free(resp);
@@ -2845,10 +2833,10 @@ TEST(tool_delete_and_verify) {
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
 
-TEST(incr_zova_native_baseline_round_trips_without_project_db) {
+TEST(incr_zova_native_baseline_round_trips) {
     char base[256] = "/tmp/cbm_incr_native_XXXXXX";
     ASSERT_NOT_NULL(cbm_mkdtemp(base));
-    char repo_path[512], source_path[640], cache_path[512], user_path[640], project_db[640];
+    char repo_path[512], source_path[640], cache_path[512], user_path[640];
     snprintf(repo_path, sizeof(repo_path), "%s/repo", base);
     snprintf(source_path, sizeof(source_path), "%s/main.c", repo_path);
     snprintf(cache_path, sizeof(cache_path), "%s/cache", base);
@@ -2862,11 +2850,8 @@ TEST(incr_zova_native_baseline_round_trips_without_project_db) {
     ASSERT_EQ(fclose(source), 0);
 
     const char *saved_cache = getenv("CBM_CACHE_DIR");
-    const char *saved_flag = getenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    char *saved_flag_copy = saved_flag ? strdup(saved_flag) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache_path, 1);
-    cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", "1", 1);
 
     cbm_pipeline_t *pipeline = cbm_pipeline_new(repo_path, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(pipeline);
@@ -2875,9 +2860,7 @@ TEST(incr_zova_native_baseline_round_trips_without_project_db) {
     cbm_pipeline_free(pipeline);
 
     ASSERT_EQ(cbm_zova_user_database_path(user_path, sizeof(user_path)), 0);
-    snprintf(project_db, sizeof(project_db), "%s/incr-native.db", cache_path);
     ASSERT_NEQ(access(user_path, F_OK), -1);
-    ASSERT_EQ(access(project_db, F_OK), -1);
     cbm_zova_repository_t *repository = cbm_zova_repository_open(user_path, "incr-native");
     ASSERT_NOT_NULL(repository);
     char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
@@ -2917,7 +2900,6 @@ TEST(incr_zova_native_baseline_round_trips_without_project_db) {
     ASSERT_EQ(delta_publish_metrics.integrity_writes, 1);
     ASSERT_GT(delta_publish_metrics.delta_authoritative_rows_touched, 0);
     ASSERT_EQ(delta_publish_metrics.delta_clear_violation_count, 0);
-    ASSERT_EQ(access(project_db, F_OK), -1);
 
     repository = cbm_zova_repository_open(user_path, "incr-native");
     ASSERT_NOT_NULL(repository);
@@ -2946,9 +2928,6 @@ TEST(incr_zova_native_baseline_round_trips_without_project_db) {
     cbm_zova_workspace_snapshot_free(&before);
     if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
     else cbm_unsetenv("CBM_CACHE_DIR");
-    if (saved_flag_copy) cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", saved_flag_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
-    free(saved_flag_copy);
     free(saved_cache_copy);
     cbm_unlink(user_path);
     cbm_unlink(source_path);
@@ -2959,7 +2938,7 @@ TEST(incr_zova_native_baseline_round_trips_without_project_db) {
 }
 
 SUITE(zova_incremental_native) {
-    RUN_TEST(incr_zova_native_baseline_round_trips_without_project_db);
+    RUN_TEST(incr_zova_native_baseline_round_trips);
 }
 
 SUITE(incremental) {

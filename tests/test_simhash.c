@@ -885,17 +885,14 @@ TEST(pipeline_minhash_end_to_end) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test.db", g_sim_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_sim_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_sim_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
 
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
     /* Open store and verify SIMILAR_TO edges */
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_sim_tmpdir);
     ASSERT_NOT_NULL(s);
 
     const char *project = cbm_pipeline_project_name(p);
@@ -976,16 +973,13 @@ TEST(pipeline_minhash_no_false_positives) {
         "    }\n"
         "}\n");
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test.db", g_sim_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_sim_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_sim_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
 
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_sim_tmpdir);
     ASSERT_NOT_NULL(s);
 
     cbm_edge_t *edges = NULL;
@@ -1009,18 +1003,15 @@ TEST(pipeline_minhash_incremental) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test.db", g_sim_tmpdir);
-
     /* Step 1: Full pipeline → ValidateUser ↔ ValidateOrder edge created */
-    cbm_pipeline_t *p1 = cbm_pipeline_new(g_sim_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p1 = cbm_pipeline_new(g_sim_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p1);
     int rc = cbm_pipeline_run(p1);
     ASSERT_EQ(rc, 0);
     const char *project = cbm_pipeline_project_name(p1);
 
     /* Verify edge exists */
-    cbm_store_t *s1 = cbm_store_open_path(db_path);
+    cbm_store_t *s1 = th_open_repo_store(g_sim_tmpdir);
     cbm_edge_t *edges1 = NULL;
     int count1 = 0;
     cbm_store_find_edges_by_type(s1, project, "SIMILAR_TO", &edges1, &count1);
@@ -1046,13 +1037,13 @@ TEST(pipeline_minhash_incremental) {
         "}\n");
 
     /* Step 3: Incremental reindex */
-    cbm_pipeline_t *p2 = cbm_pipeline_new(g_sim_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p2 = cbm_pipeline_new(g_sim_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p2);
     rc = cbm_pipeline_run(p2);
     ASSERT_EQ(rc, 0);
 
     /* Step 4: Verify old SIMILAR_TO edge is gone */
-    cbm_store_t *s2 = cbm_store_open_path(db_path);
+    cbm_store_t *s2 = th_open_repo_store(g_sim_tmpdir);
     cbm_edge_t *edges2 = NULL;
     int count2 = 0;
     cbm_store_find_edges_by_type(s2, cbm_pipeline_project_name(p2), "SIMILAR_TO", &edges2, &count2);
@@ -1072,16 +1063,13 @@ TEST(pipeline_minhash_incremental_new_clone) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test.db", g_sim_tmpdir);
-
     /* Step 1: Full pipeline */
-    cbm_pipeline_t *p1 = cbm_pipeline_new(g_sim_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p1 = cbm_pipeline_new(g_sim_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p1);
     int rc = cbm_pipeline_run(p1);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s1 = cbm_store_open_path(db_path);
+    cbm_store_t *s1 = th_open_repo_store(g_sim_tmpdir);
     cbm_edge_t *edges1 = NULL;
     int count1 = 0;
     cbm_store_find_edges_by_type(s1, cbm_pipeline_project_name(p1), "SIMILAR_TO", &edges1, &count1);
@@ -1114,13 +1102,13 @@ TEST(pipeline_minhash_incremental_new_clone) {
         "}\n");
 
     /* Step 3: Reindex (will be incremental if DB exists, or full) */
-    cbm_pipeline_t *p2 = cbm_pipeline_new(g_sim_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p2 = cbm_pipeline_new(g_sim_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p2);
     rc = cbm_pipeline_run(p2);
     ASSERT_EQ(rc, 0);
 
     /* Step 4: Should have MORE SIMILAR_TO edges now */
-    cbm_store_t *s2 = cbm_store_open_path(db_path);
+    cbm_store_t *s2 = th_open_repo_store(g_sim_tmpdir);
     cbm_edge_t *edges2 = NULL;
     int count2 = 0;
     cbm_store_find_edges_by_type(s2, cbm_pipeline_project_name(p2), "SIMILAR_TO", &edges2, &count2);

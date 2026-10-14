@@ -14,7 +14,6 @@
 
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h"
-#include "../src/pipeline/pipeline.h"
 #include "../src/store/store.h"
 #include "../src/zova/cbm_zova.h"
 #include "../src/zova/cbm_zova_route.h"
@@ -192,6 +191,10 @@ static inline cbm_store_t *th_open_project_store(const char *project) {
     cbm_zova_repository_close(repo);
     return cbm_store_open_zova_workspace_query(path, workspace_id);
 }
+
+/* From pipeline/pipeline.h, which is not included here: it pulls in
+ * internal/cbm/arena.h, whose include guard hides src/foundation/arena.h. */
+char *cbm_project_name_from_path(const char *abs_path);
 
 /* Open the store of the project indexed from repo_path. Caller closes it. */
 static inline cbm_store_t *th_open_repo_store(const char *repo_path) {
