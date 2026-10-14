@@ -5101,6 +5101,28 @@ static void cli_add_typed(yyjson_mut_doc *out, yyjson_mut_val *obj, const char *
     yyjson_mut_obj_add(obj, yyjson_mut_strcpy(out, key), vv);
 }
 
+bool cbm_cli_args_from_stdin_allowed(const char *tool_name, bool stdin_is_tty) {
+    if (stdin_is_tty) {
+        return false;
+    }
+    /* Reading stdin waits for EOF, and a caller that never closes an inherited
+     * pipe never sends one (upstream 9ca108fc, #1359). Only read it for a tool
+     * whose input_schema declares properties: a tool without any (list_projects)
+     * cannot take anything from stdin, and an unknown tool is rejected by name. */
+    const char *schema_str = cbm_mcp_tool_input_schema(tool_name);
+    if (!schema_str) {
+        return false;
+    }
+    yyjson_doc *schema_doc = yyjson_read(schema_str, strlen(schema_str), 0);
+    if (!schema_doc) {
+        return true; /* close the channel only on positive evidence */
+    }
+    yyjson_val *props = yyjson_obj_get(yyjson_doc_get_root(schema_doc), "properties");
+    bool accepts_arguments = props && yyjson_is_obj(props) && yyjson_obj_size(props) > 0;
+    yyjson_doc_free(schema_doc);
+    return accepts_arguments;
+}
+
 char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char **err_out) {
     if (err_out) {
         *err_out = NULL;

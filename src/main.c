@@ -417,8 +417,9 @@ static int run_cli(int argc, char **argv) {
             return SKIP_ONE;
         }
         args_json = heap_args;
-    } else if (!cli_isatty(0)) {
-        /* piped stdin (UTF-8 clean, no shell quoting): cli <tool> < args.json */
+    } else if (cbm_cli_args_from_stdin_allowed(tool_name, cli_isatty(0) != 0)) {
+        /* piped stdin (UTF-8 clean, no shell quoting): cli <tool> < args.json.
+         * Skipped for tools without arguments (#1359). */
         heap_args = cli_slurp_stream(stdin);
         if (heap_args && heap_args[0]) {
             args_json = heap_args;

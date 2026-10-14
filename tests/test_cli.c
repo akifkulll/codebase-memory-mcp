@@ -3139,6 +3139,24 @@ TEST(cli_print_tool_help_issue680) {
     PASS();
 }
 
+/* #1359 (upstream 9ca108fc): a tool without arguments never reads stdin, so an
+ * inherited pipe nobody closes cannot block it. Tools with arguments keep the
+ * piped-JSON channel; a terminal or an unknown tool never reads. */
+TEST(cli_zero_argument_tool_never_reads_stdin_issue1359) {
+    ASSERT_FALSE(cbm_cli_args_from_stdin_allowed("list_projects", false));
+
+    ASSERT_TRUE(cbm_cli_args_from_stdin_allowed("index_status", false));
+    ASSERT_TRUE(cbm_cli_args_from_stdin_allowed("search_graph", false));
+    ASSERT_TRUE(cbm_cli_args_from_stdin_allowed("index_repository", false));
+
+    ASSERT_FALSE(cbm_cli_args_from_stdin_allowed("index_status", true));
+    ASSERT_FALSE(cbm_cli_args_from_stdin_allowed("list_projects", true));
+
+    ASSERT_FALSE(cbm_cli_args_from_stdin_allowed("nope_not_a_tool", false));
+    ASSERT_FALSE(cbm_cli_args_from_stdin_allowed(NULL, false));
+    PASS();
+}
+
 /* The self-update path verifies a downloaded archive against a published
  * checksum. That check is only meaningful if the digest is actually computed —
  * a broken hash command (it once invoked `shasum -a CBM_SZ_256`, an invalid
@@ -3549,5 +3567,6 @@ SUITE(cli) {
     RUN_TEST(cli_build_args_json_key_equals_value_issue680);
     RUN_TEST(cli_build_args_json_bad_positional_errors_issue680);
     RUN_TEST(cli_print_tool_help_issue680);
+    RUN_TEST(cli_zero_argument_tool_never_reads_stdin_issue1359);
     RUN_TEST(cli_zova_ops_strict_parser_dispatch_and_exit_mapping);
 }
