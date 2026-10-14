@@ -321,50 +321,95 @@ static bool is_broker_route(const char *qn) {
     return false;
 }
 
+/* Length of a URL path without its query/fragment and trailing '/' ("/" stays 1). */
+static size_t route_path_len(const char *path) {
+    size_t len = strcspn(path, "?#");
+    while (len > SKIP_ONE && path[len - SKIP_ONE] == '/') {
+        len--;
+    }
+    return len;
+}
+
+/* True when `prefix` is `path` or a whole-segment prefix of it:
+ * /api/v1 covers /api/v1/items but not /api/v10. */
+static bool route_path_covers(const char *prefix, size_t prefix_len, const char *path,
+                              size_t path_len) {
+    return prefix_len <= path_len && strncmp(prefix, path, prefix_len) == 0 &&
+           (prefix_len == path_len || path[prefix_len] == '/');
+}
+
 /* Try to match a single infra Route to a handler Route and create HANDLES bridge.
- * Returns 1 if matched, 0 otherwise. */
+ * Picks the best match, not the first: an exact path beats a segment-prefix
+ * match, then the longer handler path, then the smaller QN. Route list order
+ * follows parallel extraction and changes between runs, so first-match was not
+ * reproducible. Returns 1 if matched, 0 otherwise. */
 static int match_one_infra_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *infra,
                                  const char *infra_path, const char *svc_name,
                                  const cbm_gbuf_node_t **all_routes, int route_count) {
+    size_t infra_len = route_path_len(infra_path);
+    bool infra_is_root = infra_len <= SKIP_ONE;
+    const cbm_gbuf_node_t *best = NULL;
+    bool best_exact = false;
+    size_t best_len = 0;
     for (int j = 0; j < route_count; j++) {
         const cbm_gbuf_node_t *handler_route = all_routes[j];
-        if (is_broker_route(handler_route->qualified_name)) {
+        if (is_broker_route(handler_route->qualified_name) || !handler_route->qualified_name) {
             continue;
         }
         int file_matches = (handler_route->file_path != NULL &&
                             strstr(handler_route->file_path, svc_name) != NULL);
         int is_prefix_route =
-            (handler_route->qualified_name != NULL &&
-             strncmp(handler_route->qualified_name, "__route__ANY__", SLEN("__route__ANY__")) == 0);
+            strncmp(handler_route->qualified_name, "__route__ANY__", SLEN("__route__ANY__")) == 0;
         if (!file_matches && !is_prefix_route) {
             continue;
         }
         const char *handler_name = handler_route->name;
-        if (!handler_name) {
-            continue;
-        }
-        const char *handler_path = strchr(handler_name, '/');
+        const char *handler_path = handler_name ? strchr(handler_name, '/') : NULL;
         if (!handler_path) {
             continue;
         }
+        size_t handler_len = route_path_len(handler_path);
+        bool handler_is_root = handler_len <= SKIP_ONE;
 
-        int path_match =
-            (strlen(handler_path) > SKIP_ONE && (strstr(infra_path, handler_path) != NULL ||
-                                                 strstr(handler_path, infra_path) != NULL));
-        int root_svc_match = (strcmp(handler_path, "/") == 0);
-        if (path_match || root_svc_match) {
-            const cbm_gbuf_edge_t **fn_handles = NULL;
-            int fn_hcount = 0;
-            cbm_gbuf_find_edges_by_target_type(gb, handler_route->id, "HANDLES", &fn_handles,
-                                               &fn_hcount);
-            for (int fh = 0; fh < fn_hcount; fh++) {
-                cbm_gbuf_insert_edge(gb, fn_handles[fh]->source_id, infra->id, "HANDLES",
-                                     "{\"source\":\"infra_match\"}");
+        /* A root handler stands only for its own service's root URL; a URL
+         * without a path names no endpoint beyond that root. */
+        bool exact;
+        if (handler_is_root || infra_is_root) {
+            if (!(handler_is_root && infra_is_root && file_matches)) {
+                continue;
             }
-            return SKIP_ONE;
+            exact = true;
+        } else {
+            exact = handler_len == infra_len &&
+                    strncmp(handler_path, infra_path, handler_len) == 0;
+            if (!exact &&
+                !route_path_covers(handler_path, handler_len, infra_path, infra_len) &&
+                !route_path_covers(infra_path, infra_len, handler_path, handler_len)) {
+                continue;
+            }
+        }
+        bool better = !best || (exact != best_exact ? exact
+                                : handler_len != best_len
+                                    ? handler_len > best_len
+                                    : strcmp(handler_route->qualified_name,
+                                             best->qualified_name) < 0);
+        if (better) {
+            best = handler_route;
+            best_exact = exact;
+            best_len = handler_len;
         }
     }
-    return 0;
+    if (!best) {
+        return 0;
+    }
+    const cbm_gbuf_edge_t **fn_handles = NULL;
+    int fn_hcount = 0;
+    cbm_gbuf_find_edges_by_target_type(gb, best->id, "HANDLES", &fn_handles, &fn_hcount);
+    for (int fh = 0; fh < fn_hcount; fh++) {
+        cbm_gbuf_insert_edge(gb, fn_handles[fh]->source_id, infra->id, "HANDLES",
+                             "{\"source\":\"infra_match\"}");
+    }
+    return SKIP_ONE;
 }
 
 /* Phase 2: Match infra Route URLs to handler Route nodes by URL path + service name. */
@@ -555,29 +600,35 @@ static void connect_prefix_to_decorators(cbm_gbuf_t *gb) {
             continue;
         }
 
-        const cbm_gbuf_edge_t **calls_in = NULL;
-        int calls_count = 0;
-        cbm_gbuf_find_edges_by_target_type(gb, prefix_route->id, "CALLS", &calls_in, &calls_count);
-        if (calls_count == 0) {
-            continue;
-        }
-
-        const cbm_gbuf_node_t *registrar = cbm_gbuf_find_by_id(gb, calls_in[0]->source_id);
-        if (!registrar || !registrar->file_path) {
-            continue;
-        }
-        const char *last_slash = strrchr(registrar->file_path, '/');
-        if (!last_slash) {
-            continue;
-        }
-        int dir_len = (int)(last_slash - registrar->file_path) + SKIP_ONE;
-
+        /* The root prefix "/" has no segment to scope handlers by, so bridging
+         * it would claim every route handler under the registrar's directory. */
         const char *prefix_path = prefix_route->name;
         const char *prefix_segs =
             (prefix_path && prefix_path[0] == '/') ? prefix_path + SKIP_ONE : prefix_path;
+        if (!prefix_segs || !prefix_segs[0]) {
+            continue;
+        }
 
-        connected +=
-            bridge_funcs_to_prefix(gb, prefix_route, registrar->file_path, dir_len, prefix_segs);
+        const cbm_gbuf_edge_t **calls_in = NULL;
+        int calls_count = 0;
+        cbm_gbuf_find_edges_by_target_type(gb, prefix_route->id, "CALLS", &calls_in, &calls_count);
+
+        /* Every registering file bridges its own directory. Taking only the
+         * first CALLS edge depended on parallel merge order. Repeated bridges
+         * dedup in the gbuf. */
+        for (int ci = 0; ci < calls_count; ci++) {
+            const cbm_gbuf_node_t *registrar = cbm_gbuf_find_by_id(gb, calls_in[ci]->source_id);
+            if (!registrar || !registrar->file_path) {
+                continue;
+            }
+            const char *last_slash = strrchr(registrar->file_path, '/');
+            if (!last_slash) {
+                continue;
+            }
+            int dir_len = (int)(last_slash - registrar->file_path) + SKIP_ONE;
+            connected += bridge_funcs_to_prefix(gb, prefix_route, registrar->file_path, dir_len,
+                                                prefix_segs);
+        }
     }
 
     if (connected > 0) {

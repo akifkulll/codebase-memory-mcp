@@ -627,14 +627,55 @@ static void try_upsert_infra_route(cbm_gbuf_t *gbuf, const CBMStringRef *sr, con
  * Docker healthcheck `curl --fail http://... || exit 1`); a NULL key_path is a
  * context-less/duplicate ref; an upstream/config/healthcheck key is an external
  * dependency, not an exposed route. (#521) */
+/* True when one dotted key segment names an endpoint the service is called at:
+ * Pub/Sub push endpoints, Cloud Scheduler/Tasks `uri`, webhooks, callbacks,
+ * post URLs. Case, '_' and '-' are ignored (pushEndpoint == push_endpoint). */
+static bool is_endpoint_key_segment(const char *segment, size_t len) {
+    char norm[CBM_SZ_64];
+    size_t n = 0;
+    for (size_t i = 0; i < len && n < sizeof(norm) - SKIP_ONE; i++) {
+        char c = segment[i];
+        if (c == '_' || c == '-') {
+            continue;
+        }
+        norm[n++] = (char)((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c);
+    }
+    norm[n] = '\0';
+    static const char *const contains[] = {"endpoint", "webhook", "callback", "posturl", NULL};
+    for (int i = 0; contains[i]; i++) {
+        if (strstr(norm, contains[i])) {
+            return true;
+        }
+    }
+    return strcmp(norm, "uri") == 0;
+}
+
+/* Allow-list, not deny-list: generic keys such as `url`, `link` or `avatarUrl`
+ * hold documentation and data URLs (sponsor lists, profiles, images), so only
+ * endpoint-named keys mint infra Routes. Upstream/config keys stay denied. (#521) */
+bool cbm_pipeline_infra_route_key_allowed(const char *key_path) {
+    if (!key_path || is_upstream_config_key(key_path)) {
+        return false;
+    }
+    const char *segment = key_path;
+    for (;;) {
+        const char *dot = strchr(segment, '.');
+        size_t len = dot ? (size_t)(dot - segment) : strlen(segment);
+        if (is_endpoint_key_segment(segment, len)) {
+            return true;
+        }
+        if (!dot) {
+            return false;
+        }
+        segment = dot + SKIP_ONE;
+    }
+}
+
 static bool route_sr_denied(const CBMStringRef *sr) {
     if (!sr->value || strchr(sr->value, ' ')) {
         return true;
     }
-    if (!sr->key_path) {
-        return true;
-    }
-    return is_upstream_config_key(sr->key_path);
+    return !cbm_pipeline_infra_route_key_allowed(sr->key_path);
 }
 
 static void cbm_pipeline_extract_infra_routes(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
