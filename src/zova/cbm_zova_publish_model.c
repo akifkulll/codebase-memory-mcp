@@ -82,9 +82,10 @@ struct cbm_zova_publish_model {
     bool prepared_pending;
 };
 
-static int64_t model_fail_allocation_at = -1;
-static int64_t model_allocation_count = 0;
-static uint64_t model_build_count = 0;
+/* Test hooks; atomic because index runs may build models concurrently. */
+static _Atomic int64_t model_fail_allocation_at = -1;
+static _Atomic int64_t model_allocation_count = 0;
+static _Atomic uint64_t model_build_count = 0;
 
 static void *model_malloc(size_t size) {
     int64_t index = model_allocation_count++;

@@ -120,6 +120,22 @@ void cbm_mutex_destroy(cbm_mutex_t *m) {
     DeleteCriticalSection(&m->cs);
 }
 
+typedef struct {
+    void (*fn)(void);
+} cbm_once_call_t;
+
+static BOOL CALLBACK cbm_once_trampoline(PINIT_ONCE once, PVOID parameter, PVOID *context) {
+    (void)once;
+    (void)context;
+    ((cbm_once_call_t *)parameter)->fn();
+    return TRUE;
+}
+
+void cbm_once(cbm_once_t *once, void (*fn)(void)) {
+    cbm_once_call_t call = {fn};
+    InitOnceExecuteOnce(once, cbm_once_trampoline, &call, NULL);
+}
+
 #else /* POSIX */
 
 void cbm_mutex_init(cbm_mutex_t *m) {
@@ -136,6 +152,10 @@ void cbm_mutex_unlock(cbm_mutex_t *m) {
 
 void cbm_mutex_destroy(cbm_mutex_t *m) {
     pthread_mutex_destroy(&m->mtx);
+}
+
+void cbm_once(cbm_once_t *once, void (*fn)(void)) {
+    (void)pthread_once(once, fn);
 }
 
 #endif

@@ -1148,7 +1148,8 @@ TEST(tool_index_repository_refuses_while_workspace_lease_is_held) {
     free(delete_refused);
     free(deleted);
     cbm_mcp_server_free(srv);
-    const char *suffixes[] = {"", "-wal", "-shm", ".writer.lock", ".prepare.lock"};
+    const char *suffixes[] = {"", "-wal", "-shm", ".writer.lock", ".prepare.lock",
+                              ".prepare.turnstile.lock"};
     char file[768];
     for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
         snprintf(file, sizeof(file), "%s%s", user_db, suffixes[i]);

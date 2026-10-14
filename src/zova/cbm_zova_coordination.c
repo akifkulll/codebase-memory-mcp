@@ -12,12 +12,6 @@
 #include <string.h>
 #include <time.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <pthread.h>
-#endif
-
 enum { COORD_POLL_MS = 20, COORD_DEFAULT_WAIT_S = 300 };
 
 /* In-process accounting. A file lock alone cannot exclude threads of one
@@ -36,27 +30,13 @@ static coord_entry_t *coord_entries;
 static cbm_mutex_t coord_mutex;
 static atomic_bool coord_cancelled;
 
-#ifdef _WIN32
-static INIT_ONCE coord_once = INIT_ONCE_STATIC_INIT;
-static BOOL CALLBACK coord_init(PINIT_ONCE once, PVOID parameter, PVOID *context) {
-    (void)once;
-    (void)parameter;
-    (void)context;
-    cbm_mutex_init(&coord_mutex);
-    return TRUE;
-}
-static void coord_ensure_initialized(void) {
-    InitOnceExecuteOnce(&coord_once, coord_init, NULL, NULL);
-}
-#else
-static pthread_once_t coord_once = PTHREAD_ONCE_INIT;
+static cbm_once_t coord_once = CBM_ONCE_INIT;
 static void coord_init(void) {
     cbm_mutex_init(&coord_mutex);
 }
 static void coord_ensure_initialized(void) {
-    (void)pthread_once(&coord_once, coord_init);
+    cbm_once(&coord_once, coord_init);
 }
-#endif
 
 static coord_entry_t **coord_find(const char *path) {
     for (coord_entry_t **e = &coord_entries; *e; e = &(*e)->next) {
@@ -161,10 +141,37 @@ static int coord_lease_path(const char *zova_path, const char *workspace_id, cha
     return n > 0 && (size_t)n < out_size ? 0 : -1;
 }
 
-static int coord_barrier_path(const char *zova_path, char *out, size_t out_size) {
+static int coord_barrier_path(const char *zova_path, const char *suffix, char *out,
+                              size_t out_size) {
     if (!zova_path || !zova_path[0]) return -1;
-    int n = snprintf(out, out_size, "%s.prepare.lock", zova_path);
+    int n = snprintf(out, out_size, "%s.%s", zova_path, suffix);
     return n > 0 && (size_t)n < out_size ? 0 : -1;
+}
+
+/* The barrier prefers writers. A writer holds the turnstile exclusive while it
+ * waits for the barrier; a reader passes the turnstile (shared, briefly) before
+ * taking the barrier shared. So once a restore or repack is waiting, no new
+ * index run starts, and the runs already going drain instead of overlapping
+ * forever. */
+static cbm_zova_coord_status_t coord_barrier_acquire(const char *zova_path, bool exclusive,
+                                                     int64_t wait_ms, int64_t deadline_ms,
+                                                     cbm_zova_coord_hold_t *out) {
+    out->held = false;
+    char turnstile_path[4096], barrier_path[4096];
+    if (coord_barrier_path(zova_path, "prepare.turnstile.lock", turnstile_path,
+                           sizeof(turnstile_path)) != 0 ||
+        coord_barrier_path(zova_path, "prepare.lock", barrier_path, sizeof(barrier_path)) != 0)
+        return CBM_ZOVA_COORD_ERROR;
+    cbm_zova_coord_hold_t turnstile;
+    cbm_zova_coord_status_t status =
+        coord_acquire(turnstile_path, exclusive, wait_ms, deadline_ms, &turnstile);
+    if (status != CBM_ZOVA_COORD_OK) {
+        snprintf(out->path, sizeof(out->path), "%s", barrier_path);
+        return status;
+    }
+    status = coord_acquire(barrier_path, exclusive, wait_ms, deadline_ms, out);
+    cbm_zova_coord_release(&turnstile);
+    return status;
 }
 
 cbm_zova_coord_status_t cbm_zova_workspace_lease_acquire(const char *zova_path,
@@ -184,9 +191,7 @@ cbm_zova_coord_status_t cbm_zova_prepare_barrier_acquire(const char *zova_path, 
                                                          cbm_zova_coord_hold_t *out) {
     if (!out) return CBM_ZOVA_COORD_ERROR;
     out->held = false;
-    char path[4096];
-    if (coord_barrier_path(zova_path, path, sizeof(path)) != 0) return CBM_ZOVA_COORD_ERROR;
-    return coord_acquire(path, exclusive, wait_ms, coord_now_ms() + wait_ms, out);
+    return coord_barrier_acquire(zova_path, exclusive, wait_ms, coord_now_ms() + wait_ms, out);
 }
 
 void cbm_zova_coord_release(cbm_zova_coord_hold_t *hold) {
@@ -221,8 +226,8 @@ cbm_zova_coord_status_t cbm_zova_index_hold_acquire(const char *root_path, int64
         snprintf(out_workspace_id, out_workspace_id_size, "%s", workspace_id);
     int64_t deadline_ms = coord_now_ms() + wait_ms;
     char path[4096];
-    if (coord_barrier_path(zova_path, path, sizeof(path)) != 0) return CBM_ZOVA_COORD_ERROR;
-    cbm_zova_coord_status_t status = coord_acquire(path, false, wait_ms, deadline_ms, &out->barrier);
+    cbm_zova_coord_status_t status =
+        coord_barrier_acquire(zova_path, false, wait_ms, deadline_ms, &out->barrier);
     if (status != CBM_ZOVA_COORD_OK) {
         out->barrier_busy = status == CBM_ZOVA_COORD_BUSY;
         return status;

@@ -347,28 +347,37 @@ static const char *itoa_buf(int v) {
     return buf;
 }
 
-static void delete_cached_project(const char *project_name) {
+/* Returns false when the delete was refused because an index run holds the
+ * workspace lease; the caller keeps the watch so the next poll retries. */
+static bool delete_cached_project(const char *project_name) {
     if (!cbm_validate_project_name(project_name)) {
-        return;
+        return true;
     }
 
     char path[CBM_SZ_1K];
     if (cbm_zova_user_database_path(path, sizeof(path)) != 0) {
-        return;
+        return true;
     }
     cbm_zova_repository_t *repo = cbm_zova_repository_open(path, project_name);
     if (!repo) {
-        return;
+        return true;
     }
     char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
     snprintf(workspace_id, sizeof(workspace_id), "%s", cbm_zova_repository_workspace_id(repo));
     cbm_zova_repository_close(repo);
     cbm_zova_operation_report_t report = {0};
-    if (cbm_zova_workspace_delete(path, workspace_id, workspace_id, &report) !=
-        CBM_ZOVA_OPERATION_OK) {
+    cbm_zova_operation_code_t code =
+        cbm_zova_workspace_delete(path, workspace_id, workspace_id, &report);
+    if (code == CBM_ZOVA_OPERATION_BUSY && strcmp(report.reason, "workspace_busy") == 0) {
+        cbm_log_info("watcher.prune_deferred", "project", project_name, "reason",
+                     report.reason);
+        return false;
+    }
+    if (code != CBM_ZOVA_OPERATION_OK) {
         cbm_log_warn("watcher.zova_delete_failed", "project", project_name, "reason",
                      report.reason);
     }
+    return true;
 }
 
 /* Hash table foreach callback to free state entries */
@@ -572,6 +581,12 @@ static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
     char project_name[CBM_SZ_1K];
     snprintf(project_name, sizeof(project_name), "%s", s->project_name);
 
+    /* Delete first: if an index run of this workspace holds its lease, keep
+     * the watch so the root is still missing (and pruned) on the next poll. */
+    if (!delete_cached_project(project_name)) {
+        return;
+    }
+
     bool removed = false;
     cbm_mutex_lock(&w->projects_lock);
     project_state_t *current = cbm_ht_get(w->projects, project_name);
@@ -585,7 +600,6 @@ static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
     cbm_mutex_unlock(&w->projects_lock);
 
     if (removed) {
-        delete_cached_project(project_name);
         cbm_log_info("watcher.root_pruned", "project", project_name);
     }
 }

@@ -28,6 +28,7 @@ enum {
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 #include "graph_buffer/graph_buffer.h"
+#include "foundation/compat.h"
 #include "foundation/log.h"
 
 #include <stdio.h>
@@ -35,8 +36,8 @@ enum {
 #include <string.h>
 
 static const char *itoa_log(int val) {
-    static char bufs[PT_RING][CBM_SZ_32];
-    static int idx = 0;
+    static CBM_TLS char bufs[PT_RING][CBM_SZ_32];
+    static CBM_TLS int idx = 0;
     int i = idx;
     idx = (idx + SKIP_ONE) & PT_RING_MASK;
     snprintf(bufs[i], sizeof(bufs[i]), "%d", val);

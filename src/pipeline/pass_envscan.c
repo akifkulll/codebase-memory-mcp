@@ -27,6 +27,7 @@ enum {
 #include <ctype.h>
 #include "foundation/compat_fs.h"
 #include "foundation/compat_regex.h"
+#include "foundation/compat_thread.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,17 +43,14 @@ static cbm_regex_t shell_re;       /* [export] KEY=https://... */
 static cbm_regex_t envfile_re;     /* KEY=https://... */
 static cbm_regex_t toml_re;        /* key = "https://..." */
 static cbm_regex_t properties_re;  /* key=https://... */
-static int patterns_compiled = 0;
+static cbm_once_t patterns_once = CBM_ONCE_INIT;
 
 /* POSIX ERE doesn't support \w or \S — use bracket expressions */
 #define W "[A-Za-z0-9_]" /* word char */
 #define NW "[^ \t\"']"   /* non-whitespace, non-quote */
 
-static void compile_patterns(void) {
-    if (patterns_compiled) {
-        return;
-    }
-
+/* Compiled once per process; concurrent pipelines then only read them. */
+static void compile_patterns_once(void) {
     cbm_regcomp(&dockerfile_re, "^(ENV|ARG)[[:space:]]+(" W "+)[= ](.*)", CBM_REG_EXTENDED);
     cbm_regcomp(&yaml_kv_re, "(" W "+):[[:space:]]*[\"']?(https?://" NW "+)", CBM_REG_EXTENDED);
     cbm_regcomp(&yaml_setenv_re, "--set-env-vars[[:space:]]+(" W "+)=([^ \t]+)", CBM_REG_EXTENDED);
@@ -65,8 +63,10 @@ static void compile_patterns(void) {
                 CBM_REG_EXTENDED);
     cbm_regcomp(&properties_re, "(" W "+)[[:space:]]*=[[:space:]]*(https?://[^ \t]+)",
                 CBM_REG_EXTENDED);
+}
 
-    patterns_compiled = SKIP_ONE;
+static void compile_patterns(void) {
+    cbm_once(&patterns_once, compile_patterns_once);
 }
 
 #undef W

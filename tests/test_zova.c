@@ -2,6 +2,7 @@
 
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h"
+#include "../src/foundation/compat_thread.h"
 #include "../src/foundation/platform.h"
 #include "store/store.h"
 #include "zova/cbm_zova.h"
@@ -359,6 +360,9 @@ TEST(zova_coordination_lease_and_barrier_in_process) {
     ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-root-a", 0, &a, NULL, 0), CBM_ZOVA_COORD_OK);
     cbm_unlink(a.lease.path);
     cbm_unlink(a.barrier.path);
+    char turnstile[TZ_PATH_MAX + 96];
+    snprintf(turnstile, sizeof(turnstile), "%s.prepare.turnstile.lock", zova_path);
+    cbm_unlink(turnstile);
     cbm_zova_index_hold_release(&a);
     char lease_b[TZ_PATH_MAX + 128], wid_b[64];
     ASSERT_EQ(cbm_zova_workspace_id_for_root("/tmp/coord-root-b", wid_b, sizeof(wid_b)), 0);
@@ -372,6 +376,81 @@ TEST(zova_coordination_lease_and_barrier_in_process) {
     snprintf(dir, sizeof(dir), "%s/cache", base);
     rmdir(dir);
     rmdir(base);
+    PASS();
+}
+
+typedef struct {
+    const char *zova_path;
+    cbm_zova_coord_status_t status;
+    cbm_zova_coord_hold_t hold;
+} tz_barrier_writer_t;
+
+static void *tz_barrier_writer(void *arg) {
+    tz_barrier_writer_t *writer = arg;
+    writer->status = cbm_zova_prepare_barrier_acquire(writer->zova_path, true, 10000,
+                                                      &writer->hold);
+    return NULL;
+}
+
+/* A waiting restore/repack is not starved by overlapping index runs: once it
+ * waits, new runs refuse until it has replaced the file. */
+TEST(zova_coordination_waiting_writer_blocks_new_index_runs) {
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    char cache[TZ_PATH_MAX], zova_path[TZ_PATH_MAX + 32];
+    snprintf(cache, sizeof(cache), "%s/cbm-coord-writer-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    ASSERT_EQ(cbm_zova_user_database_path(zova_path, sizeof(zova_path)), 0);
+
+    cbm_zova_index_hold_t running, late;
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-writer-a", 0, &running, NULL, 0),
+              CBM_ZOVA_COORD_OK);
+    tz_barrier_writer_t writer = {.zova_path = zova_path, .status = CBM_ZOVA_COORD_ERROR};
+    cbm_thread_t thread;
+    ASSERT_EQ(cbm_thread_create(&thread, 0, tz_barrier_writer, &writer), 0);
+
+    /* Until the writer reaches the turnstile a new run may still start. */
+    bool writer_waiting = false;
+    for (int i = 0; i < 400 && !writer_waiting; i++) {
+        cbm_zova_coord_status_t status =
+            cbm_zova_index_hold_acquire("/tmp/coord-writer-b", 0, &late, NULL, 0);
+        if (status == CBM_ZOVA_COORD_OK) {
+            cbm_zova_index_hold_release(&late);
+            struct timespec pause = {.tv_sec = 0, .tv_nsec = 5000000};
+            nanosleep(&pause, NULL);
+        } else {
+            writer_waiting = status == CBM_ZOVA_COORD_BUSY && late.barrier_busy;
+        }
+    }
+    ASSERT_TRUE(writer_waiting);
+
+    cbm_zova_index_hold_release(&running);
+    cbm_thread_join(&thread);
+    ASSERT_EQ(writer.status, CBM_ZOVA_COORD_OK);
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-writer-b", 0, &late, NULL, 0),
+              CBM_ZOVA_COORD_BUSY);
+    ASSERT_TRUE(late.barrier_busy);
+    cbm_zova_coord_release(&writer.hold);
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-writer-b", 0, &late, NULL, 0),
+              CBM_ZOVA_COORD_OK);
+    cbm_zova_index_hold_release(&late);
+
+    const char *roots[] = {"/tmp/coord-writer-a", "/tmp/coord-writer-b"};
+    char file[TZ_PATH_MAX + 128], wid[64];
+    for (int i = 0; i < 2; i++) {
+        ASSERT_EQ(cbm_zova_workspace_id_for_root(roots[i], wid, sizeof(wid)), 0);
+        snprintf(file, sizeof(file), "%s.ws-%s.lock", zova_path, wid);
+        cbm_unlink(file);
+    }
+    snprintf(file, sizeof(file), "%s.prepare.lock", zova_path);
+    cbm_unlink(file);
+    snprintf(file, sizeof(file), "%s.prepare.turnstile.lock", zova_path);
+    cbm_unlink(file);
+    if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+    else cbm_unsetenv("CBM_CACHE_DIR");
+    free(saved_cache_copy);
+    rmdir(cache);
     PASS();
 }
 
@@ -423,6 +502,9 @@ TEST(zova_coordination_lease_excludes_other_processes_and_survives_crash) {
     cbm_zova_index_hold_release(&hold);
     ASSERT_EQ(cbm_zova_prepare_barrier_acquire(zova_path, true, 0, &barrier), CBM_ZOVA_COORD_OK);
     cbm_unlink(barrier.path);
+    char turnstile[TZ_PATH_MAX + 96];
+    snprintf(turnstile, sizeof(turnstile), "%s.prepare.turnstile.lock", zova_path);
+    cbm_unlink(turnstile);
     cbm_zova_coord_release(&barrier);
     char wid[64], lease_other[TZ_PATH_MAX + 128];
     ASSERT_EQ(cbm_zova_workspace_id_for_root("/tmp/coord-proc-other", wid, sizeof(wid)), 0);
@@ -4162,6 +4244,7 @@ SUITE(zova) {
     RUN_TEST(file_lock_modes_conflict_across_processes_and_release_on_crash);
     RUN_TEST(zova_coordination_lease_and_barrier_in_process);
     RUN_TEST(zova_coordination_lease_excludes_other_processes_and_survives_crash);
+    RUN_TEST(zova_coordination_waiting_writer_blocks_new_index_runs);
 #endif
     RUN_TEST(zova_route_uses_user_cache_database);
     RUN_TEST(zova_workspace_scoped_names_and_node_ids_are_deterministic);

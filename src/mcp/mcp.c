@@ -3922,16 +3922,12 @@ static char *index_repository_run(cbm_mcp_server_t *srv, const char *args) {
     free(srv->current_project);
     srv->current_project = NULL;
 
-    /* One in-process pipeline at a time: pipelines share process-global state
-     * (the package map). Same-workspace exclusion across processes is the
-     * workspace lease held by handle_index_repository.
-     * Track active pipeline so signal handler and notifications/cancelled
-     * can cancel it mid-run. */
-    cbm_pipeline_lock();
+    /* Same-workspace exclusion is the workspace lease held by
+     * handle_index_repository. Track active pipeline so signal handler and
+     * notifications/cancelled can cancel it mid-run. */
     srv->active_pipeline = p;
     int rc = cbm_pipeline_run(p);
     srv->active_pipeline = NULL;
-    cbm_pipeline_unlock();
 
     /* Capture the excluded-subtree list (#411) while the pipeline (which owns
      * the strings) is still alive — the response builder copies them into the
@@ -5801,10 +5797,7 @@ static void *autoindex_thread(void *arg) {
         return NULL;
     }
 
-    /* One in-process pipeline at a time (process-global pipeline state). */
-    cbm_pipeline_lock();
     int rc = cbm_pipeline_run(p);
-    cbm_pipeline_unlock();
     cbm_zova_index_hold_release(&hold);
 
     cbm_pipeline_free(p);

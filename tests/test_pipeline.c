@@ -5079,6 +5079,91 @@ TEST(pkgmap_scan_repo_honors_discovery_exclusions) {
     PASS();
 }
 
+/* Two in-process pipelines run at once. Each repo's `@<scope>/lib` import
+ * resolves only through its own package map, so a map shared between runs (or
+ * freed by the other run) loses an IMPORTS edge or crashes. */
+typedef struct {
+    char root[256];
+    const char *scope;
+    int rc;
+    bool import_resolved;
+} concurrent_pkgmap_run_t;
+
+static bool concurrent_pkgmap_import_resolved(const char *root, const char *project) {
+    cbm_store_t *s = th_open_repo_store(root);
+    if (!s) return false;
+    cbm_edge_t *edges = NULL;
+    int count = 0;
+    bool found = false;
+    if (cbm_store_find_edges_by_type(s, project, "IMPORTS", &edges, &count) == CBM_STORE_OK) {
+        for (int i = 0; i < count && !found; i++) {
+            cbm_node_t src = {0}, tgt = {0};
+            if (cbm_store_find_node_by_id(s, edges[i].source_id, &src) == CBM_STORE_OK &&
+                cbm_store_find_node_by_id(s, edges[i].target_id, &tgt) == CBM_STORE_OK) {
+                found = src.file_path && strcmp(src.file_path, "app.js") == 0 && tgt.file_path &&
+                        strcmp(tgt.file_path, "packages/lib/index.js") == 0;
+            }
+            cbm_node_free_fields(&src);
+            cbm_node_free_fields(&tgt);
+        }
+        if (edges) cbm_store_free_edges(edges, count);
+    }
+    cbm_store_close(s);
+    return found;
+}
+
+static void *concurrent_pkgmap_run(void *arg) {
+    concurrent_pkgmap_run_t *run = arg;
+    cbm_pipeline_t *p = cbm_pipeline_new(run->root, NULL, CBM_MODE_FULL);
+    run->rc = p ? cbm_pipeline_run(p) : -1;
+    if (p && run->rc == 0) {
+        run->import_resolved =
+            concurrent_pkgmap_import_resolved(run->root, cbm_pipeline_project_name(p));
+    }
+    if (p) cbm_pipeline_free(p);
+    return NULL;
+}
+
+TEST(pipeline_concurrent_runs_keep_their_own_pkgmap) {
+    const char *scopes[] = {"alpha", "beta"};
+    concurrent_pkgmap_run_t runs[2];
+    memset(runs, 0, sizeof(runs));
+    char content[256], dir[512];
+    for (int r = 0; r < 2; r++) {
+        snprintf(runs[r].root, sizeof(runs[r].root), "%s/cbm_pkgmap_conc_%s_XXXXXX",
+                 cbm_tmpdir(), scopes[r]);
+        if (!cbm_mkdtemp(runs[r].root)) FAIL("tmpdir");
+        runs[r].scope = scopes[r];
+        snprintf(dir, sizeof(dir), "%s/packages/lib", runs[r].root);
+        th_mkdir_p(dir);
+        snprintf(content, sizeof(content), "{\"name\":\"@%s/lib\",\"main\":\"index.js\"}\n",
+                 scopes[r]);
+        write_temp_file(runs[r].root, "packages/lib/package.json", content);
+        write_temp_file(runs[r].root, "packages/lib/index.js",
+                        "export function helper() { return 1; }\n");
+        snprintf(content, sizeof(content),
+                 "import { helper } from \"@%s/lib\";\nexport function main() { return helper(); }\n",
+                 scopes[r]);
+        write_temp_file(runs[r].root, "app.js", content);
+    }
+
+    for (int round = 0; round < 3; round++) {
+        cbm_thread_t threads[2];
+        for (int r = 0; r < 2; r++) {
+            runs[r].rc = -1;
+            runs[r].import_resolved = false;
+            ASSERT_EQ(cbm_thread_create(&threads[r], 0, concurrent_pkgmap_run, &runs[r]), 0);
+        }
+        for (int r = 0; r < 2; r++) cbm_thread_join(&threads[r]);
+        for (int r = 0; r < 2; r++) {
+            ASSERT_EQ(runs[r].rc, 0);
+            ASSERT_TRUE(runs[r].import_resolved);
+        }
+    }
+    for (int r = 0; r < 2; r++) th_rmtree(runs[r].root);
+    PASS();
+}
+
 /* The env-URL walk must honor discovery exclusions the same way (#792).
  * Control run first via the NULL-exclusion wrapper so the exclusion
  * assertion cannot pass vacuously. */
@@ -6828,83 +6913,6 @@ TEST(incremental_kustomize_module_indexed) {
     PASS();
 }
 
-/* ── Index lock tests ───────────────────────────────────────────── */
-
-TEST(pipeline_lock_try_acquire) {
-    /* First try-lock should succeed */
-    ASSERT_TRUE(cbm_pipeline_try_lock());
-    /* Second try-lock should fail (already held) */
-    ASSERT_FALSE(cbm_pipeline_try_lock());
-    /* Release, then re-acquire should succeed */
-    cbm_pipeline_unlock();
-    ASSERT_TRUE(cbm_pipeline_try_lock());
-    cbm_pipeline_unlock();
-    PASS();
-}
-
-TEST(pipeline_lock_blocking) {
-    /* Lock, then unlock — basic sanity */
-    cbm_pipeline_lock();
-    cbm_pipeline_unlock();
-    /* Should be immediately re-acquirable */
-    cbm_pipeline_lock();
-    cbm_pipeline_unlock();
-    PASS();
-}
-
-/* Thread function that tries to acquire the lock and records result */
-static atomic_int g_thread_acquired = 0;
-static atomic_int g_thread_done = 0;
-
-static void *try_lock_thread(void *arg) {
-    (void)arg;
-    if (cbm_pipeline_try_lock()) {
-        atomic_store(&g_thread_acquired, 1);
-        cbm_pipeline_unlock();
-    } else {
-        atomic_store(&g_thread_acquired, 0);
-    }
-    atomic_store(&g_thread_done, 1);
-    return NULL;
-}
-
-TEST(pipeline_lock_contention) {
-    /* Main thread holds lock, spawned thread should fail try_lock */
-    cbm_pipeline_lock();
-    atomic_store(&g_thread_acquired, -1);
-    atomic_store(&g_thread_done, 0);
-
-    cbm_thread_t tid;
-    int rc = cbm_thread_create(&tid, 0, try_lock_thread, NULL);
-    ASSERT_EQ(rc, 0);
-
-    /* Wait for thread to finish */
-    cbm_thread_join(&tid);
-
-    /* Thread should NOT have acquired the lock */
-    ASSERT_EQ(atomic_load(&g_thread_acquired), 0);
-    cbm_pipeline_unlock();
-    PASS();
-}
-
-TEST(pipeline_lock_release_allows_contender) {
-    /* Main thread acquires and releases, then spawned thread should succeed */
-    cbm_pipeline_lock();
-    cbm_pipeline_unlock();
-
-    atomic_store(&g_thread_acquired, -1);
-    atomic_store(&g_thread_done, 0);
-
-    cbm_thread_t tid;
-    int rc = cbm_thread_create(&tid, 0, try_lock_thread, NULL);
-    ASSERT_EQ(rc, 0);
-    cbm_thread_join(&tid);
-
-    /* Thread SHOULD have acquired the lock */
-    ASSERT_EQ(atomic_load(&g_thread_acquired), 1);
-    PASS();
-}
-
 /* ── Resource management & internal helper tests ─────────────────── */
 
 TEST(pipeline_empty_path) {
@@ -7686,11 +7694,6 @@ TEST(pipeline_seq_ts_cross_uses_shared_registry) {
 }
 
 SUITE(pipeline) {
-    /* Index lock */
-    RUN_TEST(pipeline_lock_try_acquire);
-    RUN_TEST(pipeline_lock_blocking);
-    RUN_TEST(pipeline_lock_contention);
-    RUN_TEST(pipeline_lock_release_allows_contender);
     /* Lifecycle */
     RUN_TEST(pipeline_create_free);
     RUN_TEST(pipeline_null_repo);
@@ -7863,6 +7866,7 @@ SUITE(pipeline) {
     /* Discovery-exclusion plumbing in auxiliary repo walks (#792) */
     RUN_TEST(pipeline_relpath_excluded_boundary);
     RUN_TEST(pkgmap_scan_repo_honors_discovery_exclusions);
+    RUN_TEST(pipeline_concurrent_runs_keep_their_own_pkgmap);
     RUN_TEST(envscan_walk_honors_discovery_exclusions);
     /* Function registry / resolver */
     RUN_TEST(registry_resolve_single_candidate);

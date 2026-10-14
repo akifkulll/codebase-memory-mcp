@@ -216,22 +216,9 @@ void cbm_pipeline_add_file_error(cbm_pipeline_t *p, const char *path, const char
  * nothing was skipped. Do not free. */
 void cbm_pipeline_get_file_errors(const cbm_pipeline_t *p, cbm_file_error_t **out, int *count);
 
-/* ── In-process pipeline lock ───────────────────────────────────── */
-
-/* One cbm_pipeline_run at a time within this process: pipelines share
- * process-global state (the package map, envscan pattern init). This lock does
- * not coordinate processes; same-workspace exclusion across processes is the
- * workspace lease (zova/cbm_zova_coordination.h), taken at the index entry
- * points. Hold it only around an in-process run. */
-
-/* Non-blocking acquire. Returns false if another in-process run holds it. */
-bool cbm_pipeline_try_lock(void);
-
-/* Blocking acquire. */
-void cbm_pipeline_lock(void);
-
-/* Release. */
-void cbm_pipeline_unlock(void);
+/* Runs share no process-global state, so several may run in one process.
+ * Same-workspace exclusion is the workspace lease
+ * (zova/cbm_zova_coordination.h), taken at the index entry points. */
 
 /* ── FQN helpers (used by passes and external callers) ──────────── */
 

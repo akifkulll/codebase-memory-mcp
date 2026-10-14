@@ -50,29 +50,6 @@ static inline void *intptr_to_ptr(intptr_t v) {
     return p;
 }
 
-/* ── In-process pipeline lock ──────────────────────────────────── */
-/* One in-process run at a time (g_pkgmap and the envscan pattern init are
- * process-global). Cross-process exclusion is the workspace lease.
- * Atomic spinlock: 0 = free, 1 = locked. */
-static atomic_int g_pipeline_busy = 0;
-
-bool cbm_pipeline_try_lock(void) {
-    return atomic_exchange(&g_pipeline_busy, 1) == 0;
-}
-
-#define LOCK_SPIN_NS 100000000 /* 100ms between lock retries */
-
-void cbm_pipeline_lock(void) {
-    while (atomic_exchange(&g_pipeline_busy, 1) != 0) {
-        struct timespec ts = {0, LOCK_SPIN_NS};
-        cbm_nanosleep(&ts, NULL);
-    }
-}
-
-void cbm_pipeline_unlock(void) {
-    atomic_store(&g_pipeline_busy, 0);
-}
-
 /* ── Internal state ──────────────────────────────────────────────── */
 
 struct cbm_pipeline {
@@ -120,18 +97,6 @@ struct cbm_pipeline {
     cbm_project_summary_export_t saved_summary;
     bool saved_summary_valid;
 };
-
-/* ── Global pkgmap (one active pipeline at a time) ─────────────── */
-
-static CBMHashTable *g_pkgmap = NULL;
-
-CBMHashTable *cbm_pipeline_get_pkgmap(void) {
-    return g_pkgmap;
-}
-
-void cbm_pipeline_set_pkgmap(CBMHashTable *map) {
-    g_pkgmap = map;
-}
 
 /* ── Timing helper ──────────────────────────────────────────────── */
 
@@ -784,9 +749,8 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
      * Use the repo-walking variant so manifests filtered out by the main
      * discoverer (package.json, composer.json) still feed pkgmap and let
      * workspace imports like `@my/pkg` resolve to their target Module. */
-    cbm_pipeline_set_pkgmap(cbm_pkgmap_build_from_repo(ctx->repo_path, files, file_count,
-                                                       ctx->project_name, ctx->excluded_dirs,
-                                                       ctx->excluded_count));
+    ctx->pkgmap = cbm_pkgmap_build_from_repo(ctx->repo_path, files, file_count, ctx->project_name,
+                                             ctx->excluded_dirs, ctx->excluded_count);
 
     CBMFileResult **seq_cache = (CBMFileResult **)calloc(file_count, sizeof(CBMFileResult *));
     if (seq_cache) {
@@ -1368,6 +1332,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     struct timespec t0;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
     cbm_path_alias_collection_t *path_aliases = NULL;
+    cbm_pipeline_ctx_t ctx = {0}; /* zeroed first: cleanup reads ctx.pkgmap */
 
     /* C/C++ #define Macro nodes (#375) dominate extraction on macro-dense repos
      * (≈49% of nodes on the Linux kernel), so gate them to full mode — moderate
@@ -1436,7 +1401,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         cbm_load_path_aliases_excluded(p->repo_path, p->excluded_dirs, p->excluded_count);
 
     /* Build shared context for pass functions */
-    cbm_pipeline_ctx_t ctx = {
+    ctx = (cbm_pipeline_ctx_t){
         .project_name = p->project_name,
         .repo_path = p->repo_path,
         .gbuf = p->gbuf,
@@ -1465,8 +1430,8 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     CBM_PROF_END("pipeline", "TOTAL", t_pipeline_total);
 
 cleanup:
-    cbm_pkgmap_free(cbm_pipeline_get_pkgmap());
-    cbm_pipeline_set_pkgmap(NULL);
+    cbm_pkgmap_free(ctx.pkgmap);
+    ctx.pkgmap = NULL;
     cbm_discover_free(files, file_count);
     cbm_gbuf_free(p->gbuf);
     p->gbuf = NULL;

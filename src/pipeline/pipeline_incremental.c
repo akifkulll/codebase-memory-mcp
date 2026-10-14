@@ -1185,6 +1185,8 @@ static int run_incremental(cbm_pipeline_t *p, cbm_file_info_t *files, int file_c
     free(changed_files);
     cbm_registry_free(registry);
     cbm_path_alias_collection_free(path_aliases);
+    cbm_pkgmap_free(ctx.pkgmap); /* built by the parallel extract, if it ran */
+    ctx.pkgmap = NULL;
 
     /* Step 7: Publish (preserves mode-skipped hash rows so the next reindex
      * can correctly classify those files instead of seeing them as

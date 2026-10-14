@@ -2286,6 +2286,11 @@ done:
 #endif
 }
 
+static cbm_zova_operation_code_t operations_coord_refusal(cbm_zova_operation_report_t *out,
+                                                          const char *operation,
+                                                          cbm_zova_coord_status_t status,
+                                                          const char *busy_reason);
+
 cbm_zova_operation_code_t cbm_zova_workspace_import(
     const char *target_path, const char *archive_directory, bool replace,
     cbm_zova_operation_report_t *out) {
@@ -2333,6 +2338,21 @@ cbm_zova_operation_code_t cbm_zova_workspace_import(
         operations_report(out, CBM_ZOVA_OPERATION_VERIFY_FAILED, "import_workspace",
                           "archive_read_cleanup_failed");
         return CBM_ZOVA_OPERATION_VERIFY_FAILED;
+    }
+    /* The import publishes this workspace, so it holds what an index run of it
+     * holds: the barrier shared, then the workspace lease. It does not wait. */
+    cbm_zova_coord_hold_t barrier = {0}, lease = {0};
+    cbm_zova_coord_status_t coord =
+        cbm_zova_prepare_barrier_acquire(target_path, false, 0, &barrier);
+    const char *busy_reason = "database_replacement_in_progress";
+    if (coord == CBM_ZOVA_COORD_OK) {
+        coord = cbm_zova_workspace_lease_acquire(target_path, workspace_id, 0, &lease);
+        busy_reason = "workspace_busy";
+    }
+    if (coord != CBM_ZOVA_COORD_OK) {
+        cbm_zova_coord_release(&barrier);
+        cbm_zova_workspace_snapshot_free(&snapshot);
+        return operations_coord_refusal(out, "import_workspace", coord, busy_reason);
     }
     struct timespec started = {0}, finished = {0};
     cbm_clock_gettime(CLOCK_MONOTONIC, &started);
@@ -2442,6 +2462,8 @@ cbm_zova_operation_code_t cbm_zova_workspace_import(
                       ((double)(finished.tv_nsec - started.tv_nsec) / 1000000.0);
     code = CBM_ZOVA_OPERATION_OK;
 done:
+    cbm_zova_coord_release(&lease);
+    cbm_zova_coord_release(&barrier);
     cbm_zova_workspace_snapshot_free(&snapshot);
     return code;
 #endif

@@ -80,8 +80,6 @@ static void request_shutdown(void) {
             cbm_pipeline_cancel(p);
         }
     }
-    /* Release pipeline lock to prevent stale lock on restart */
-    cbm_pipeline_unlock();
     /* Make pending index-lease and barrier waits return at once */
     cbm_zova_coord_set_cancelled(true);
 
@@ -179,23 +177,14 @@ static int watcher_index_fn(const char *project_name, const char *root_path, voi
         /* resp == NULL → spawn-failure degrade → fall through to in-process. */
     }
 
-    /* One in-process pipeline at a time (process-global pipeline state). */
-    if (!cbm_pipeline_try_lock()) {
-        cbm_zova_index_hold_release(&hold);
-        cbm_log_info("watcher.skip", "project", project_name, "reason", "pipeline_busy");
-        return 0;
-    }
-
     cbm_pipeline_t *p = cbm_pipeline_new(root_path, NULL, CBM_MODE_FULL);
     if (!p) {
-        cbm_pipeline_unlock();
         cbm_zova_index_hold_release(&hold);
         return CBM_NOT_FOUND;
     }
 
     int rc = cbm_pipeline_run(p);
     cbm_pipeline_free(p);
-    cbm_pipeline_unlock();
     cbm_zova_index_hold_release(&hold);
     return rc;
 }

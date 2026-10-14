@@ -63,6 +63,20 @@ void cbm_mutex_lock(cbm_mutex_t *m);
 void cbm_mutex_unlock(cbm_mutex_t *m);
 void cbm_mutex_destroy(cbm_mutex_t *m);
 
+/* ── One-time initialization ──────────────────────────────────── */
+
+#ifdef _WIN32
+typedef INIT_ONCE cbm_once_t;
+#define CBM_ONCE_INIT INIT_ONCE_STATIC_INIT
+#else
+typedef pthread_once_t cbm_once_t;
+#define CBM_ONCE_INIT PTHREAD_ONCE_INIT
+#endif
+
+/* Run fn exactly once per `once` across all threads. Callers that arrive while
+ * it runs wait for it to finish. */
+void cbm_once(cbm_once_t *once, void (*fn)(void));
+
 /* ── Aligned allocation ───────────────────────────────────────── */
 
 /* Allocate size bytes aligned to alignment boundary.

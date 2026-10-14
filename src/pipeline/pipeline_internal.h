@@ -98,6 +98,11 @@ typedef struct {
      * Owned by pipeline.c / pipeline_incremental.c. */
     const cbm_path_alias_collection_t *path_aliases;
 
+    /* Package map built from this run's manifests (NULL when none). Owned by
+     * the run: built in run_sequential_pipeline / merge_pkg_entries, freed at
+     * the end of cbm_pipeline_run. Per run, so in-process runs never share it. */
+    CBMHashTable *pkgmap;
+
     /* Directory subtrees excluded during discovery. Borrowed from pipeline.c. */
     char **excluded_dirs;
     int excluded_count;
@@ -132,9 +137,6 @@ static inline int cbm_pipeline_relpath_is_excluded(const char *rel_path, char *c
     return 0;
 }
 
-/* Get the current pipeline's package map (NULL if none). */
-CBMHashTable *cbm_pipeline_get_pkgmap(void);
-void cbm_pipeline_set_pkgmap(CBMHashTable *map);
 
 /* Publish finalized graph/vector arrays plus the exact discovered hash set to
  * the shared user-local Zova generation. Returns 0 when disabled or when the

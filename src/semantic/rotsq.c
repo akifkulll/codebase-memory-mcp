@@ -5,23 +5,25 @@
 
 #include <string.h>
 
+#include "foundation/compat_thread.h"
+
 #define XXH_INLINE_ALL
 #include "xxhash/xxhash.h"
 
 /* ── Deterministic ±1 diagonal (seeded, generated once) ─────────────── */
 
 static float g_rsq_diag[CBM_RSQ_DIM];
-static int g_rsq_diag_ready = 0;
+static cbm_once_t g_rsq_diag_once = CBM_ONCE_INIT;
 
-static void rsq_init_diag(void) {
-    if (g_rsq_diag_ready) {
-        return;
-    }
+static void rsq_build_diag(void) {
     for (int d = 0; d < CBM_RSQ_DIM; d++) {
         uint64_t h = XXH3_64bits_withSeed(&d, sizeof(d), 0x5bd1e995u);
         g_rsq_diag[d] = (h & 1u) ? 1.0F : -1.0F;
     }
-    g_rsq_diag_ready = 1;
+}
+
+static void rsq_init_diag(void) {
+    cbm_once(&g_rsq_diag_once, rsq_build_diag);
 }
 
 /* ── Fast Walsh–Hadamard Transform (in place, unnormalized) ─────────── */

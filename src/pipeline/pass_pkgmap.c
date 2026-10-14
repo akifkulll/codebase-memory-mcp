@@ -1144,7 +1144,7 @@ char *cbm_pipeline_resolve_module(const cbm_pipeline_ctx_t *ctx, const char *sou
     }
 
     /* 2. No pkgmap → fall through immediately */
-    CBMHashTable *pkgmap = cbm_pipeline_get_pkgmap();
+    CBMHashTable *pkgmap = ctx->pkgmap;
     if (!pkgmap) {
         return cbm_pipeline_fqn_module(ctx->project_name, module_path);
     }

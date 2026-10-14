@@ -10,6 +10,9 @@
 #include "test_helpers.h"
 #include <watcher/watcher.h>
 #include <store/store.h>
+#include <zova/cbm_zova_coordination.h>
+#include <zova/cbm_zova_repository.h>
+#include <zova/cbm_zova_route.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -322,6 +325,50 @@ TEST(watcher_prunes_sustained_missing_root) {
 
     /* Miss #3 with the grace window already satisfied: prune the watch
      * entry and the project's cbm.zova workspace. */
+    cbm_watcher_touch(w, "stale-project");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(cbm_watcher_watch_count(w), 0);
+    ASSERT_FALSE(prune_project_indexed());
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    prune_fixture_teardown(&f);
+    PASS();
+}
+
+/* A prune that meets an index run holding the workspace lease keeps the watch
+ * and the workspace, then completes on a later poll once the lease is free. */
+TEST(watcher_prune_waits_for_workspace_lease) {
+    prune_fixture_t f;
+    if (!prune_fixture_setup(&f, "0")) {
+        FAIL("prune fixture setup failed");
+    }
+    char zova_path[1024], workspace_id[128] = {0};
+    ASSERT_EQ(cbm_zova_user_database_path(zova_path, sizeof(zova_path)), 0);
+    cbm_zova_repository_t *repo = cbm_zova_repository_open(zova_path, "stale-project");
+    ASSERT_NOT_NULL(repo);
+    snprintf(workspace_id, sizeof(workspace_id), "%s", cbm_zova_repository_workspace_id(repo));
+    cbm_zova_repository_close(repo);
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
+    cbm_watcher_watch(w, "stale-project", f.rootdir);
+    cbm_watcher_poll_once(w); /* baseline */
+    th_rmtree(f.rootdir);
+    for (int i = 0; i < 2; i++) {
+        cbm_watcher_touch(w, "stale-project");
+        cbm_watcher_poll_once(w);
+    }
+
+    cbm_zova_coord_hold_t lease;
+    ASSERT_EQ(cbm_zova_workspace_lease_acquire(zova_path, workspace_id, 0, &lease),
+              CBM_ZOVA_COORD_OK);
+    cbm_watcher_touch(w, "stale-project");
+    cbm_watcher_poll_once(w); /* miss #3: prune is due but the workspace is busy */
+    ASSERT_EQ(cbm_watcher_watch_count(w), 1);
+    ASSERT_TRUE(prune_project_indexed());
+    cbm_zova_coord_release(&lease);
+
     cbm_watcher_touch(w, "stale-project");
     cbm_watcher_poll_once(w);
     ASSERT_EQ(cbm_watcher_watch_count(w), 0);
@@ -2099,6 +2146,7 @@ SUITE(watcher) {
     RUN_TEST(watcher_poll_no_projects);
     RUN_TEST(watcher_poll_nonexistent_path);
     RUN_TEST(watcher_prunes_sustained_missing_root);
+    RUN_TEST(watcher_prune_waits_for_workspace_lease);
     RUN_TEST(watcher_grace_window_blocks_prune);
     RUN_TEST(watcher_root_missing_errno_classification);
     RUN_TEST(watcher_root_restore_resets_prune_streak);

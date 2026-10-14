@@ -51,15 +51,14 @@ this list, this list wins.
    refuse identically") no longer applies; there is one route.
 4. **Line references have drifted.** Treat them as pointers into `68ec1b9`. Current locations are
    in [Implementation](#implementation-2026-10-14).
-5. **Child task 3 deviates: the in-process pipeline lock stays, narrowed.** `g_pipeline_busy`
-   cannot be retired yet: pipelines share process-global state (`g_pkgmap` in `pipeline.c`,
-   "one active pipeline at a time", and the lazy pattern compile in `pass_envscan.c`), so two
-   in-process `cbm_pipeline_run` calls are unsafe. The lock is now an in-process guard held only
-   around an in-process run. It is no longer held around a supervised worker run (the watcher
-   path) or by `delete_project`; the workspace lease replaced it there. Supervised runs, the
-   default, are separate processes, so different workspaces do index concurrently across
-   processes. Retiring the lock fully needs `g_pkgmap` made per-pipeline and the envscan init
-   made once-only — a structural change, not done here.
+5. **Child task 3 took a second step.** `g_pipeline_busy` could not be removed at first,
+   because pipelines shared process-global state: the package map (`g_pkgmap`, "one active
+   pipeline at a time") and the lazy pattern compile in `pass_envscan.c`. The package map now
+   lives in each run's `cbm_pipeline_ctx_t`. The envscan patterns and the `rotsq` diagonal are
+   built once per process (`cbm_once`). The test-only publish-model counters are atomic. After
+   that, `cbm_pipeline_lock/try_lock/unlock` and `g_pipeline_busy` were removed. In-process
+   runs of different workspaces now run at the same time;
+   `pipeline_concurrent_runs_keep_their_own_pkgmap` fails against the old shared map.
 6. **No daemon, confirmed.** Coordination is file locks next to `cbm.zova` only. Deferred item 7,
    if it is ever needed, gets a claim record (a file lock), not a supervisor process.
 
@@ -498,7 +497,7 @@ Absent these, the daemon's cost is not justified by any measured problem.
 
 ---
 
-## Child work (approved 2026-10-14; 1, 2 and 4 implemented, 3 narrowed per Amendment 5)
+## Child work (approved 2026-10-14; 1–4 implemented, see Amendment 5 for 3)
 
 ### In scope now
 
@@ -568,18 +567,22 @@ Absent these, the daemon's cost is not justified by any measured problem.
 
 ## Implementation (2026-10-14)
 
-No daemon, no IPC, no new process. Three lock files sit next to `cbm.zova` in the cache
+No daemon, no IPC, no new process. Four lock files sit next to `cbm.zova` in the cache
 directory, all `fcntl` record locks on POSIX and `LockFileEx` on Windows, all released by the OS
 when the holder dies, created on demand and never removed:
 
 | Lock file | Mode | Held by |
 |---|---|---|
-| `cbm.zova.prepare.lock` (barrier) | shared | every index run, for the whole run; `workspace_recover` |
-| | exclusive | `restore` (and `import`, which restores), `repack` |
-| `cbm.zova.ws-<workspace_id>.lock` (lease) | exclusive | every index run of that workspace; `delete-workspace`; `workspace_recover` |
+| `cbm.zova.prepare.lock` (barrier) | shared | every index run, for the whole run; `workspace_recover`; `workspace_import` |
+| | exclusive | `restore` (and database `import`, which restores), `repack` |
+| `cbm.zova.prepare.turnstile.lock` | exclusive | a barrier writer, while it waits for the barrier |
+| | shared, briefly | a barrier reader, just before it takes the barrier |
+| `cbm.zova.ws-<workspace_id>.lock` (lease) | exclusive | every index run of that workspace; `delete-workspace`; `workspace_recover`; `workspace_import` |
 | `cbm.zova.writer.lock` (writer gate) | exclusive | every Zova mutation, unchanged |
 
-Order is always barrier, then lease, then writer gate.
+Order is always barrier, then lease, then writer gate. The turnstile gives the barrier writer
+preference: once a restore or repack waits, no new index run starts, and the runs already going
+drain. The turnstile is released as soon as the barrier is taken.
 
 - **Primitive:** `src/foundation/file_lock.{h,c}`. The writer gate (`cbm_zova_writer_gate.c`) is
   rebuilt on it with its API unchanged.
@@ -595,8 +598,9 @@ Order is always barrier, then lease, then writer gate.
 | `index_repository` (MCP and CLI, full and incremental) | `CBM_INDEX_LEASE_TIMEOUT_S`, default 300 s | `{"status":"busy","reason":"workspace_busy"}` or `"database_replacement_in_progress"`, with `workspace_id` and a hint; `"cancelled"` on shutdown; `"status":"error","reason":"coordination_unavailable"` if the lock file cannot be used |
 | Session auto-index | none (one try) | log `autoindex.skip`, still register the watcher |
 | Watcher re-index | none (one try) | log `watcher.skip`, retry next poll |
+| Watcher prune of a vanished root | none (one try) | log `watcher.prune_deferred`, keep the watch, prune again next poll |
 | `delete_project` (MCP) | retries every 50 ms up to the same budget | `delete_failed` with `error: workspace_busy` |
-| `cbm_zova_workspace_delete`, `cbm_zova_workspace_recover`, `cbm_zova_database_repack` | none | `CBM_ZOVA_OPERATION_BUSY`, reason `workspace_busy`, `database_replacement_in_progress` or `indexing_in_progress` |
+| `cbm_zova_workspace_delete`, `cbm_zova_workspace_recover`, `cbm_zova_workspace_import`, `cbm_zova_database_repack` | none | `CBM_ZOVA_OPERATION_BUSY`, reason `workspace_busy`, `database_replacement_in_progress` or `indexing_in_progress` |
 | `cbm_zova_database_restore` (and `import`) | same budget as `index_repository` | `CBM_ZOVA_OPERATION_BUSY`, reason `indexing_in_progress` |
 
 - **Supervised worker:** the parent that received the request holds the barrier and lease for
@@ -607,12 +611,7 @@ Order is always barrier, then lease, then writer gate.
 
 ### Known limits
 
-- An exclusive barrier request polls; a steady stream of overlapping index runs can keep it
-  waiting until its budget runs out. There is no writer preference across processes.
-- `workspace_import` takes the writer gate but not the lease: its workspace id is only known
-  part way through the import.
-- The watcher's prune of a vanished root (`delete_cached_project`) does not wait: if an index
-  run of that workspace holds the lease at that moment, the delete is skipped and logged
-  (`watcher.zova_delete_failed`, `workspace_busy`) and is not retried; `delete_project` removes it.
 - The per-server FIFO job queue for supervised `index_repository` calls is unchanged, so one
   server still runs its explicit index requests one at a time.
+- Several in-process runs at once multiply peak memory. The supervised worker, the default,
+  keeps each run in its own process.

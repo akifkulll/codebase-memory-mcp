@@ -959,6 +959,8 @@ TEST(zova_operations_refuse_while_index_coordination_is_held) {
     char lock_path[OPERATIONS_PATH_MAX + 128];
     snprintf(lock_path, sizeof(lock_path), "%s.prepare.lock", path);
     cbm_unlink(lock_path);
+    snprintf(lock_path, sizeof(lock_path), "%s.prepare.turnstile.lock", path);
+    cbm_unlink(lock_path);
     snprintf(lock_path, sizeof(lock_path), "%s.ws-%s.lock", path, rich.workspace_id);
     cbm_unlink(lock_path);
     cbm_unlink(path);
@@ -2714,6 +2716,59 @@ TEST(zova_operations_workspace_import_adds_rich_workspace_without_touching_resid
     PASS();
 }
 
+/* Importing a workspace publishes it, so the import refuses (without creating
+ * the target) while that workspace's lease or a database replacement is held. */
+TEST(zova_operations_workspace_import_refuses_while_index_coordination_is_held) {
+    char source[OPERATIONS_PATH_MAX], target[OPERATIONS_PATH_MAX], archive[OPERATIONS_PATH_MAX];
+    char data[OPERATIONS_PATH_MAX + 64], sidecar[OPERATIONS_PATH_MAX + 80];
+    operations_path(source, sizeof(source), "workspace-import-coord-source");
+    operations_path(target, sizeof(target), "workspace-import-coord-target");
+    operations_archive_path(archive, sizeof(archive), "workspace-import-coord");
+    operations_archive_cleanup(archive);
+    cbm_zova_workspace_generation_result_t rich = {0};
+    ASSERT_EQ(operations_publish_rich_fixture(source, &rich), 0);
+    cbm_zova_operation_report_t report = {0};
+    ASSERT_EQ(cbm_zova_workspace_export(source, rich.workspace_id, archive, &report),
+              CBM_ZOVA_OPERATION_OK);
+    snprintf(data, sizeof(data), "%s/data.zova", archive);
+    snprintf(sidecar, sizeof(sidecar), "%s-wal", data); cbm_unlink(sidecar);
+    snprintf(sidecar, sizeof(sidecar), "%s-shm", data); cbm_unlink(sidecar);
+
+    cbm_zova_coord_hold_t hold = {0};
+    ASSERT_EQ(cbm_zova_workspace_lease_acquire(target, rich.workspace_id, 0, &hold),
+              CBM_ZOVA_COORD_OK);
+    ASSERT_EQ(cbm_zova_workspace_import(target, archive, false, &report),
+              CBM_ZOVA_OPERATION_BUSY);
+    ASSERT_STR_EQ(report.operation, "import_workspace");
+    ASSERT_STR_EQ(report.reason, "workspace_busy");
+    ASSERT_TRUE(access(target, F_OK) != 0);
+    cbm_zova_coord_release(&hold);
+
+    ASSERT_EQ(cbm_zova_prepare_barrier_acquire(target, true, 0, &hold), CBM_ZOVA_COORD_OK);
+    ASSERT_EQ(cbm_zova_workspace_import(target, archive, false, &report),
+              CBM_ZOVA_OPERATION_BUSY);
+    ASSERT_STR_EQ(report.reason, "database_replacement_in_progress");
+    ASSERT_TRUE(access(target, F_OK) != 0);
+    cbm_zova_coord_release(&hold);
+
+    ASSERT_EQ(cbm_zova_workspace_import(target, archive, false, &report),
+              CBM_ZOVA_OPERATION_OK);
+
+    char lock_path[OPERATIONS_PATH_MAX + 128];
+    snprintf(lock_path, sizeof(lock_path), "%s.prepare.lock", target);
+    cbm_unlink(lock_path);
+    snprintf(lock_path, sizeof(lock_path), "%s.prepare.turnstile.lock", target);
+    cbm_unlink(lock_path);
+    snprintf(lock_path, sizeof(lock_path), "%s.ws-%s.lock", target, rich.workspace_id);
+    cbm_unlink(lock_path);
+    snprintf(lock_path, sizeof(lock_path), "%s.writer.lock", target);
+    cbm_unlink(lock_path);
+    operations_archive_cleanup(archive);
+    cbm_unlink(target);
+    cbm_unlink(source);
+    PASS();
+}
+
 TEST(zova_operations_workspace_export_and_empty_import_publish_generation_three_once) {
     char source[OPERATIONS_PATH_MAX], target[OPERATIONS_PATH_MAX], archive[OPERATIONS_PATH_MAX];
     char data[OPERATIONS_PATH_MAX + 64], sql[512];
@@ -3321,6 +3376,7 @@ SUITE(zova_operations) {
     RUN_TEST(zova_operations_workspace_import_refuses_each_manifest_binding_without_target_writes);
     RUN_TEST(zova_operations_workspace_import_adds_rich_workspace_without_touching_resident);
     RUN_TEST(zova_operations_workspace_export_and_empty_import_publish_generation_three_once);
+    RUN_TEST(zova_operations_workspace_import_refuses_while_index_coordination_is_held);
     RUN_TEST(zova_operations_workspace_replace_publishes_only_requested_generation_atomically);
     RUN_TEST(zova_operations_workspace_export_refuses_missing_and_unready_without_source_writes);
     RUN_TEST(zova_operations_workspace_import_refuses_outer_archive_tampering_without_target_writes);

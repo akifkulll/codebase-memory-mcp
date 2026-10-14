@@ -7,7 +7,9 @@
  *
  * Preparation barrier: index runs hold it shared for their whole run; restore,
  * import and repack hold it exclusive while they replace the database file, so
- * no run publishes state prepared against the file that was replaced.
+ * no run publishes state prepared against the file that was replaced. A
+ * waiting replacement has preference: a turnstile lock keeps new index runs
+ * from starting while it waits.
  *
  * Lock order: barrier, then lease, then the writer gate (cbm_zova_writer_gate.h).
  * Both locks are file locks next to cbm.zova that the OS releases when the
