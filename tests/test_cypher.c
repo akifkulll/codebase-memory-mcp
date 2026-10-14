@@ -3202,6 +3202,321 @@ TEST(cypher_issue873_distinct_order_skip_limit_dedupes_before_skip) {
     PASS();
 }
 
+/* Upstream 48fa9cbc: a string property must not end at an escaped quote, and
+ * an array property keeps its internal commas. */
+TEST(cypher_exec_prop_composite_and_escaped_values) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+    cbm_node_t n = {.project = "test",
+                    .label = "Method",
+                    .name = "findAll",
+                    .qualified_name = "test.C.findAll",
+                    .file_path = "c.ts",
+                    .properties_json = "{\"decorators\":[\"@Roles('OWNER', 'ADMIN')\",\"@Get()\"],"
+                                       "\"signature\":\"(sep: \\\"a,b\\\") => void\",\"lines\":3}"};
+    cbm_store_upsert_node(s, &n);
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s, "MATCH (m:Method) RETURN m.decorators, m.signature, m.lines", "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_NULL(r.error);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "[\"@Roles('OWNER', 'ADMIN')\",\"@Get()\"]");
+    ASSERT_STR_EQ(r.rows[0][1], "(sep: \\\"a,b\\\") => void");
+    ASSERT_STR_EQ(r.rows[0][2], "3");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* Upstream b43bdddc (#1111): type(r) grouped with count(*) must return the actual relationship type,
+ * not the row count. ret_agg_build_key/ret_agg_emit_row classified aggregate vs.
+ * scalar columns with a bare `item->func` truthy check, so type(r) (a non-aggregate
+ * function, func != NULL) was misrouted into the aggregate-value branch and
+ * formatted via format_agg_value's default case, silently substituting the row
+ * count for the relationship type. */
+TEST(cypher_issue1111_return_type_count_group) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s, "MATCH (a)-[r]->(b) RETURN type(r) AS t, count(*) AS n ORDER BY n DESC", "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "CALLS");
+    ASSERT_STR_EQ(r.rows[0][1], "3");
+    ASSERT_STR_EQ(r.rows[1][0], "DEFINES");
+    ASSERT_STR_EQ(r.rows[1][1], "1");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* #1111, WITH variant: the same misrouting in with_agg_build_key/with_agg_accumulate/
+ * execute_with_aggregate's per-column func check. */
+TEST(cypher_issue1111_with_type_count_group) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s,
+        "MATCH (a)-[r]->(b) WITH type(r) AS t, count(*) AS n RETURN t, n ORDER BY n DESC",
+        "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "CALLS");
+    ASSERT_STR_EQ(r.rows[0][1], "3");
+    ASSERT_STR_EQ(r.rows[1][0], "DEFINES");
+    ASSERT_STR_EQ(r.rows[1][1], "1");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+
+/* Upstream ec29cd59: a repeated variable-length node variable unifies with its
+ * earlier binding; the fixture has no CALLS cycle, so nothing matches. */
+TEST(cypher_exec_variable_length_repeated_node_var_unifies) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s, "MATCH (f:Function)-[:CALLS*1..2]->(f:Function) RETURN f.name",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_NULL(r.error);
+    ASSERT_EQ(r.row_count, 0);
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* Upstream 27d9831a. Reproduce-first: after the expansion budget is exhausted, OPTIONAL MATCH must
+ * not FABRICATE a "no match" row for a source that genuinely has matches.
+ *
+ * process_edges / expand_var_length used to carry the budget in the LOOP
+ * condition (`ei < edge_count && *new_count < max_new`), so once new_count hit
+ * max_new they stopped iterating entirely and never incremented match_count —
+ * even though neighbours existed. expand_pattern_rels' ungated fallback then saw
+ * match_count == 0 and emitted an unbound row. `WHERE b IS NULL` reads that as
+ * "nothing points here", so a dead-code query reported LIVE code as dead.
+ *
+ * Shape: A saturates the budget, B genuinely has no callees, C has 5. Only B may
+ * appear with an unbound b. Asserting on C specifically is what discriminates —
+ * the pre-fix code emits C with an empty b, and a `row_count` check would not
+ * notice. Deterministic: insertion order fixes the scan order (rowid), and every
+ * count is exact. */
+TEST(cypher_exec_optional_saturated_does_not_fabricate_no_match) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    /* 3 Function nodes → scan_count = 3; max_rows = 3 → bind_cap = 3 and
+     * max_new = 30. A alone exceeds that, so B and C are reached with the
+     * budget already spent — the regime that produced the fabrication. */
+    cbm_node_t a = {.project = "test", .label = "Function", .name = "A", .qualified_name = "test.A"};
+    cbm_node_t b = {.project = "test", .label = "Function", .name = "B", .qualified_name = "test.B"};
+    cbm_node_t c = {.project = "test", .label = "Function", .name = "C", .qualified_name = "test.C"};
+    int64_t a_id = cbm_store_upsert_node(s, &a);
+    (void)cbm_store_upsert_node(s, &b); /* B: no outgoing CALLS at all */
+    int64_t c_id = cbm_store_upsert_node(s, &c);
+    ASSERT_GT(a_id, 0);
+    ASSERT_GT(c_id, 0);
+
+    /* Callees are label Var so they do not inflate scan_count/bind_cap. */
+    for (int i = 0; i < 40; i++) {
+        char nm[32];
+        char qn[48];
+        snprintf(nm, sizeof(nm), "acallee%d", i);
+        snprintf(qn, sizeof(qn), "test.acallee%d", i);
+        cbm_node_t t = {.project = "test", .label = "Var", .name = nm, .qualified_name = qn};
+        int64_t tid = cbm_store_upsert_node(s, &t);
+        cbm_edge_t e = {.project = "test", .source_id = a_id, .target_id = tid, .type = "CALLS"};
+        cbm_store_insert_edge(s, &e);
+    }
+    for (int i = 0; i < 5; i++) {
+        char nm[32];
+        char qn[48];
+        snprintf(nm, sizeof(nm), "ccallee%d", i);
+        snprintf(qn, sizeof(qn), "test.ccallee%d", i);
+        cbm_node_t t = {.project = "test", .label = "Var", .name = nm, .qualified_name = qn};
+        int64_t tid = cbm_store_upsert_node(s, &t);
+        cbm_edge_t e = {.project = "test", .source_id = c_id, .target_id = tid, .type = "CALLS"};
+        cbm_store_insert_edge(s, &e);
+    }
+
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s, "MATCH (f:Function) OPTIONAL MATCH (f)-[:CALLS]->(g) WHERE g IS NULL RETURN f.name",
+        "test", 3, &r);
+    ASSERT_EQ(rc, 0);
+
+    /* Positive control: B genuinely has no callees, so the query must still find
+     * it. Without this a "C is absent" assertion could pass on an empty result. */
+    bool saw_b = false;
+    bool saw_c = false;
+    for (int i = 0; i < r.row_count; i++) {
+        const char *name = r.rows[i][0];
+        if (name && strcmp(name, "B") == 0) {
+            saw_b = true;
+        }
+        if (name && strcmp(name, "C") == 0) {
+            saw_c = true;
+        }
+    }
+    ASSERT_TRUE(saw_b);
+    /* The discriminator: C has 5 callees, so claiming it has none is a
+     * fabrication. Pre-fix this is exactly what the saturated path emitted. */
+    ASSERT_FALSE(saw_c);
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* Upstream 068690ca. Sibling of the leaf-fallback test, but for the BOUND-TERMINAL expansion path
+ * (expand_from_bound_terminal): the OPTIONAL start var is unbound and the
+ * terminal is bound, e.g. `MATCH (f) OPTIONAL MATCH (c)-[:CALLS]->(f)`. That
+ * function sized its hop buffer bind_count*10 + 1 and gated the OPTIONAL
+ * fallback on `new_count < max_new`, so once one terminal's expansion saturated
+ * the buffer, every LATER terminal's no-match row was silently dropped — the
+ * rows `WHERE c IS NULL` is meant to surface. Not an overflow (the guard kept
+ * the write in bounds) but real data loss. Lossless sizing (bind_count*10 +
+ * bind_count, fallback ungated) preserves them. */
+TEST(cypher_exec_bound_terminal_optional_fallback_survives) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    /* 2 Function nodes (hub + leaf) → bind_count = 2, max_new = 20. The hub has
+     * 21 incoming CALLS edges (> max_new), so its expansion saturates the write
+     * buffer; the leaf has none, so it must still yield its OPTIONAL no-match
+     * row. Under the original "+ SKIP_ONE" sizing that row was dropped once the
+     * buffer filled; the lossless sizing preserves it regardless of the order in
+     * which the (unordered) label scan visits the two terminals. */
+    cbm_node_t hub = {
+        .project = "test", .label = "Function", .name = "hub", .qualified_name = "test.hub"};
+    int64_t hub_id = cbm_store_upsert_node(s, &hub);
+    cbm_node_t leaf = {
+        .project = "test", .label = "Function", .name = "leaf", .qualified_name = "test.leaf"};
+    cbm_store_upsert_node(s, &leaf);
+
+    /* Callers are non-Function so they do not inflate bind_count. Each CALLS the
+     * hub (source = caller, target = hub), so from the bound terminal `hub` the
+     * expansion binds the unbound start `c` to each caller. */
+    for (int i = 0; i < 21; i++) {
+        char nm[32];
+        char qn[48];
+        snprintf(nm, sizeof(nm), "caller%02d", i);
+        snprintf(qn, sizeof(qn), "test.caller%02d", i);
+        cbm_node_t caller = {.project = "test", .label = "Var", .name = nm, .qualified_name = qn};
+        int64_t cid = cbm_store_upsert_node(s, &caller);
+        cbm_edge_t e = {.project = "test", .source_id = cid, .target_id = hub_id, .type = "CALLS"};
+        cbm_store_insert_edge(s, &e);
+    }
+
+    /* max_rows 0 → the 100000 result ceiling, so the output LIMIT does not hide
+     * the leaf row; we are testing the hop buffer, not the output cap. */
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s, "MATCH (f:Function) OPTIONAL MATCH (c)-[:CALLS]->(f) RETURN f.name, c.name", "test", 0,
+        &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.col_count, 2);
+
+    /* The leaf terminal has no incoming CALLS edge, so it must yield one row with
+     * the start var `c` unbound (""). Before the fix this row was dropped once the
+     * hub saturated the buffer. Also confirm the hub still expanded to bound rows. */
+    bool leaf_fallback = false;
+    bool hub_expanded = false;
+    for (int i = 0; i < r.row_count; i++) {
+        const char *f = r.rows[i][0];
+        const char *c = r.rows[i][1];
+        if (strcmp(f, "leaf") == 0 && c[0] == '\0') {
+            leaf_fallback = true;
+        }
+        if (strcmp(f, "hub") == 0 && c[0] != '\0') {
+            hub_expanded = true;
+        }
+    }
+    ASSERT_TRUE(leaf_fallback); /* the bound-terminal OPTIONAL no-match row survived */
+    ASSERT_TRUE(hub_expanded);  /* the expansion still produced bound rows */
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* Discriminating companion to the test above: preserving OPTIONAL no-match rows
+ * under saturation must NOT be bought by fabricating them. If match detection is
+ * gated on the same ceiling as the write, then once one terminal fills the
+ * buffer, another terminal that genuinely HAS callers is never scanned, its
+ * match_count stays 0, and the fallback invents an unbound "dead code" row for it
+ * — reporting live code as dead, which is worse than dropping a row.
+ *
+ * The construction is deliberately order-independent: BOTH hubs have enough
+ * callers to saturate the buffer on their own, so whichever the scan visits
+ * second is guaranteed to be processed after saturation. Under the gated variant
+ * that second hub is fabricated as dead; the assertion "no hub with callers is
+ * dead" then fails no matter which order `find_nodes_by_label` returns (its query
+ * has no ORDER BY, so the test must not depend on one). The fix makes it pass. */
+TEST(cypher_exec_bound_terminal_saturation_no_false_deadcode) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    /* 3 Function terminals → bind_count = 3, max_new = 30. */
+    cbm_node_t hubA = {
+        .project = "test", .label = "Function", .name = "hubA", .qualified_name = "test.hubA"};
+    int64_t hubA_id = cbm_store_upsert_node(s, &hubA);
+    cbm_node_t hubB = {
+        .project = "test", .label = "Function", .name = "hubB", .qualified_name = "test.hubB"};
+    int64_t hubB_id = cbm_store_upsert_node(s, &hubB);
+    cbm_node_t leaf = {
+        .project = "test", .label = "Function", .name = "leaf", .qualified_name = "test.leaf"};
+    cbm_store_upsert_node(s, &leaf);
+
+    /* BOTH hubs get 35 callers (> max_new = 30), so either one saturates the write
+     * buffer by itself; leaf gets none. Callers are non-Function so they don't
+     * inflate bind_count. */
+    for (int i = 0; i < 70; i++) {
+        char nm[32];
+        char qn[48];
+        snprintf(nm, sizeof(nm), "caller%02d", i);
+        snprintf(qn, sizeof(qn), "test.caller%02d", i);
+        cbm_node_t caller = {.project = "test", .label = "Var", .name = nm, .qualified_name = qn};
+        int64_t cid = cbm_store_upsert_node(s, &caller);
+        int64_t tgt = i < 35 ? hubA_id : hubB_id; /* 35 -> hubA, 35 -> hubB */
+        cbm_edge_t e = {.project = "test", .source_id = cid, .target_id = tgt, .type = "CALLS"};
+        cbm_store_insert_edge(s, &e);
+    }
+
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s, "MATCH (f:Function) OPTIONAL MATCH (c)-[:CALLS]->(f) RETURN f.name, c.name", "test", 0,
+        &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.col_count, 2);
+
+    bool hub_expanded = false;      /* sanity: the buffer really did fill from a hub */
+    bool hub_false_deadcode = false; /* the bug: a hub with callers invented as dead */
+    bool leaf_deadcode = false;     /* the lossless property: genuine dead code kept */
+    for (int i = 0; i < r.row_count; i++) {
+        const char *f = r.rows[i][0];
+        const char *c = r.rows[i][1];
+        bool is_hub = strcmp(f, "hubA") == 0 || strcmp(f, "hubB") == 0;
+        if (is_hub && c[0] != '\0') {
+            hub_expanded = true;
+        }
+        if (is_hub && c[0] == '\0') {
+            hub_false_deadcode = true;
+        }
+        if (strcmp(f, "leaf") == 0 && c[0] == '\0') {
+            leaf_deadcode = true;
+        }
+    }
+    ASSERT_TRUE(hub_expanded);
+    ASSERT_FALSE(hub_false_deadcode); /* live code with callers must never appear as dead */
+    ASSERT_TRUE(leaf_deadcode);       /* genuine no-match row still survives saturation */
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 /* #252: toInteger() */
 TEST(cypher_issue252_tointeger) {
     cbm_store_t *s = setup_cypher_store();
@@ -3386,6 +3701,9 @@ SUITE(cypher) {
     RUN_TEST(cypher_cross_join_alloc_rejects_overflow);
     RUN_TEST(cypher_exec_optional_rel_saturated_no_overflow);
     RUN_TEST(cypher_exec_optional_rel_leaf_fallback_survives);
+    RUN_TEST(cypher_exec_optional_saturated_does_not_fabricate_no_match);
+    RUN_TEST(cypher_exec_bound_terminal_optional_fallback_survives);
+    RUN_TEST(cypher_exec_bound_terminal_saturation_no_false_deadcode);
     RUN_TEST(cypher_exec_match_all_functions);
     RUN_TEST(cypher_exec_varlength_path_semantics_issue797);
     RUN_TEST(cypher_issue240_labels_function);
@@ -3393,6 +3711,10 @@ SUITE(cypher) {
     RUN_TEST(cypher_issue873_distinct_order_limit_dedupes_before_limit);
     RUN_TEST(cypher_issue873_distinct_limit_dedupes_before_limit);
     RUN_TEST(cypher_issue873_distinct_order_skip_limit_dedupes_before_skip);
+    RUN_TEST(cypher_exec_prop_composite_and_escaped_values);
+    RUN_TEST(cypher_issue1111_return_type_count_group);
+    RUN_TEST(cypher_issue1111_with_type_count_group);
+    RUN_TEST(cypher_exec_variable_length_repeated_node_var_unifies);
     RUN_TEST(cypher_issue252_tointeger);
     RUN_TEST(cypher_issue305_count_star_alias);
     RUN_TEST(cypher_exec_where_eq);
