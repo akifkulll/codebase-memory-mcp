@@ -1987,38 +1987,60 @@ static int workspace_query_state(zova_database *db, const char *workspace_id, in
     return rc;
 }
 
-static int node_key_for_id(zova_database *db, int64_t workspace_key,
-                           const char *node_id, int64_t *out_node_key) {
-    if (!db || workspace_key <= 0 || !node_id || !node_id[0] || !out_node_key) return -1;
-    *out_node_key = 0;
-    zova_statement *stmt = NULL;
-    int rc = prepare_zova(db, "SELECT workspace_id FROM cbm_workspace_registry "
-                              "WHERE workspace_key=?1", &stmt, "nodes.workspace_prepare");
-    if (rc == 0) rc = workspace_bind_i64(db, stmt, 1, workspace_key,
-                                          "nodes.workspace_bind");
-    zova_step_result step = ZOVA_STEP_DONE;
-    if (rc == 0 && (status_ok(zova_statement_step(&(zova_statement_step_request){
-            .statement = stmt, .out_result = &step}), db, "nodes.workspace_step") != 0 ||
-                    step != ZOVA_STEP_ROW)) rc = -1;
-    char *workspace_id = rc == 0 ? column_text_owned(db, stmt, 0) : NULL;
-    if (stmt) (void)zova_statement_finalize(stmt);
-    if (!workspace_id) return -1;
+/* Stable node id -> Zova node key for one delta publish. Stable ids are hashes,
+ * so the key can only be found from the graph; one paged scan here replaces a
+ * full scan per looked-up node. Built before the delta's graph writes: nodes the
+ * delta re-puts are resolved from the put results first, and nodes it leaves
+ * alone keep their keys. */
+typedef struct {
+    char *node_id;
+    int64_t node_key;
+} node_key_entry_t;
+
+typedef struct {
+    node_key_entry_t *items;
+    size_t count;
+} node_key_index_t;
+
+static int node_key_entry_compare(const void *left, const void *right) {
+    return strcmp(((const node_key_entry_t *)left)->node_id,
+                  ((const node_key_entry_t *)right)->node_id);
+}
+
+static void node_key_index_free(node_key_index_t *index) {
+    if (!index) return;
+    for (size_t i = 0; i < index->count; i++) free(index->items[i].node_id);
+    free(index->items);
+    *index = (node_key_index_t){0};
+}
+
+static int node_key_index_build(zova_database *db, const char *workspace_id,
+                                node_key_index_t *out) {
+    *out = (node_key_index_t){0};
     char graph_name[ZV_ID_MAX + CBM_ZOVA_WORKSPACE_ID_MAX];
-    if (cbm_zova_workspace_graph_name(workspace_id, graph_name, sizeof(graph_name)) != 0) rc = -1;
-    free(workspace_id);
+    if (cbm_zova_workspace_graph_name(workspace_id, graph_name, sizeof(graph_name)) != 0)
+        return -1;
+    size_t cap = 0;
     zova_graph_scan_cursor cursor = {0};
-    while (rc == 0) {
+    for (;;) {
         zova_graph_scan_results page = {0};
         if (status_ok(zova_graph_scan(&(zova_graph_scan_request){
                 .db = db, .graph_name = graph_name, .node_after = cursor,
                 .node_limit = 1024, .edge_limit = 0, .out_results = &page}),
-                db, "nodes.scan") != 0) return -1;
+                db, "nodes.scan") != 0) goto error;
         for (size_t i = 0; i < page.nodes_len; i++) {
-            if (page.nodes[i].node_id && strcmp(page.nodes[i].node_id, node_id) == 0) {
-                *out_node_key = page.nodes[i].node_key;
-                zova_graph_scan_results_free(&page);
-                return *out_node_key > 0 ? 0 : -1;
+            if (!page.nodes[i].node_id) continue;
+            if (out->count == cap) {
+                size_t next_cap = cap ? cap * 2 : 1024;
+                node_key_entry_t *grown = realloc(out->items, next_cap * sizeof(*grown));
+                if (!grown) { zova_graph_scan_results_free(&page); goto error; }
+                out->items = grown;
+                cap = next_cap;
             }
+            char *node_id = strdup(page.nodes[i].node_id);
+            if (!node_id) { zova_graph_scan_results_free(&page); goto error; }
+            out->items[out->count++] = (node_key_entry_t){
+                .node_id = node_id, .node_key = page.nodes[i].node_key};
         }
         if (page.nodes_len) {
             zova_graph_scan_node *last = &page.nodes[page.nodes_len - 1];
@@ -2029,7 +2051,25 @@ static int node_key_for_id(zova_database *db, int64_t workspace_key,
         zova_graph_scan_results_free(&page);
         if (!more) break;
     }
+    if (out->count) qsort(out->items, out->count, sizeof(*out->items), node_key_entry_compare);
+    return 0;
+error:
+    node_key_index_free(out);
     return -1;
+}
+
+static int node_key_index_find(const node_key_index_t *index, const char *node_id,
+                               int64_t *out_node_key) {
+    if (!index || !node_id || !node_id[0] || !out_node_key) return -1;
+    *out_node_key = 0;
+    node_key_entry_t probe = {.node_id = (char *)node_id};
+    const node_key_entry_t *entry = index->count
+        ? bsearch(&probe, index->items, index->count, sizeof(*index->items),
+                  node_key_entry_compare)
+        : NULL;
+    if (!entry) return -1;
+    *out_node_key = entry->node_key;
+    return *out_node_key > 0 ? 0 : -1;
 }
 
 static int edge_key_for_identity(zova_database *db, const char *workspace_id,
@@ -3818,6 +3858,7 @@ static int user_delta_delete_ids_tx(zova_database *db, int64_t workspace_key,
 }
 
 static int user_delta_delete_native_tx(zova_database *db, const char *workspace_id,
+                                       const node_key_index_t *node_index,
                                        const char *node_collection,
                                        const char *token_collection,
                                        const cbm_zova_workspace_delta_t *delta,
@@ -3842,7 +3883,7 @@ static int user_delta_delete_native_tx(zova_database *db, const char *workspace_
     for (uint64_t i = 0; rc == 0 && i < metrics->node_vector_deletes; i++) {
         int64_t node_key = 0;
         const char *stable_id = cbm_zova_workspace_delta_node_vector_delete_at(delta, (int)i);
-        if (!stable_id || node_key_for_id(db, workspace_key, stable_id, &node_key) != 0 ||
+        if (!stable_id || node_key_index_find(node_index, stable_id, &node_key) != 0 ||
             user_private_key_id(node_key, node_vector_ids[i]) != 0) rc = -1;
         node_vectors[i] = node_vector_ids[i];
     }
@@ -3926,7 +3967,7 @@ static int user_delta_delete_native_tx(zova_database *db, const char *workspace_
 }
 
 static int user_delta_delete_canonical_tx(
-    zova_database *db, int64_t workspace_key,
+    zova_database *db, int64_t workspace_key, const node_key_index_t *node_index,
     const cbm_zova_workspace_delta_t *delta,
     const cbm_zova_workspace_delta_metrics_t *metrics) {
     int rc = 0;
@@ -3937,7 +3978,7 @@ static int user_delta_delete_canonical_tx(
     for (uint64_t i = 0; rc == 0 && i < metrics->node_deletes; i++) {
         const char *stable_id = cbm_zova_workspace_delta_node_delete_at(delta, (int)i);
         int64_t node_key = 0;
-        if (!stable_id || node_key_for_id(db, workspace_key, stable_id, &node_key) != 0) {
+        if (!stable_id || node_key_index_find(node_index, stable_id, &node_key) != 0) {
             rc = -1; break;
         }
         rc = workspace_bind_i64(db, node_delete, 1, workspace_key,
@@ -4063,6 +4104,7 @@ static int user_delta_token_keys_tx(zova_database *db, int64_t workspace_key,
 
 static int user_delta_put_native_tx(zova_database *db, const char *workspace_id,
                                     int64_t workspace_key,
+                                    const node_key_index_t *node_index,
                                     const char *node_collection,const char *token_collection,
                                     const cbm_zova_workspace_delta_t *delta,
                                     const cbm_zova_workspace_delta_metrics_t *metrics,
@@ -4177,7 +4219,7 @@ static int user_delta_put_native_tx(zova_database *db, const char *workspace_id,
     for(uint64_t i=0;i<metrics->node_vector_upserts;i++){
         const cbm_zova_publish_node_vector_t *row=cbm_zova_workspace_delta_node_vector_upsert_at(delta,(int)i);
         int64_t key=user_node_key_find(node_keys,(int)node_count,row->stable_id);
-        if(key<=0&&node_key_for_id(db,workspace_key,row->stable_id,&key)!=0)rc=-1;
+        if(key<=0&&node_key_index_find(node_index,row->stable_id,&key)!=0)rc=-1;
         if(rc==0&&user_private_key_id(key,node_vector_ids[i])!=0)rc=-1;
         node_vectors[i]=(zova_vector_input){.id=node_vector_ids[i],.values={.element_type=ZOVA_VECTOR_ELEMENT_TYPE_I8,
             .i8_values=(const int8_t*)row->source->vector,.values_len=(size_t)input->vector_dimensions}};
@@ -4354,19 +4396,23 @@ static int cbm_zova_user_database_publish_delta_tx(
     int64_t *delta_edge_keys = NULL;
     user_token_key_t *delta_token_keys = NULL;
     int delta_token_key_count = 0;
-    if(rc==0)rc=user_delta_delete_canonical_tx(db,workspace_key,delta,&metrics);
-    if(rc==0)rc=user_delta_delete_native_tx(db,workspace_id,node_collection,token_collection,
-                                            delta,&metrics);
+    node_key_index_t node_index = {0};
+    if(metrics.node_deletes||metrics.node_vector_deletes||metrics.node_vector_upserts)
+        rc=node_key_index_build(db,workspace_id,&node_index);
+    if(rc==0)rc=user_delta_delete_canonical_tx(db,workspace_key,&node_index,delta,&metrics);
+    if(rc==0)rc=user_delta_delete_native_tx(db,workspace_id,&node_index,node_collection,
+                                            token_collection,delta,&metrics);
     if(rc==0)rc=user_publish_project_tx(db,workspace_id,input->root_path,input->project,input->indexed_at);
     if(rc==0)rc=user_delta_file_keys_tx(db,workspace_key,delta,&metrics,
                                         &file_keys,&file_key_count);
     if(rc==0)rc=user_delta_token_keys_tx(db,workspace_key,delta,&metrics,
                                          &delta_token_keys,&delta_token_key_count);
-    if(rc==0)rc=user_delta_put_native_tx(db,workspace_id,workspace_key,
+    if(rc==0)rc=user_delta_put_native_tx(db,workspace_id,workspace_key,&node_index,
                                          node_collection,token_collection,
                                          delta,&metrics,model,&delta_node_keys,
                                          &delta_node_key_count,&delta_edge_keys,
                                          delta_token_keys,delta_token_key_count);
+    node_key_index_free(&node_index);
     if(rc==0)rc=user_delta_upsert_nodes_tx(db,workspace_key,model,delta,&metrics,
                                            file_keys,file_key_count,delta_node_keys,
                                            delta_node_key_count);
