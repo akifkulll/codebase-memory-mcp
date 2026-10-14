@@ -329,6 +329,42 @@ TEST(watcher_prunes_sustained_missing_root) {
     PASS();
 }
 
+/* On the Zova route the pruned project's workspace in cbm.zova goes too. */
+TEST(watcher_prune_deletes_zova_workspace) {
+    prune_fixture_t f;
+    if (!prune_fixture_setup(&f, "0")) {
+        FAIL("prune fixture setup failed");
+    }
+    if (cbm_zova_route_for_project("stale-project") != CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
+        prune_fixture_teardown(&f);
+        PASS();
+    }
+    cbm_store_t *fixture = cbm_store_open_memory();
+    ASSERT_EQ(cbm_store_upsert_project(fixture, "stale-project", f.rootdir), CBM_STORE_OK);
+    ASSERT_EQ(th_publish_store_project(fixture, "stale-project"), 0);
+    cbm_store_close(fixture);
+    cbm_store_t *indexed = th_open_project_store("stale-project");
+    ASSERT_NOT_NULL(indexed);
+    cbm_store_close(indexed);
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
+    cbm_watcher_watch(w, "stale-project", f.rootdir);
+    cbm_watcher_poll_once(w);
+    th_rmtree(f.rootdir);
+    for (int i = 0; i < 3; i++) {
+        cbm_watcher_touch(w, "stale-project");
+        cbm_watcher_poll_once(w);
+    }
+    ASSERT_EQ(cbm_watcher_watch_count(w), 0);
+    ASSERT_NULL(th_open_project_store("stale-project"));
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    prune_fixture_teardown(&f);
+    PASS();
+}
+
 TEST(watcher_grace_window_blocks_prune) {
     /* 3+ missing polls but elapsed < grace → NOT pruned. Uses an explicit
      * 600s window so a fast poll burst can never satisfy the time gate. */
@@ -2097,6 +2133,7 @@ SUITE(watcher) {
     RUN_TEST(watcher_poll_no_projects);
     RUN_TEST(watcher_poll_nonexistent_path);
     RUN_TEST(watcher_prunes_sustained_missing_root);
+    RUN_TEST(watcher_prune_deletes_zova_workspace);
     RUN_TEST(watcher_grace_window_blocks_prune);
     RUN_TEST(watcher_root_missing_errno_classification);
     RUN_TEST(watcher_root_restore_resets_prune_streak);

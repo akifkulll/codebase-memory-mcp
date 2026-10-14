@@ -24,6 +24,9 @@
 #include "foundation/compat_fs.h"
 #include "foundation/platform.h"
 #include "foundation/str_util.h"
+#include "zova/cbm_zova_operations.h"
+#include "zova/cbm_zova_repository.h"
+#include "zova/cbm_zova_route.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -363,6 +366,24 @@ static void delete_cached_project_db(const char *project_name) {
     (void)cbm_unlink(path);
     (void)cbm_unlink(wal);
     (void)cbm_unlink(shm);
+
+    if (cbm_zova_route_for_project(project_name) != CBM_ZOVA_ROUTE_FULL_AUTHORITY ||
+        cbm_zova_user_database_path(path, sizeof(path)) != 0) {
+        return;
+    }
+    cbm_zova_repository_t *repo = cbm_zova_repository_open(path, project_name);
+    if (!repo) {
+        return;
+    }
+    char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
+    snprintf(workspace_id, sizeof(workspace_id), "%s", cbm_zova_repository_workspace_id(repo));
+    cbm_zova_repository_close(repo);
+    cbm_zova_operation_report_t report = {0};
+    if (cbm_zova_workspace_delete(path, workspace_id, workspace_id, &report) !=
+        CBM_ZOVA_OPERATION_OK) {
+        cbm_log_warn("watcher.zova_delete_failed", "project", project_name, "reason",
+                     report.reason);
+    }
 }
 
 /* Hash table foreach callback to free state entries */
@@ -573,13 +594,13 @@ static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
      * is referenced by the poll_once snapshot iterating us. On OOM the
      * watch stays registered and pruning retries on the next cycle. */
     if (current == s && defer_state_free(w, s)) {
-        delete_cached_project_db(project_name);
         cbm_ht_delete(w->projects, project_name);
         removed = true;
     }
     cbm_mutex_unlock(&w->projects_lock);
 
     if (removed) {
+        delete_cached_project_db(project_name);
         cbm_log_info("watcher.root_pruned", "project", project_name);
     }
 }
