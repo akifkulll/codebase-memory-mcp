@@ -6,7 +6,6 @@
 typedef enum {
     CBM_ZOVA_ROUTE_COMPATIBILITY = 0,
     CBM_ZOVA_ROUTE_FULL_AUTHORITY = 1,
-    CBM_ZOVA_ROUTE_MIGRATION_LEGACY = 2,
 } cbm_zova_route_t;
 
 cbm_zova_route_t cbm_zova_route_from_env(void);

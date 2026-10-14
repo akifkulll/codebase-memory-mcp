@@ -36,19 +36,8 @@ char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char
  * non-zero (and prints nothing) if it is not. */
 int cbm_cli_print_tool_help(const char *tool_name);
 
-/* Legacy-to-cbm.zova migration command. */
-int cbm_cmd_zova_migrate(int argc, char **argv);
-
 /* Shared cbm.zova operations command. */
 int cbm_cmd_zova_ops(int argc, char **argv);
-
-/* Resolve exactly one legacy project DB in the configured CBM cache whose
- * projects.root_path equals canonical_root. Returns 0 on one match, -1 on
- * zero/ambiguous/error. */
-int cbm_cli_zova_migration_discover(const char *canonical_root, char *source_db,
-                                    size_t source_db_size, char *source_zova,
-                                    size_t source_zova_size, char *target_zova,
-                                    size_t target_zova_size);
 
 /* ── Self-update: version comparison ──────────────────────────── */
 

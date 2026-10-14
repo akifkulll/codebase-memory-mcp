@@ -5,7 +5,6 @@
 #include "foundation/sha256.h"
 #include "foundation/log.h"
 #include "pipeline/pipeline.h"
-#include "zova/cbm_zova_migration.h"
 #include "zova/cbm_zova_repository.h"
 #include "zova/cbm_zova_route.h"
 #include "zova/cbm_zova_writer_gate.h"
@@ -192,9 +191,24 @@ static int operations_restore_path_state(const char *path) {
 #endif
 }
 
+/* Test hook: CBM_ZOVA_TEST_CRASH_PHASE exits at the named phase and
+ * CBM_ZOVA_TEST_FAIL_PHASE makes it fail. */
+static bool operations_test_fault(const char *phase) {
+    const char *crash = getenv("CBM_ZOVA_TEST_CRASH_PHASE");
+    if (crash && strcmp(crash, phase) == 0) {
+#ifdef _WIN32
+        abort();
+#else
+        _exit(86);
+#endif
+    }
+    const char *fault = getenv("CBM_ZOVA_TEST_FAIL_PHASE");
+    return fault && strcmp(fault, phase) == 0;
+}
+
 static int operations_replacement_fault(const char *operation, const char *phase,
                                         cbm_zova_operation_report_t *out) {
-    if (!cbm_zova_migration_test_fault(phase)) return 0;
+    if (!operations_test_fault(phase)) return 0;
     operations_report(out, CBM_ZOVA_OPERATION_VERIFY_FAILED, operation, phase);
     return 1;
 }

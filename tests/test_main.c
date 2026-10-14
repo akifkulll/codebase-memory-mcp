@@ -246,7 +246,6 @@ extern void suite_dump_verify_io(void);
 extern void suite_zova(void);
 extern void suite_zova_normalization_benchmark(void);
 extern void suite_zova_operations(void);
-extern void suite_zova_migration(void);
 extern void suite_zova_c_sql_functions(void);
 extern void suite_zova_bridge(void);
 extern void suite_zova_plugin(void);
@@ -284,7 +283,6 @@ int main(int argc, char **argv) {
     printf("\n  codebase-memory-mcp  C test suite\n");
 
 #if defined(CBM_TEST_RUNNER_ZOVA)
-    RUN_EXPLICIT_SUITE(zova_migration);
     RUN_SELECTED_SUITE(zova_operations);
     RUN_SELECTED_SUITE(zova);
     RUN_EXPLICIT_SUITE(zova_normalization_benchmark);
@@ -342,7 +340,6 @@ int main(int argc, char **argv) {
     /* Cypher (M6) */
     RUN_SELECTED_SUITE(cypher);
 
-    RUN_EXPLICIT_SUITE(zova_migration);
     RUN_SELECTED_SUITE(zova_operations);
 
     /* MCP Server (M9) */

@@ -495,7 +495,6 @@ static void print_help(void) {
     printf("  codebase-memory-mcp config <list|get|set|reset>\n");
     printf("  codebase-memory-mcp doctor      Show install/cache/agent status\n");
     printf("  codebase-memory-mcp where       Show storage and config paths\n");
-    printf("  codebase-memory-mcp zova-migrate <migrate|status|rollback|cleanup> --repo-path PATH --json\n");
     printf("  codebase-memory-mcp zova-ops <action> --json\n");
     printf("  codebase-memory-mcp --version    Print version\n");
     printf("  codebase-memory-mcp --help       Print this help\n");
@@ -553,9 +552,6 @@ static int handle_subcommand(int argc, char **argv) {
         }
         if (strcmp(argv[i], "where") == 0) {
             return cbm_cmd_where(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
-        }
-        if (strcmp(argv[i], "zova-migrate") == 0) {
-            return cbm_cmd_zova_migrate(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
         }
         if (strcmp(argv[i], "zova-ops") == 0) {
             return cbm_cmd_zova_ops(argc - i - SKIP_ONE, argv + i + SKIP_ONE);

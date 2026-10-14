@@ -177,8 +177,6 @@ ZOVA_SRCS = \
 	src/zova/cbm_zova_edge_payload.c \
 	src/zova/cbm_zova_delta.c \
 	src/zova/cbm_zova_operations.c \
-	src/zova/cbm_zova_migration.c \
-	src/zova/cbm_zova_legacy_snapshot.c \
 	src/zova/cbm_zova_v5_snapshot.c \
 	src/zova/cbm_zova_writer_gate.c \
 	src/zova/cbm_zova_route.c \

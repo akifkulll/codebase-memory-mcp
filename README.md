@@ -356,41 +356,11 @@ codebase-memory-mcp cli list_projects
 codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.results[].name'
 ```
 
-### Zova migration and rollback
+### Storage
 
-Section 7 migration is an explicit operator action. It discovers the existing
-project `.db` and sibling `.zova` in the resolved CBM cache and publishes their
-verified generation into `cbm.zova`. Migrate, status, and rollback preserve the
-source artifacts.
-
-```bash
-codebase-memory-mcp zova-migrate migrate --repo-path /absolute/path/to/repository --json
-codebase-memory-mcp zova-migrate status --repo-path /absolute/path/to/repository --json
-codebase-memory-mcp zova-migrate rollback --repo-path /absolute/path/to/repository --json
-codebase-memory-mcp zova-migrate cleanup --repo-path /absolute/path/to/repository \
-  --confirm-workspace w1_0123456789abcdef0123456789abcdef --json
-```
-
-The command prints one compact JSON object. Exit `0` means success or an
-idempotent no-op, exit `1` means an operational failure, and exit `2` means a
-usage error. Cleanup requires the exact reported workspace ID. It removes the
-verified legacy bundle and permanently ends rollback availability for that
-migration.
-
-The wrapper exposes the same lifecycle:
-
-```bash
-scripts/zova-migrate-repo.sh migrate /absolute/path/to/repository
-scripts/zova-migrate-repo.sh status /absolute/path/to/repository
-scripts/zova-migrate-repo.sh rollback /absolute/path/to/repository
-scripts/zova-migrate-repo.sh cleanup /absolute/path/to/repository \
-  --confirm-workspace w1_0123456789abcdef0123456789abcdef
-```
-
-The historical `scripts/zova-migrate-repo.sh REPOSITORY [RUN_ROOT]` form is a
-`migrate` alias. The wrapper holds a run-root lock and retains the exact compact
-JSON response as `runs/<run>/migration.json`; the default run root is
-`build/zova-migrate`.
+All projects live in one shared `cbm.zova` file in the CBM cache. Projects
+indexed by older releases into per-project `.db` files are not read or
+migrated; re-index them with `index_repository`.
 
 The one-file `cbm.zova` schema is documented in
 [`docs/zova-single-file-schema.md`](docs/zova-single-file-schema.md).

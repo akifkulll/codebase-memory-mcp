@@ -34,62 +34,6 @@
 
 #if CBM_WITH_ZOVA
 #include "zova.h"
-
-TEST(pipeline_migration_route_states_are_operator_explicit) {
-    char cache[256];
-    snprintf(cache, sizeof(cache), "/tmp/cbm-pipeline-route-XXXXXX");
-    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
-    const char *saved_cache = getenv("CBM_CACHE_DIR");
-    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    const char *saved_mode = getenv("CBM_ZOVA_MODE");
-    char *saved_mode_copy = saved_mode ? strdup(saved_mode) : NULL;
-    const char *saved_flag = getenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
-    char *saved_flag_copy = saved_flag ? strdup(saved_flag) : NULL;
-    cbm_setenv("CBM_CACHE_DIR", cache, 1);
-    cbm_setenv("CBM_ZOVA_MODE", "authority", 1);
-    cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", "1", 1);
-    char target[512];
-    snprintf(target, sizeof(target), "%s/cbm.zova", cache);
-    ASSERT_EQ(cbm_zova_user_database_init(target), 0);
-    sqlite3 *db = NULL;
-    ASSERT_EQ(sqlite3_open(target, &db), SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(
-                  db,
-                  "INSERT INTO cbm_workspace_registry(workspace_id,canonical_root,"
-                  "id_format_version,active_generation) VALUES('w:v1:pipeline','/tmp/pipeline',2,0);"
-                  "INSERT INTO cbm_workspace_migrations_v1(workspace_key,migration_version,project,"
-                  "root_path,source_db_path,source_zova_path,source_generation,target_generation,"
-                  "state,metadata_sha256,fts_sha256,topology_sha256,node_vector_sha256,"
-                  "token_vector_sha256,prepared_at) VALUES((SELECT workspace_key FROM "
-                  "cbm_workspace_registry WHERE workspace_id='w:v1:pipeline'),1,'pipeline-route',"
-                  "'/tmp/pipeline','source.db','source.zova',1,0,'rolled_back','m','f','t','n','v',"
-                  "CURRENT_TIMESTAMP)",
-                  NULL, NULL, NULL),
-              SQLITE_OK);
-    sqlite3_close(db);
-    ASSERT_EQ(cbm_zova_route_for_project("pipeline-route"),
-              CBM_ZOVA_ROUTE_MIGRATION_LEGACY);
-    ASSERT_EQ(sqlite3_open(target, &db), SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(db,
-                           "UPDATE cbm_workspace_migrations_v1 SET state='cleanup_pending'",
-                           NULL, NULL, NULL),
-              SQLITE_OK);
-    sqlite3_close(db);
-    ASSERT_EQ(cbm_zova_route_for_project("pipeline-route"), CBM_ZOVA_ROUTE_FULL_AUTHORITY);
-    ASSERT_EQ(cbm_zova_route_for_project("absent"), CBM_ZOVA_ROUTE_FULL_AUTHORITY);
-    if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
-    else cbm_unsetenv("CBM_CACHE_DIR");
-    if (saved_mode_copy) cbm_setenv("CBM_ZOVA_MODE", saved_mode_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_MODE");
-    if (saved_flag_copy) cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", saved_flag_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
-    free(saved_cache_copy);
-    free(saved_mode_copy);
-    free(saved_flag_copy);
-    cbm_unlink(target);
-    cbm_rmdir(cache);
-    PASS();
-}
 #endif
 
 /* ── Helper: create temp test repo with known layout ───────────── */
@@ -8016,9 +7960,6 @@ TEST(pipeline_seq_ts_cross_uses_shared_registry) {
 }
 
 SUITE(pipeline) {
-#if CBM_WITH_ZOVA
-    RUN_TEST(pipeline_migration_route_states_are_operator_explicit);
-#endif
     /* Index lock */
     RUN_TEST(pipeline_lock_try_acquire);
     RUN_TEST(pipeline_lock_blocking);

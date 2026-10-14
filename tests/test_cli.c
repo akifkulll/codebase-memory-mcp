@@ -3277,57 +3277,6 @@ TEST(cli_sha256_accelerated_backend_matches_portable) {
     PASS();
 }
 
-TEST(cli_zova_migrate_strict_action_parser_and_exit_mapping) {
-    char root[256], cache[256];
-    snprintf(root, sizeof(root), "/tmp/cbm-cli-zova repo-%d", (int)getpid());
-    snprintf(cache, sizeof(cache), "/tmp/cbm-cli-zova-cache-%d", (int)getpid());
-    test_rmdir_r(root); test_rmdir_r(cache);
-    ASSERT_EQ(test_mkdirp(root), 0);
-    ASSERT_EQ(test_mkdirp(cache), 0);
-    const char *saved_cache = getenv("CBM_CACHE_DIR");
-    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    ASSERT_EQ(setenv("CBM_CACHE_DIR", cache, 1), 0);
-    char valid_workspace[] = "w1_00000000000000000000000000000000";
-    char *migrate[] = {"migrate", "--repo-path", root, "--json"};
-    char *status[] = {"status", "--repo-path", root, "--json"};
-    char *rollback[] = {"rollback", "--repo-path", root, "--json"};
-    char *cleanup[] = {"cleanup", "--repo-path", root, "--confirm-workspace",
-                       valid_workspace, "--json"};
-    ASSERT_EQ(cbm_cmd_zova_migrate(4, migrate), 1);
-    ASSERT_EQ(cbm_cmd_zova_migrate(4, status), 1);
-    ASSERT_EQ(cbm_cmd_zova_migrate(4, rollback), 1);
-    ASSERT_EQ(cbm_cmd_zova_migrate(6, cleanup), 1);
-    char *missing_action[] = {"--repo-path", root, "--json"};
-    char *missing_repo[] = {"migrate", "--json"};
-    char *missing_json[] = {"migrate", "--repo-path", root};
-    char *duplicate_repo[] = {"migrate", "--repo-path", root, "--repo-path", root, "--json"};
-    char *duplicate_json[] = {"migrate", "--repo-path", root, "--json", "--json"};
-    char *unknown_action[] = {"retire", "--repo-path", root, "--json"};
-    char *unknown_flag[] = {"migrate", "--repo-path", root, "--wat", "x", "--json"};
-    char *missing_confirmation[] = {"cleanup", "--repo-path", root, "--json"};
-    char *invalid_confirmation[] = {"cleanup", "--repo-path", root,
-                                    "--confirm-workspace", "workspace", "--json"};
-    char *extra_confirmation[] = {"migrate", "--repo-path", root,
-                                  "--confirm-workspace", valid_workspace, "--json"};
-    char *invalid_repo[] = {"status", "--repo-path", "/tmp/cbm-cli-does-not-exist", "--json"};
-    ASSERT_EQ(cbm_cmd_zova_migrate(3, missing_action), 2);
-    ASSERT_EQ(cbm_cmd_zova_migrate(2, missing_repo), 2);
-    ASSERT_EQ(cbm_cmd_zova_migrate(3, missing_json), 2);
-    ASSERT_EQ(cbm_cmd_zova_migrate(6, duplicate_repo), 2);
-    ASSERT_EQ(cbm_cmd_zova_migrate(5, duplicate_json), 2);
-    ASSERT_EQ(cbm_cmd_zova_migrate(4, unknown_action), 2);
-    ASSERT_EQ(cbm_cmd_zova_migrate(6, unknown_flag), 2);
-    ASSERT_EQ(cbm_cmd_zova_migrate(4, missing_confirmation), 2);
-    ASSERT_EQ(cbm_cmd_zova_migrate(6, invalid_confirmation), 2);
-    ASSERT_EQ(cbm_cmd_zova_migrate(6, extra_confirmation), 2);
-    ASSERT_EQ(cbm_cmd_zova_migrate(4, invalid_repo), 2);
-    if (saved_cache_copy) ASSERT_EQ(setenv("CBM_CACHE_DIR", saved_cache_copy, 1), 0);
-    else ASSERT_EQ(unsetenv("CBM_CACHE_DIR"), 0);
-    free(saved_cache_copy);
-    test_rmdir_r(root); test_rmdir_r(cache);
-    PASS();
-}
-
 TEST(cli_zova_ops_strict_parser_dispatch_and_exit_mapping) {
     char cache[256], repo[256], repo_link[256], spaced[256];
     snprintf(cache, sizeof(cache), "/tmp/cbm-cli-zova-ops-cache-%d", (int)getpid());
@@ -3426,125 +3375,11 @@ TEST(cli_zova_ops_strict_parser_dispatch_and_exit_mapping) {
     PASS();
 }
 
-static int cli_zova_write_projects_db(const char *path, const char *root) {
-    sqlite3 *db = NULL;
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_open(path, &db);
-    if (rc == SQLITE_OK)
-        rc = sqlite3_exec(db, "CREATE TABLE projects(root_path TEXT NOT NULL)", NULL, NULL, NULL);
-    if (rc == SQLITE_OK)
-        rc = sqlite3_prepare_v2(db, "INSERT INTO projects VALUES(?1)", -1, &stmt, NULL);
-    if (rc == SQLITE_OK) rc = sqlite3_bind_text(stmt, 1, root, -1, SQLITE_STATIC);
-    if (rc == SQLITE_OK) rc = sqlite3_step(stmt) == SQLITE_DONE ? SQLITE_OK : SQLITE_ERROR;
-    sqlite3_finalize(stmt);
-    if (db) sqlite3_close(db);
-    return rc == SQLITE_OK ? 0 : -1;
-}
-
-TEST(cli_zova_migrate_discovers_exact_cache_source_only) {
-    char root[256], other_root[256], cache[256];
-    snprintf(root, sizeof(root), "/tmp/cbm-cli-discovery repo-%d", (int)getpid());
-    snprintf(other_root, sizeof(other_root), "/tmp/cbm-cli-discovery-other-%d", (int)getpid());
-    snprintf(cache, sizeof(cache), "/tmp/cbm-cli-discovery-cache-%d", (int)getpid());
-    test_rmdir_r(root); test_rmdir_r(other_root); test_rmdir_r(cache);
-    ASSERT_EQ(test_mkdirp(root), 0);
-    ASSERT_EQ(test_mkdirp(other_root), 0);
-    ASSERT_EQ(test_mkdirp(cache), 0);
-    char canonical[512], canonical_other[512];
-    ASSERT_NOT_NULL(realpath(root, canonical));
-    ASSERT_NOT_NULL(realpath(other_root, canonical_other));
-    const char *saved_cache = getenv("CBM_CACHE_DIR");
-    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    ASSERT_EQ(setenv("CBM_CACHE_DIR", cache, 1), 0);
-    char matching[512], unrelated[512], second[512], target_file[512];
-    snprintf(matching, sizeof(matching), "%s/legacy project.db", cache);
-    snprintf(unrelated, sizeof(unrelated), "%s/unrelated.db", cache);
-    snprintf(second, sizeof(second), "%s/second.db", cache);
-    snprintf(target_file, sizeof(target_file), "%s/cbm.zova", cache);
-    ASSERT_EQ(cli_zova_write_projects_db(matching, canonical), 0);
-    ASSERT_EQ(cli_zova_write_projects_db(unrelated, canonical_other), 0);
-    ASSERT_EQ(write_test_file(target_file, "not-a-legacy-db"), 0);
-    struct stat matching_before, matching_after;
-    ASSERT_EQ(stat(matching, &matching_before), 0);
-    char matching_wal[1024], matching_shm[1024], matching_journal[1024];
-    snprintf(matching_wal, sizeof(matching_wal), "%s-wal", matching);
-    snprintf(matching_shm, sizeof(matching_shm), "%s-shm", matching);
-    snprintf(matching_journal, sizeof(matching_journal), "%s-journal", matching);
-    ASSERT_NEQ(access(matching_wal, F_OK), 0);
-    ASSERT_NEQ(access(matching_shm, F_OK), 0);
-    ASSERT_NEQ(access(matching_journal, F_OK), 0);
-    char source_db[1024], source_zova[1024], target_zova[1024];
-    ASSERT_EQ(cbm_cli_zova_migration_discover(canonical, source_db, sizeof(source_db),
-                                              source_zova, sizeof(source_zova), target_zova,
-                                              sizeof(target_zova)), 0);
-    ASSERT_EQ(stat(matching, &matching_after), 0);
-    ASSERT_EQ(matching_after.st_size, matching_before.st_size);
-    ASSERT_EQ(matching_after.st_mtime, matching_before.st_mtime);
-    ASSERT_NEQ(access(matching_wal, F_OK), 0);
-    ASSERT_NEQ(access(matching_shm, F_OK), 0);
-    ASSERT_NEQ(access(matching_journal, F_OK), 0);
-    ASSERT_STR_EQ(source_db, matching);
-    char expected_sidecar[1024];
-    snprintf(expected_sidecar, sizeof(expected_sidecar), "%s/legacy project.zova", cache);
-    ASSERT_STR_EQ(source_zova, expected_sidecar);
-    ASSERT_STR_EQ(target_zova, target_file);
-    ASSERT_EQ(cli_zova_write_projects_db(second, canonical), 0);
-    ASSERT_NEQ(cbm_cli_zova_migration_discover(canonical, source_db, sizeof(source_db),
-                                               source_zova, sizeof(source_zova), target_zova,
-                                               sizeof(target_zova)), 0);
-    ASSERT_EQ(remove(matching), 0);
-    ASSERT_EQ(remove(second), 0);
-    ASSERT_NEQ(cbm_cli_zova_migration_discover(canonical, source_db, sizeof(source_db),
-                                               source_zova, sizeof(source_zova), target_zova,
-                                               sizeof(target_zova)), 0);
-#ifndef _WIN32
-    char outside[512], linked[512], db_directory[512];
-    snprintf(outside, sizeof(outside), "/tmp/cbm-cli-discovery-outside-%d.db", (int)getpid());
-    snprintf(linked, sizeof(linked), "%s/linked.db", cache);
-    snprintf(db_directory, sizeof(db_directory), "%s/directory.db", cache);
-    cbm_unlink(outside); cbm_unlink(linked); cbm_rmdir(db_directory);
-    ASSERT_EQ(cli_zova_write_projects_db(outside, canonical), 0);
-    struct stat outside_before, outside_after;
-    ASSERT_EQ(stat(outside, &outside_before), 0);
-    ASSERT_EQ(symlink(outside, linked), 0);
-    ASSERT_EQ(cbm_mkdir(db_directory), 0);
-    ASSERT_NEQ(cbm_cli_zova_migration_discover(canonical, source_db, sizeof(source_db),
-                                               source_zova, sizeof(source_zova), target_zova,
-                                               sizeof(target_zova)), 0);
-    ASSERT_EQ(stat(outside, &outside_after), 0);
-    ASSERT_EQ(outside_after.st_size, outside_before.st_size);
-    ASSERT_EQ(outside_after.st_mtime, outside_before.st_mtime);
-    struct stat linked_stat;
-    ASSERT_EQ(lstat(linked, &linked_stat), 0);
-    ASSERT_TRUE(S_ISLNK(linked_stat.st_mode));
-    char outside_recovery[1024];
-    snprintf(outside_recovery, sizeof(outside_recovery), "%s-wal", outside);
-    ASSERT_NEQ(access(outside_recovery, F_OK), 0);
-    snprintf(outside_recovery, sizeof(outside_recovery), "%s-shm", outside);
-    ASSERT_NEQ(access(outside_recovery, F_OK), 0);
-    snprintf(outside_recovery, sizeof(outside_recovery), "%s-journal", outside);
-    ASSERT_NEQ(access(outside_recovery, F_OK), 0);
-    ASSERT_EQ(cbm_unlink(linked), 0);
-    ASSERT_EQ(cbm_rmdir(db_directory), 0);
-    ASSERT_EQ(cbm_unlink(outside), 0);
-#endif
-    ASSERT_NEQ(cbm_cli_zova_migration_discover(canonical, source_db, sizeof(source_db),
-                                               source_zova, sizeof(source_zova), target_zova,
-                                               sizeof(target_zova)), 0);
-    if (saved_cache_copy) ASSERT_EQ(setenv("CBM_CACHE_DIR", saved_cache_copy, 1), 0);
-    else ASSERT_EQ(unsetenv("CBM_CACHE_DIR"), 0);
-    free(saved_cache_copy);
-    test_rmdir_r(root); test_rmdir_r(other_root); test_rmdir_r(cache);
-    PASS();
-}
-
 /* ═══════════════════════════════════════════════════════════════════
  *  Suite definition
  * ═══════════════════════════════════════════════════════════════════ */
 
 SUITE(cli) {
-    RUN_TEST(cli_zova_migrate_strict_action_parser_and_exit_mapping);
-    RUN_TEST(cli_zova_migrate_discovers_exact_cache_source_only);
     RUN_TEST(cli_sha256_file_matches_known_vector);
     RUN_TEST(cli_sha256_update_fragmentation_matches_one_shot);
     RUN_TEST(cli_sha256_accelerated_backend_matches_portable);
