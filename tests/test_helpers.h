@@ -14,6 +14,7 @@
 
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h"
+#include "../src/pipeline/pipeline.h"
 #include "../src/store/store.h"
 #include "../src/zova/cbm_zova.h"
 #include "../src/zova/cbm_zova_route.h"
@@ -190,6 +191,14 @@ static inline cbm_store_t *th_open_project_store(const char *project) {
     snprintf(workspace_id, sizeof(workspace_id), "%s", cbm_zova_repository_workspace_id(repo));
     cbm_zova_repository_close(repo);
     return cbm_store_open_zova_workspace_query(path, workspace_id);
+}
+
+/* Open the store of the project indexed from repo_path. Caller closes it. */
+static inline cbm_store_t *th_open_repo_store(const char *repo_path) {
+    char *project = cbm_project_name_from_path(repo_path);
+    cbm_store_t *store = th_open_project_store(project);
+    free(project);
+    return store;
 }
 
 /* Remove the shared cbm.zova so a fixture starts from an empty catalog. */

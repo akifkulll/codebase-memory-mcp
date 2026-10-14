@@ -26,7 +26,7 @@
 #include "zova/cbm_zova.h"
 #include "zova/cbm_zova_route.h"
 #include "yyjson/yyjson.h"
-#include "sqlite3.h" /* vendored/sqlite3 — PRAGMA integrity_check on dumped DBs */
+#include "sqlite3.h"
 
 #ifndef CBM_WITH_ZOVA
 #define CBM_WITH_ZOVA 0
@@ -154,78 +154,6 @@ TEST(pipeline_run_null) {
     PASS();
 }
 
-/* ── Focused: file-backed store persistence ─────────────────────── */
-
-TEST(store_file_persistence) {
-    if (setup_test_repo() != 0) {
-        FAIL("failed to create temp dir");
-    }
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/persist_test.db", g_tmpdir);
-
-    /* Write data */
-    cbm_store_t *s1 = cbm_store_open_path(db_path);
-    ASSERT_NOT_NULL(s1);
-    cbm_store_upsert_project(s1, "proj", "/tmp");
-    cbm_node_t n = {.project = "proj",
-                    .label = "Function",
-                    .name = "foo",
-                    .qualified_name = "proj.foo",
-                    .file_path = "f.go"};
-    int64_t id = cbm_store_upsert_node(s1, &n);
-    ASSERT_GT(id, 0);
-    int cnt1 = cbm_store_count_nodes(s1, "proj");
-    ASSERT_EQ(cnt1, 1);
-    cbm_store_checkpoint(s1);
-    cbm_store_close(s1);
-
-    /* Reopen and verify */
-    cbm_store_t *s2 = cbm_store_open_path(db_path);
-    ASSERT_NOT_NULL(s2);
-    int cnt2 = cbm_store_count_nodes(s2, "proj");
-    ASSERT_EQ(cnt2, 1);
-    cbm_store_close(s2);
-
-    teardown_test_repo();
-    PASS();
-}
-
-TEST(store_bulk_persistence) {
-    if (setup_test_repo() != 0) {
-        FAIL("failed to create temp dir");
-    }
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/bulk_test.db", g_tmpdir);
-
-    /* Verify: begin_bulk + explicit txn + end_bulk persists to file */
-    cbm_store_t *s = cbm_store_open_path(db_path);
-    ASSERT_NOT_NULL(s);
-
-    cbm_store_upsert_project(s, "proj", "/tmp");
-    cbm_store_begin_bulk(s);
-    cbm_store_begin(s);
-    cbm_node_t n = {.project = "proj",
-                    .label = "Function",
-                    .name = "foo",
-                    .qualified_name = "proj.foo",
-                    .file_path = "f.go"};
-    int64_t id = cbm_store_upsert_node(s, &n);
-    ASSERT_GT(id, 0);
-    ASSERT_EQ(cbm_store_commit(s), 0);
-    cbm_store_end_bulk(s);
-    cbm_store_checkpoint(s);
-    cbm_store_close(s);
-
-    /* Reopen and verify data survived */
-    cbm_store_t *s2 = cbm_store_open_path(db_path);
-    ASSERT_NOT_NULL(s2);
-    ASSERT_EQ(cbm_store_count_nodes(s2, "proj"), 1);
-    cbm_store_close(s2);
-
-    teardown_test_repo();
-    PASS();
-}
-
 /* ── Integration: structure pass on temp repo ────────────────────── */
 
 TEST(pipeline_structure_nodes) {
@@ -233,17 +161,14 @@ TEST(pipeline_structure_nodes) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test.db", g_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
 
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
     /* Verify results by opening the store */
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s);
 
     const char *project = cbm_pipeline_project_name(p);
@@ -290,15 +215,12 @@ TEST(pipeline_structure_edges) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test.db", g_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -322,15 +244,12 @@ TEST(pipeline_branch_root_structure) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_branch_root.db", g_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -427,17 +346,14 @@ TEST(pipeline_fast_mode) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_fast.db", g_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FAST);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FAST);
     ASSERT_NOT_NULL(p);
 
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
     /* Just verify it completes without error in fast mode */
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
     int node_count = cbm_store_count_nodes(s, project);
@@ -456,15 +372,12 @@ TEST(pipeline_definitions_function_nodes) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_defs.db", g_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -501,15 +414,12 @@ TEST(pipeline_definitions_defines_edges) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_defs_edges.db", g_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -532,15 +442,12 @@ TEST(pipeline_definitions_properties) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_defs_props.db", g_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -623,13 +530,11 @@ TEST(pipeline_def_props_valid_json_when_oversized) {
         fclose(f);
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_huge_props.db", g_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -692,13 +597,11 @@ TEST(pipeline_edge_props_valid_json) {
                "    return parser\n");
     fclose(f);
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_edge_props.db", g_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -734,15 +637,12 @@ TEST(pipeline_calls_resolution) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_calls.db", g_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -805,16 +705,13 @@ TEST(pipeline_incremental_preserves_cross_file_calls) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_incr_calls.db", g_tmpdir);
-
     /* 1. Full index. */
-    cbm_pipeline_t *p1 = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p1 = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p1);
     ASSERT_EQ(cbm_pipeline_run(p1), 0);
     const char *project = cbm_pipeline_project_name(p1);
 
-    cbm_store_t *s1 = cbm_store_open_path(db_path);
+    cbm_store_t *s1 = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s1);
     int calls_before = cbm_store_count_edges_by_type(s1, project, "CALLS");
     ASSERT_GTE(calls_before, 2); /* main->Serve and Serve->Help at minimum */
@@ -828,8 +725,8 @@ TEST(pipeline_incremental_preserves_cross_file_calls) {
     snprintf(helper, sizeof(helper), "%s/pkg/util/helper.go", g_tmpdir);
     ASSERT_EQ(th_append_file(helper, "\n// incremental regression marker\n"), 0);
 
-    /* 3. Re-run on the SAME db_path → auto-routes to incremental re-index. */
-    cbm_pipeline_t *p2 = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    /* 3. Re-run on the same repo → auto-routes to incremental re-index. */
+    cbm_pipeline_t *p2 = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p2);
     ASSERT_EQ(cbm_pipeline_run(p2), 0);
 
@@ -838,7 +735,7 @@ TEST(pipeline_incremental_preserves_cross_file_calls) {
      *    NOTE: query with p2's project name — p1 (and the `project` pointer it
      *    owned) was freed above; p1 and p2 derive the same name from g_tmpdir. */
     const char *project2 = cbm_pipeline_project_name(p2);
-    cbm_store_t *s2 = cbm_store_open_path(db_path);
+    cbm_store_t *s2 = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s2);
     int calls_after = cbm_store_count_edges_by_type(s2, project2, "CALLS");
     ASSERT_EQ(calls_after, calls_before);
@@ -897,14 +794,12 @@ TEST(pipeline_tsjs_receiver_suppresses_weak_method_edge) {
                     "  return localHelper();\n"
                     "}\n");
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/tsjs_recv.db", tmp);
-    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     const char *project = cbm_pipeline_project_name(p);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(tmp);
     ASSERT_NOT_NULL(s);
 
     /* (1) The false edge is suppressed (reproduce-first: RED before the fix). */
@@ -1025,14 +920,12 @@ TEST(pipeline_tsjs_receiver_parallel_keeps_service_edges) {
     char *saved = old_workers ? strdup(old_workers) : NULL;
     cbm_setenv("CBM_WORKERS", "4", 1); /* force parallel regardless of host cores */
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/tsjs_par.db", tmp);
-    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     const char *project = cbm_pipeline_project_name(p);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(tmp);
     ASSERT_NOT_NULL(s);
 
     /* (1) Genuine HTTP_CALLS survive under the guard (>= 3):
@@ -1491,15 +1384,12 @@ TEST(usages_creates_edges) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_usages.db", g_usages_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_usages_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_usages_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_usages_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -1545,15 +1435,12 @@ TEST(usages_no_duplicate_calls) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_no_dup.db", g_usages_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_usages_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_usages_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_usages_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -1619,14 +1506,11 @@ TEST(calls_edge_carries_call_site_line) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_call_line.db", g_usages_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_usages_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_usages_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_usages_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -1672,15 +1556,12 @@ TEST(usages_kotlin_creates_edges) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_kt_usage.db", g_usages_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_usages_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_usages_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_usages_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -1714,15 +1595,12 @@ TEST(usages_kotlin_no_duplicate_calls) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/test_kt_nodup.db", g_usages_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_usages_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_usages_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_usages_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -1821,14 +1699,12 @@ TEST(pipeline_python_project) {
 
     if (setup_lang_repo(files, contents, 2) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
 
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -1857,11 +1733,8 @@ TEST(pipeline_python_project) {
 }
 
 /* #768 end-to-end: `import { A, B } from './lib'` must survive the REAL
- * pipeline (extract -> gbuf dedup -> raw SQLite dump) as TWO IMPORTS edges
- * with distinct local_name — and the dumped DB must satisfy its own schema.
- * With only the graph-buffer half of the fix, both edges reach the dump but
- * violate an unwidened UNIQUE(source_id,target_id,type), which PRAGMA
- * integrity_check flags as a non-unique autoindex entry. */
+ * pipeline (extract -> gbuf dedup -> publish) as TWO IMPORTS edges with
+ * distinct local_name. */
 TEST(pipeline_imports_multi_symbol_edges) {
     const char *files[] = {"consumer.ts", "lib.ts"};
     const char *contents[] = {
@@ -1870,28 +1743,12 @@ TEST(pipeline_imports_multi_symbol_edges) {
 
     if (setup_lang_repo(files, contents, 2) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    /* The dumped DB must pass SQLite's own full integrity check — this is
-     * what catches a buffer-only fix shipping DBs that violate their own
-     * UNIQUE constraint. */
-    sqlite3 *raw = NULL;
-    ASSERT_EQ(sqlite3_open(db, &raw), SQLITE_OK);
-    sqlite3_stmt *stmt = NULL;
-    sqlite3_prepare_v2(raw, "PRAGMA integrity_check", -1, &stmt, NULL);
-    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
-    const char *integrity = (const char *)sqlite3_column_text(stmt, 0);
-    ASSERT_STR_EQ(integrity, "ok");
-    sqlite3_finalize(stmt);
-    sqlite3_close(raw);
-
     /* Both named imports must be queryable as separate IMPORTS edges. */
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -1944,13 +1801,11 @@ TEST(pipeline_rust_grouped_import_properties_valid_json_sequential) {
     cbm_edge_t *edges = NULL;
 
     if (setup_rc == 0) {
-        char db[512];
-        snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-        p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+        p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
         if (p) {
             run_rc = cbm_pipeline_run(p);
             if (run_rc == 0) {
-                s = cbm_store_open_path(db);
+                s = th_open_repo_store(g_lang_tmpdir);
             }
         }
         if (s) {
@@ -2010,14 +1865,12 @@ TEST(pipeline_go_cross_package_call) {
 
     if (setup_lang_repo(files, contents, 2) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
 
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2065,14 +1918,12 @@ TEST(pipeline_python_cross_module_call) {
 
     if (setup_lang_repo(files, contents, 2) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
 
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2128,14 +1979,12 @@ TEST(pipeline_cross_language_same_name_does_not_share_calls_issue725) {
 
     if (setup_lang_repo(files, contents, 3) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
 
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2202,14 +2051,12 @@ TEST(pipeline_go_type_classification) {
 
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
 
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2254,14 +2101,12 @@ TEST(pipeline_go_grouped_types) {
 
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
 
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2298,14 +2143,12 @@ TEST(pipeline_kotlin_project) {
 
     if (setup_lang_repo(files, contents, 2) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
 
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2352,14 +2195,12 @@ TEST(pipeline_lua_anonymous_functions) {
 
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
 
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2403,14 +2244,12 @@ TEST(pipeline_csharp_modern) {
 
     if (setup_lang_repo(files, contents, 2) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
 
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2454,14 +2293,11 @@ TEST(pipeline_bom_stripping) {
     fprintf(f, "package main\n\nfunc BOMFunc() {}\n");
     fclose(f);
 
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2489,14 +2325,12 @@ TEST(pipeline_form_call_resolution) {
 
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
 
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2543,14 +2377,12 @@ TEST(pipeline_python_type_inference) {
 
     if (setup_lang_repo(files, contents, 2) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
 
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2602,13 +2434,11 @@ TEST(pipeline_docstring_go_function) {
                               "func Compute() {}\n"};
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2643,13 +2473,11 @@ TEST(pipeline_docstring_python_function) {
                               "\tpass\n"};
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2684,13 +2512,11 @@ TEST(pipeline_docstring_java_method) {
                               "}\n"};
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2723,13 +2549,11 @@ TEST(pipeline_docstring_kotlin_function) {
                               "fun compute() {}\n"};
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -2763,13 +2587,11 @@ TEST(pipeline_docstring_go_class) {
                               "type MyStruct struct{}\n"};
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -3206,13 +3028,11 @@ TEST(configures_env_var_in_config) {
                               "}\n"};
     if (setup_lang_repo(files, contents, 2) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -3239,13 +3059,11 @@ TEST(configures_lowercase_key_skipped) {
                               "package main\n\nfunc main() {}\n"};
     if (setup_lang_repo(files, contents, 2) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     /* Pipeline ran successfully — no crash from lowercase config keys */
     cbm_store_close(s);
@@ -3263,13 +3081,11 @@ TEST(configures_non_config_file_skipped) {
                               "func main() {}\n"};
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     /* No config file → buildEnvIndex should not create config-derived entries */
     cbm_store_close(s);
@@ -3308,13 +3124,11 @@ TEST(configures_full_pipeline_integration) {
                               "func readFile(path string) string { return \"\" }\n"};
     if (setup_lang_repo(files, contents, 4) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -3553,13 +3367,11 @@ TEST(decorator_tags_python_auto_discovery) {
                               "    pass\n"};
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -3627,13 +3439,11 @@ TEST(decorator_tags_java_class_methods) {
                               "}\n"};
     if (setup_lang_repo(files, contents, 1) != 0)
         FAIL("tmpdir");
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -5486,14 +5296,12 @@ TEST(registry_find_ending_with) {
 
 /* Helper: create a simple 2-file Go project for incremental tests */
 static char g_incr_tmpdir[256];
-static char g_incr_dbpath[512];
 
 static int setup_incremental_repo(void) {
     snprintf(g_incr_tmpdir, sizeof(g_incr_tmpdir), "/tmp/cbm_incr_XXXXXX");
     if (!cbm_mkdtemp(g_incr_tmpdir)) {
         return -1;
     }
-    snprintf(g_incr_dbpath, sizeof(g_incr_dbpath), "%s/test.db", g_incr_tmpdir);
 
     char path[512];
     FILE *f;
@@ -5540,11 +5348,6 @@ static bool pipeline_single_file_generation_exists(const char *path) {
     if (stmt) sqlite3_finalize(stmt);
     sqlite3_close(db);
     return exists;
-}
-
-static bool pipeline_test_path_exists(const char *path) {
-    struct stat st;
-    return path && stat(path, &st) == 0;
 }
 
 static int pipeline_single_file_summary_row(const char *path, const char *workspace_id,
@@ -5632,9 +5435,9 @@ static int pipeline_single_file_text_row(const char *path, const char *sql, cons
     return *out ? 0 : -1;
 }
 
-/* A canonical digest deliberately excludes SQLite's local ids.  It is used
- * only by the direct-Zova incremental parity test below: matching rows prove
- * the two independently written databases contain the same semantic graph. */
+/* A canonical digest deliberately excludes local ids.  It is used only by the
+ * incremental parity tests below: matching rows prove an incremental index and
+ * a fresh full index of the same tree contain the same semantic graph. */
 typedef struct {
     uint64_t hash;
     int rows;
@@ -5656,17 +5459,15 @@ static void pipeline_digest_u64(pipeline_sql_digest_t *digest, uint64_t value) {
     pipeline_digest_bytes(digest, bytes, sizeof(bytes));
 }
 
-static int pipeline_digest_project_rows(const char *db_path, const char *project, const char *sql,
+static int pipeline_digest_project_rows(sqlite3 *db, const char *project, const char *sql,
                                         pipeline_sql_digest_t *out) {
-    if (!db_path || !project || !sql || !out) {
+    if (!db || !project || !sql || !out) {
         return -1;
     }
-    sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
     int rc = -1;
     *out = (pipeline_sql_digest_t){.hash = UINT64_C(1469598103934665603), .rows = 0};
-    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK ||
-        sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK ||
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK ||
         sqlite3_bind_text(stmt, 1, project, -1, SQLITE_STATIC) != SQLITE_OK) {
         goto done;
     }
@@ -5697,14 +5498,73 @@ done:
     if (stmt) {
         sqlite3_finalize(stmt);
     }
-    if (db) {
-        sqlite3_close(db);
-    }
     return rc;
 }
 
-static int pipeline_project_sql_parity(const char *incremental_db, const char *full_db,
-                                       const char *project) {
+#if CBM_WITH_ZOVA
+typedef struct {
+    pipeline_sql_digest_t nodes;
+    pipeline_sql_digest_t edges;
+    uint64_t graph_nodes;
+    uint64_t graph_edges;
+    uint64_t calls_walk_hash;
+    size_t calls_walk_count;
+} pipeline_zova_project_info_t;
+
+static int pipeline_zova_workspace(const char *project, char *path, size_t path_size,
+                                   char *workspace_id, size_t workspace_id_size) {
+    if (!project || cbm_zova_user_database_path(path, path_size) != 0) {
+        return -1;
+    }
+    cbm_zova_repository_t *repo = cbm_zova_repository_open(path, project);
+    if (!repo) {
+        return -1;
+    }
+    int written = snprintf(workspace_id, workspace_id_size, "%s",
+                           cbm_zova_repository_workspace_id(repo));
+    cbm_zova_repository_close(repo);
+    return written > 0 && written < (int)workspace_id_size ? 0 : -1;
+}
+
+static int pipeline_zova_find_main_qn(sqlite3 *db, const char *project, char *out,
+                                      size_t out_size) {
+    const char *sql = "SELECT qualified_name FROM nodes "
+                      "WHERE project=?1 AND label='Function' AND name='main' "
+                      "ORDER BY qualified_name,file_path,start_line,end_line LIMIT 1";
+    sqlite3_stmt *stmt = NULL;
+    int rc = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_bind_text(stmt, 1, project, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *qn = (const char *)sqlite3_column_text(stmt, 0);
+        rc = qn && snprintf(out, out_size, "%s", qn) < (int)out_size ? 0 : -1;
+    }
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+/* Native graph node id of the node with this qualified name. */
+static int pipeline_zova_stable_id(const char *path, const char *project, const char *qn,
+                                   char *out, size_t out_size) {
+    cbm_zova_repository_t *repo = cbm_zova_repository_open(path, project);
+    if (!repo) {
+        return -1;
+    }
+    const char *workspace_id = cbm_zova_repository_workspace_id(repo);
+    cbm_node_t node = {0};
+    int rc = cbm_zova_repository_find_node_by_qn(repo, workspace_id, qn, &node) == CBM_STORE_OK &&
+                     cbm_zova_repository_stable_id_for_numeric_id(repo, workspace_id, node.id, out,
+                                                                  out_size) == CBM_STORE_OK
+                 ? 0
+                 : -1;
+    cbm_node_free_fields(&node);
+    cbm_zova_repository_close(repo);
+    return rc;
+}
+
+/* Digest the project's rows through its store, then read the native graph
+ * counts and the CALLS walk from main in the shared cbm.zova. */
+static int pipeline_zova_project_info(const char *project, pipeline_zova_project_info_t *out) {
     static const char *nodes_sql =
         "SELECT label,name,qualified_name,file_path,start_line,end_line,properties "
         "FROM nodes WHERE project=?1 "
@@ -5717,191 +5577,65 @@ static int pipeline_project_sql_parity(const char *incremental_db, const char *f
         "WHERE e.project=?1 "
         "ORDER BY e.type,e.properties,s.label,s.name,s.qualified_name,s.file_path,"
         "s.start_line,s.end_line,t.label,t.name,t.qualified_name,t.file_path,t.start_line,t.end_line";
-    pipeline_sql_digest_t incremental_nodes;
-    pipeline_sql_digest_t full_nodes;
-    pipeline_sql_digest_t incremental_edges;
-    pipeline_sql_digest_t full_edges;
-    return pipeline_digest_project_rows(incremental_db, project, nodes_sql, &incremental_nodes) == 0 &&
-                   pipeline_digest_project_rows(full_db, project, nodes_sql, &full_nodes) == 0 &&
-                   pipeline_digest_project_rows(incremental_db, project, edges_sql,
-                                                &incremental_edges) == 0 &&
-                   pipeline_digest_project_rows(full_db, project, edges_sql, &full_edges) == 0 &&
-                   incremental_nodes.rows == full_nodes.rows &&
-                   incremental_nodes.hash == full_nodes.hash &&
-                   incremental_edges.rows == full_edges.rows &&
-                   incremental_edges.hash == full_edges.hash
-               ? 0
-               : -1;
-}
-
-#if CBM_WITH_ZOVA
-typedef struct {
-    uint64_t graph_nodes;
-    uint64_t graph_edges;
-    uint64_t node_vectors;
-    uint64_t token_vectors;
-    uint64_t calls_walk_hash;
-    size_t calls_walk_count;
-} pipeline_zova_sidecar_info_t;
-
-static int pipeline_zova_find_main_stable_id(const char *db_path, const char *project,
-                                             const char *workspace_id, char *out,
-                                             size_t out_size) {
-    const char *sql =
-        "SELECT label,file_path,qualified_name,start_line,end_line "
-        "FROM nodes WHERE project=?1 AND label='Function' AND name='main' "
-        "ORDER BY qualified_name,file_path,start_line,end_line LIMIT 1";
-    sqlite3 *db = NULL;
-    sqlite3_stmt *stmt = NULL;
-    int rc = -1;
-    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK ||
-        sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK ||
-        sqlite3_bind_text(stmt, 1, project, -1, SQLITE_STATIC) != SQLITE_OK ||
-        sqlite3_step(stmt) != SQLITE_ROW) {
-        goto done;
-    }
-    const char *label = (const char *)sqlite3_column_text(stmt, 0);
-    const char *file_path = (const char *)sqlite3_column_text(stmt, 1);
-    const char *qualified_name = (const char *)sqlite3_column_text(stmt, 2);
-    int start_line = sqlite3_column_int(stmt, 3);
-    int end_line = sqlite3_column_int(stmt, 4);
-    char discriminator[64];
-    if (!label || !file_path || !qualified_name ||
-        snprintf(discriminator, sizeof(discriminator), "%s", qualified_name[0] ? "named" : "") >=
-            (int)sizeof(discriminator)) {
-        goto done;
-    }
-    if (!qualified_name[0] &&
-        snprintf(discriminator, sizeof(discriminator), "anon:%d:%d", start_line, end_line) >=
-            (int)sizeof(discriminator)) {
-        goto done;
-    }
-    rc = cbm_zova_workspace_node_id_v1(workspace_id, label, file_path, qualified_name,
-                                        discriminator, out, out_size);
-done:
-    if (stmt) {
-        sqlite3_finalize(stmt);
-    }
-    if (db) {
-        sqlite3_close(db);
-    }
-    return rc;
-}
-
-static int pipeline_zova_sidecar_workspace_id(const char *sidecar_path, const char *project,
-                                              char *out, size_t out_size) {
-    const char *sql =
-        "SELECT workspace_id FROM cbm_zova_generation_integrity_v1 "
-        "WHERE project=?1 AND workspace_id<>'' "
-        "ORDER BY workspace_id LIMIT 1";
-    sqlite3 *db = NULL;
-    sqlite3_stmt *stmt = NULL;
-    int rc = -1;
-    if (sqlite3_open_v2(sidecar_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK ||
-        sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK ||
-        sqlite3_bind_text(stmt, 1, project, -1, SQLITE_STATIC) != SQLITE_OK ||
-        sqlite3_step(stmt) != SQLITE_ROW) {
-        goto done;
-    }
-    const char *workspace_id = (const char *)sqlite3_column_text(stmt, 0);
-    if (workspace_id && snprintf(out, out_size, "%s", workspace_id) < (int)out_size) {
-        rc = 0;
-    }
-done:
-    if (stmt) {
-        sqlite3_finalize(stmt);
-    }
-    if (db) {
-        sqlite3_close(db);
-    }
-    return rc;
-}
-
-static int pipeline_zova_sidecar_info(const char *db_path, const char *root_path,
-                                      const char *project, pipeline_zova_sidecar_info_t *out) {
-    char sidecar_path[1024];
+    char path[1024];
     char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
     char graph_name[CBM_ZOVA_WORKSPACE_ID_MAX + 32];
-    char main_id[CBM_ZOVA_WORKSPACE_ID_MAX + 64];
+    char main_qn[512];
+    char main_id[CBM_ZOVA_WORKSPACE_ID_MAX + 96];
     zova_database *db = NULL;
     zova_message error = {0};
     zova_graph_info graph_info = {0};
-    zova_vector_collection_info node_info = {0};
-    zova_vector_collection_info token_info = {0};
     zova_graph_walk_results walk = {0};
     int rc = -1;
-    (void)root_path;
-    if (!db_path || !project || !out ||
-        cbm_zova_sidecar_path(db_path, sidecar_path, sizeof(sidecar_path)) != 0 ||
-        pipeline_zova_sidecar_workspace_id(sidecar_path, project, workspace_id,
-                                           sizeof(workspace_id)) != 0 ||
-        cbm_zova_workspace_graph_name(workspace_id, graph_name, sizeof(graph_name)) != 0 ||
-        pipeline_zova_find_main_stable_id(db_path, project, workspace_id, main_id,
-                                          sizeof(main_id)) != 0) {
-        goto done;
+    if (!out || pipeline_zova_workspace(project, path, sizeof(path), workspace_id,
+                                        sizeof(workspace_id)) != 0 ||
+        cbm_zova_workspace_graph_name(workspace_id, graph_name, sizeof(graph_name)) != 0) {
+        return -1;
     }
-    zova_database_open_request open = {
-        .path = sidecar_path,
-        .out_db = &db,
-        .out_error_message = &error,
-    };
-    if (zova_database_open(&open) != ZOVA_OK) {
+    *out = (pipeline_zova_project_info_t){0};
+    cbm_store_t *store = th_open_project_store(project);
+    if (!store) {
+        return -1;
+    }
+    /* Counting edges builds the store's nodes/edges views over the workspace. */
+    bool rows_ok = cbm_store_count_edges_by_type(store, project, "CALLS") >= 0 &&
+                   pipeline_digest_project_rows(cbm_store_get_db(store), project, nodes_sql,
+                                                &out->nodes) == 0 &&
+                   pipeline_digest_project_rows(cbm_store_get_db(store), project, edges_sql,
+                                                &out->edges) == 0 &&
+                   pipeline_zova_find_main_qn(cbm_store_get_db(store), project, main_qn,
+                                              sizeof(main_qn)) == 0;
+    cbm_store_close(store);
+    if (!rows_ok ||
+        pipeline_zova_stable_id(path, project, main_qn, main_id, sizeof(main_id)) != 0) {
+        return -1;
+    }
+    if (zova_database_open(&(zova_database_open_request){
+            .path = path, .out_db = &db, .out_error_message = &error}) != ZOVA_OK) {
         rc = -2;
         goto done;
     }
-    zova_graph_info_get_request graph_request = {
-        .db = db,
-        .name = graph_name,
-        .out_info = &graph_info,
-    };
-    zova_vector_collection_info_get_request node_request = {
-        .db = db,
-        .name = CBM_ZOVA_NODE_COLLECTION,
-        .out_info = &node_info,
-    };
-    zova_vector_collection_info_get_request token_request = {
-        .db = db,
-        .name = CBM_ZOVA_TOKEN_COLLECTION,
-        .out_info = &token_info,
-    };
-    zova_graph_walk_direction_request walk_request = {
-        .db = db,
-        .graph_name = graph_name,
-        .start_node_id = main_id,
-        .direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING,
-        .edge_type = "CALLS",
-        .max_depth = 4,
-        .limit = 100,
-        .out_results = &walk,
-    };
-    if (zova_graph_info_get(&graph_request) != ZOVA_OK) {
+    if (zova_graph_info_get(&(zova_graph_info_get_request){
+            .db = db, .name = graph_name, .out_info = &graph_info}) != ZOVA_OK) {
         rc = -3;
         goto done;
     }
-    if (zova_vector_collection_info_get(&node_request) != ZOVA_OK) {
+    if (zova_graph_walk_direction(&(zova_graph_walk_direction_request){
+            .db = db,
+            .graph_name = graph_name,
+            .start_node_id = main_id,
+            .direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+            .edge_type = "CALLS",
+            .max_depth = 4,
+            .limit = 100,
+            .out_results = &walk}) != ZOVA_OK) {
         rc = -4;
         goto done;
     }
-    if (zova_vector_collection_info_get(&token_request) != ZOVA_OK) {
-        rc = -5;
-        goto done;
-    }
-    if (zova_graph_walk_direction(&walk_request) != ZOVA_OK) {
-        rc = -6;
-        goto done;
-    }
-    *out = (pipeline_zova_sidecar_info_t){
-        .graph_nodes = graph_info.node_count,
-        .graph_edges = graph_info.edge_count,
-        .node_vectors = node_info.vector_count,
-        .token_vectors = token_info.vector_count,
-        .calls_walk_hash = UINT64_C(1469598103934665603),
-        .calls_walk_count = walk.len,
-    };
-    pipeline_sql_digest_t walk_digest = {
-        .hash = out->calls_walk_hash,
-        .rows = 0,
-    };
+    out->graph_nodes = graph_info.node_count;
+    out->graph_edges = graph_info.edge_count;
+    out->calls_walk_count = walk.len;
+    pipeline_sql_digest_t walk_digest = {.hash = UINT64_C(1469598103934665603), .rows = 0};
     for (size_t i = 0; i < walk.len; i++) {
         pipeline_digest_bytes(&walk_digest, walk.items[i].node_id, strlen(walk.items[i].node_id));
         pipeline_digest_u64(&walk_digest, walk.items[i].depth);
@@ -5910,8 +5644,6 @@ static int pipeline_zova_sidecar_info(const char *db_path, const char *root_path
     rc = 0;
 done:
     zova_graph_walk_results_free(&walk);
-    zova_vector_collection_info_free(&token_info);
-    zova_vector_collection_info_free(&node_info);
     zova_graph_info_free(&graph_info);
     if (db) {
         (void)zova_database_close(db);
@@ -5920,37 +5652,47 @@ done:
     return rc;
 }
 
-static int pipeline_zova_trace_node_exists(const char *db_path, const char *project,
-                                           const char *label, const char *file_path,
-                                           const char *qualified_name, bool *out_exists) {
-    char sidecar_path[1024];
-    char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
-    char graph_name[CBM_ZOVA_WORKSPACE_ID_MAX + 32];
-    char node_id[CBM_ZOVA_WORKSPACE_ID_MAX + 64];
-    zova_database *db = NULL;
-    zova_message error = {0};
-    int rc = -1;
+static bool pipeline_zova_project_info_equal(const pipeline_zova_project_info_t *a,
+                                             const pipeline_zova_project_info_t *b) {
+    return a->nodes.rows > 0 && a->nodes.rows == b->nodes.rows &&
+           a->nodes.hash == b->nodes.hash && a->edges.rows == b->edges.rows &&
+           a->edges.hash == b->edges.hash && a->graph_nodes == b->graph_nodes &&
+           a->graph_edges == b->graph_edges && a->calls_walk_count == b->calls_walk_count &&
+           a->calls_walk_hash == b->calls_walk_hash;
+}
+
+static int pipeline_zova_trace_node_exists(const char *project, const char *label,
+                                           const char *file_path, const char *qualified_name,
+                                           bool *out_exists) {
     *out_exists = false;
-    if (!db_path || !project || !label || !file_path || !qualified_name || !out_exists ||
-        cbm_zova_sidecar_path(db_path, sidecar_path, sizeof(sidecar_path)) != 0 ||
-        pipeline_zova_sidecar_workspace_id(sidecar_path, project, workspace_id,
-                                           sizeof(workspace_id)) != 0 ||
-        cbm_zova_workspace_graph_name(workspace_id, graph_name, sizeof(graph_name)) != 0 ||
-        cbm_zova_workspace_node_id_v1(workspace_id, label, file_path, qualified_name, "named",
-                                      node_id, sizeof(node_id)) != 0 ||
-        zova_database_open(&(zova_database_open_request){
-            .path=sidecar_path,.out_db=&db,.out_error_message=&error}) != ZOVA_OK) {
-        goto done;
+    cbm_store_t *store = th_open_project_store(project);
+    if (!store) {
+        return -1;
     }
-    uint8_t exists = 0;
-    if (zova_graph_node_exists(&(zova_graph_node_exists_request){
-            .db=db,.graph_name=graph_name,.node_id=node_id,.out_exists=&exists}) == ZOVA_OK) {
-        *out_exists = exists != 0;
-        rc = 0;
+    cbm_node_t node = {0};
+    int rc = cbm_store_find_node_by_qn(store, project, qualified_name, &node);
+    if (rc == CBM_STORE_OK) {
+        *out_exists = strcmp(node.label, label) == 0 && strcmp(node.file_path, file_path) == 0;
     }
-done:
-    if (db) (void)zova_database_close(db);
-    zova_message_free(&error);
+    cbm_node_free_fields(&node);
+    cbm_store_close(store);
+    return rc == CBM_STORE_OK || rc == CBM_STORE_NOT_FOUND ? 0 : -1;
+}
+
+/* Re-index the unchanged tree from an empty cbm.zova as the full-index
+ * control for an incremental result. */
+static int pipeline_zova_fresh_full_info(const char *project, pipeline_zova_project_info_t *out) {
+    th_remove_zova_user_database();
+    cbm_pipeline_t *control = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
+    if (!control) {
+        return -1;
+    }
+    int rc = cbm_pipeline_run(control) == 0 &&
+                     cbm_pipeline_get_last_route(control) == CBM_PIPELINE_ROUTE_FULL &&
+                     strcmp(cbm_pipeline_project_name(control), project) == 0
+                 ? pipeline_zova_project_info(project, out)
+                 : -1;
+    cbm_pipeline_free(control);
     return rc;
 }
 #endif
@@ -5962,8 +5704,6 @@ TEST(pipeline_incremental_direct_zova_matches_fresh_full) {
     if (setup_incremental_repo() != 0) {
         FAIL("setup failed");
     }
-    const char *saved_mode = getenv("CBM_ZOVA_MODE");
-    char *saved_mode_copy = saved_mode ? strdup(saved_mode) : NULL;
     /* Keep derived properties exercised on an unchanged decorated node. The
      * incremental route reruns global enrichment/complexity passes over nodes
      * loaded from the prior generation, so these properties must be replaced
@@ -5989,13 +5729,8 @@ TEST(pipeline_incremental_direct_zova_matches_fresh_full) {
                    "\t\tfor j := 0; j < 1; j++ { Gamma() }\n\t}\n}\n\n"
                    "func Gamma() { Alpha() }\n");
     fclose(cycle);
-    char incremental_db[512];
-    char full_db[512];
-    snprintf(incremental_db, sizeof(incremental_db), "%s/incremental.db", g_incr_tmpdir);
-    snprintf(full_db, sizeof(full_db), "%s/fresh-full.db", g_incr_tmpdir);
-    cbm_setenv("CBM_ZOVA_MODE", "graph_read", 1);
 
-    cbm_pipeline_t *initial = cbm_pipeline_new(g_incr_tmpdir, incremental_db, CBM_MODE_FULL);
+    cbm_pipeline_t *initial = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(initial);
     ASSERT_EQ(cbm_pipeline_run(initial), 0);
     ASSERT_EQ(cbm_pipeline_get_last_route(initial), CBM_PIPELINE_ROUTE_FULL);
@@ -6012,66 +5747,23 @@ TEST(pipeline_incremental_direct_zova_matches_fresh_full) {
                     "func NewFunc() int {\n\treturn 42\n}\n");
     fclose(helper);
 
-    /* Same database path deliberately selects CBM's normal incremental route. */
-    cbm_pipeline_t *incremental = cbm_pipeline_new(g_incr_tmpdir, incremental_db, CBM_MODE_FULL);
+    /* Re-indexing the same repo selects CBM's normal incremental route. */
+    cbm_pipeline_t *incremental = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(incremental);
     ASSERT_EQ(cbm_pipeline_run(incremental), 0);
     ASSERT_EQ(cbm_pipeline_get_last_route(incremental), CBM_PIPELINE_ROUTE_INCREMENTAL);
     ASSERT_STR_EQ(cbm_pipeline_project_name(incremental), project);
     cbm_pipeline_free(incremental);
 
-    cbm_pipeline_t *control = cbm_pipeline_new(g_incr_tmpdir, full_db, CBM_MODE_FULL);
-    ASSERT_NOT_NULL(control);
-    ASSERT_EQ(cbm_pipeline_run(control), 0);
-    ASSERT_EQ(cbm_pipeline_get_last_route(control), CBM_PIPELINE_ROUTE_FULL);
-    ASSERT_STR_EQ(cbm_pipeline_project_name(control), project);
-    cbm_pipeline_free(control);
-
-    static const char *nodes_sql =
-        "SELECT label,name,qualified_name,file_path,start_line,end_line,properties "
-        "FROM nodes WHERE project=?1 "
-        "ORDER BY label,name,qualified_name,file_path,start_line,end_line,properties";
-    static const char *edges_sql =
-        "SELECT e.type,e.properties,"
-        "s.label,s.name,s.qualified_name,s.file_path,s.start_line,s.end_line,"
-        "t.label,t.name,t.qualified_name,t.file_path,t.start_line,t.end_line "
-        "FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id "
-        "WHERE e.project=?1 "
-        "ORDER BY e.type,e.properties,s.label,s.name,s.qualified_name,s.file_path,"
-        "s.start_line,s.end_line,t.label,t.name,t.qualified_name,t.file_path,t.start_line,t.end_line";
-    pipeline_sql_digest_t incremental_nodes;
-    pipeline_sql_digest_t full_nodes;
-    pipeline_sql_digest_t incremental_edges;
-    pipeline_sql_digest_t full_edges;
-    ASSERT_EQ(pipeline_digest_project_rows(incremental_db, project, nodes_sql, &incremental_nodes),
-              0);
-    ASSERT_EQ(pipeline_digest_project_rows(full_db, project, nodes_sql, &full_nodes), 0);
-    ASSERT_EQ(pipeline_digest_project_rows(incremental_db, project, edges_sql, &incremental_edges),
-              0);
-    ASSERT_EQ(pipeline_digest_project_rows(full_db, project, edges_sql, &full_edges), 0);
-    ASSERT_EQ(incremental_nodes.rows, full_nodes.rows);
-    ASSERT_EQ(incremental_nodes.hash, full_nodes.hash);
-    ASSERT_EQ(incremental_edges.rows, full_edges.rows);
-    ASSERT_EQ(incremental_edges.hash, full_edges.hash);
-
-    pipeline_zova_sidecar_info_t incremental_zova;
-    pipeline_zova_sidecar_info_t full_zova;
-    ASSERT_EQ(pipeline_zova_sidecar_info(incremental_db, g_incr_tmpdir, project, &incremental_zova),
-              0);
-    ASSERT_EQ(pipeline_zova_sidecar_info(full_db, g_incr_tmpdir, project, &full_zova), 0);
-    ASSERT_GT(incremental_zova.graph_nodes, 0);
-    ASSERT_GT(incremental_zova.calls_walk_count, 1);
-    ASSERT_EQ(incremental_zova.graph_nodes, full_zova.graph_nodes);
-    ASSERT_EQ(incremental_zova.graph_edges, full_zova.graph_edges);
-    ASSERT_EQ(incremental_zova.calls_walk_count, full_zova.calls_walk_count);
-    ASSERT_EQ(incremental_zova.calls_walk_hash, full_zova.calls_walk_hash);
-    ASSERT_EQ(incremental_zova.node_vectors, full_zova.node_vectors);
-    ASSERT_EQ(incremental_zova.token_vectors, full_zova.token_vectors);
+    pipeline_zova_project_info_t incremental_info;
+    pipeline_zova_project_info_t full_info;
+    ASSERT_EQ(pipeline_zova_project_info(project, &incremental_info), 0);
+    ASSERT_GT(incremental_info.graph_nodes, 0);
+    ASSERT_GT(incremental_info.calls_walk_count, 1);
+    ASSERT_EQ(pipeline_zova_fresh_full_info(project, &full_info), 0);
+    ASSERT_TRUE(pipeline_zova_project_info_equal(&incremental_info, &full_info));
 
     free(project);
-    if (saved_mode_copy) cbm_setenv("CBM_ZOVA_MODE", saved_mode_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_MODE");
-    free(saved_mode_copy);
     cleanup_incremental_repo();
     PASS();
 #endif
@@ -6084,7 +5776,6 @@ TEST(pipeline_single_file_default_publishes_full_and_incremental_generation) {
     if (setup_incremental_repo() != 0) {
         FAIL("setup failed");
     }
-    char db_path[512];
     char cache_path[512];
     char user_db_path[512];
     sqlite3 *user_db = NULL;
@@ -6092,42 +5783,12 @@ TEST(pipeline_single_file_default_publishes_full_and_incremental_generation) {
     int64_t first_generation = 0;
     const char *previous_cache = getenv("CBM_CACHE_DIR");
     char *previous_cache_copy = previous_cache ? strdup(previous_cache) : NULL;
-    const char *previous_mode = getenv("CBM_ZOVA_MODE");
-    char *previous_mode_copy = previous_mode ? strdup(previous_mode) : NULL;
-    const char *previous_single = getenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
-    char *previous_single_copy = previous_single ? strdup(previous_single) : NULL;
-    snprintf(db_path, sizeof(db_path), "%s/single-file.db", g_incr_tmpdir);
     snprintf(cache_path, sizeof(cache_path), "%s/cache", g_incr_tmpdir);
     snprintf(user_db_path, sizeof(user_db_path), "%s/cbm.zova", cache_path);
     ASSERT_EQ(cbm_mkdir(cache_path), 0);
     cbm_setenv("CBM_CACHE_DIR", cache_path, 1);
-    cbm_setenv("CBM_ZOVA_MODE", "authority", 1);
-    cbm_unsetenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
 
-    /* Explicit compatibility mode is the only switch that disables the
-     * shared Zova publication route. */
-    char off_db_path[512];
-    snprintf(off_db_path, sizeof(off_db_path), "%s/off.db", g_incr_tmpdir);
-    cbm_unlink(user_db_path);
-    cbm_setenv("CBM_ZOVA_MODE", "off", 1);
-    cbm_pipeline_t *off_mode = cbm_pipeline_new(g_incr_tmpdir, off_db_path, CBM_MODE_FULL);
-    ASSERT_NOT_NULL(off_mode);
-    ASSERT_EQ(cbm_pipeline_run(off_mode), 0);
-    cbm_pipeline_free(off_mode);
-    ASSERT_FALSE(pipeline_single_file_generation_exists(user_db_path));
-    /* Sidecar generation bookkeeping creates the shared registry file even
-     * when publication is disabled. Remove that staging-only registry so the
-     * first published user-local generation has a deterministic baseline. */
-    cbm_unlink(user_db_path);
-    char user_db_wal[512];
-    char user_db_shm[512];
-    snprintf(user_db_wal, sizeof(user_db_wal), "%s-wal", user_db_path);
-    snprintf(user_db_shm, sizeof(user_db_shm), "%s-shm", user_db_path);
-    cbm_unlink(user_db_wal);
-    cbm_unlink(user_db_shm);
-    cbm_setenv("CBM_ZOVA_MODE", "authority", 1);
-
-    cbm_pipeline_t *full = cbm_pipeline_new(g_incr_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *full = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(full);
     ASSERT_EQ(cbm_pipeline_run(full), 0);
     cbm_pipeline_zova_publish_stats_t full_stats = {0};
@@ -6202,7 +5863,7 @@ TEST(pipeline_single_file_default_publishes_full_and_incremental_generation) {
     fprintf(helper, "package main\n\nfunc Helper() string {\n\treturn \"single-file-edit\"\n}\n");
     fclose(helper);
     cbm_setenv("CBM_ZOVA_TEST_FAIL_PHASE", "user_delta_before_commit", 1);
-    cbm_pipeline_t *failed_incremental = cbm_pipeline_new(g_incr_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *failed_incremental = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(failed_incremental);
     ASSERT_EQ(cbm_pipeline_run(failed_incremental), -1);
     cbm_pipeline_free(failed_incremental);
@@ -6221,7 +5882,7 @@ TEST(pipeline_single_file_default_publishes_full_and_incremental_generation) {
     ASSERT_NOT_NULL(helper);
     fprintf(helper, "package main\n\nfunc Helper() string {\n\treturn \"single-file-edit-2\"\n}\n");
     fclose(helper);
-    cbm_pipeline_t *incremental = cbm_pipeline_new(g_incr_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *incremental = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(incremental);
     ASSERT_EQ(cbm_pipeline_run(incremental), 0);
     cbm_pipeline_zova_publish_stats_t incremental_stats = {0};
@@ -6241,14 +5902,8 @@ TEST(pipeline_single_file_default_publishes_full_and_incremental_generation) {
     ASSERT_EQ(sqlite3_column_int64(stmt, 0), first_generation + 1);
     sqlite3_finalize(stmt);
     sqlite3_close(user_db);
-    if (previous_single_copy) cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", previous_single_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
-    if (previous_mode_copy) cbm_setenv("CBM_ZOVA_MODE", previous_mode_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_MODE");
     if (previous_cache_copy) cbm_setenv("CBM_CACHE_DIR", previous_cache_copy, 1);
     else cbm_unsetenv("CBM_CACHE_DIR");
-    free(previous_single_copy);
-    free(previous_mode_copy);
     free(previous_cache_copy);
     cleanup_incremental_repo();
     PASS();
@@ -6262,32 +5917,23 @@ TEST(pipeline_single_file_preserves_and_removes_exact_project_summary) {
     if (setup_incremental_repo() != 0) {
         FAIL("setup failed");
     }
-    char db_path[512];
     char cache_path[512];
     char user_db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/summary.db", g_incr_tmpdir);
     snprintf(cache_path, sizeof(cache_path), "%s/cache", g_incr_tmpdir);
     snprintf(user_db_path, sizeof(user_db_path), "%s/cbm.zova", cache_path);
     ASSERT_EQ(cbm_mkdir(cache_path), 0);
 
     const char *previous_cache = getenv("CBM_CACHE_DIR");
     char *previous_cache_copy = previous_cache ? strdup(previous_cache) : NULL;
-    const char *previous_mode = getenv("CBM_ZOVA_MODE");
-    char *previous_mode_copy = previous_mode ? strdup(previous_mode) : NULL;
-    const char *previous_single = getenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
-    char *previous_single_copy = previous_single ? strdup(previous_single) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache_path, 1);
-    cbm_setenv("CBM_ZOVA_MODE", "authority", 1);
-    cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", "1", 1);
 
-    cbm_pipeline_t *initial = cbm_pipeline_new(g_incr_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *initial = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(initial);
     ASSERT_EQ(cbm_pipeline_run(initial), 0);
     char *project = strdup(cbm_pipeline_project_name(initial));
     ASSERT_NOT_NULL(project);
     cbm_pipeline_free(initial);
     ASSERT_TRUE(pipeline_single_file_generation_exists(user_db_path));
-    ASSERT_FALSE(pipeline_test_path_exists(db_path));
 
     char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX] = {0};
     ASSERT_EQ(cbm_zova_workspace_lookup_at(user_db_path, g_incr_tmpdir, workspace_id,
@@ -6320,7 +5966,7 @@ TEST(pipeline_single_file_preserves_and_removes_exact_project_summary) {
     ASSERT_NOT_NULL(helper);
     fprintf(helper, "package main\n\nfunc Helper() string {\n\treturn \"summary-preserve\"\n}\n");
     fclose(helper);
-    cbm_pipeline_t *preserve = cbm_pipeline_new(g_incr_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *preserve = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(preserve);
     ASSERT_EQ(cbm_pipeline_run(preserve), 0);
     cbm_pipeline_free(preserve);
@@ -6336,7 +5982,6 @@ TEST(pipeline_single_file_preserves_and_removes_exact_project_summary) {
     ASSERT_STR_EQ(source_hash, "source-hash-v1");
     ASSERT_STR_EQ(created_at, "created-at-v1");
     ASSERT_STR_EQ(updated_at, "updated-at-v1");
-    ASSERT_FALSE(pipeline_test_path_exists(db_path));
     free(summary);
     free(source_hash);
     free(created_at);
@@ -6359,11 +6004,10 @@ TEST(pipeline_single_file_preserves_and_removes_exact_project_summary) {
     ASSERT_NOT_NULL(helper);
     fprintf(helper, "package main\n\nfunc Helper() string {\n\treturn \"summary-remove\"\n}\n");
     fclose(helper);
-    cbm_pipeline_t *remove = cbm_pipeline_new(g_incr_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *remove = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(remove);
     ASSERT_EQ(cbm_pipeline_run(remove), 0);
     cbm_pipeline_free(remove);
-    ASSERT_FALSE(pipeline_test_path_exists(db_path));
     ASSERT_EQ(pipeline_single_file_summary_row(user_db_path, workspace_id, &summary, &source_hash,
                                                 &created_at, &updated_at),
               1);
@@ -6373,14 +6017,8 @@ TEST(pipeline_single_file_preserves_and_removes_exact_project_summary) {
     free(updated_at);
 
     free(project);
-    if (previous_single_copy) cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", previous_single_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
-    if (previous_mode_copy) cbm_setenv("CBM_ZOVA_MODE", previous_mode_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_MODE");
     if (previous_cache_copy) cbm_setenv("CBM_CACHE_DIR", previous_cache_copy, 1);
     else cbm_unsetenv("CBM_CACHE_DIR");
-    free(previous_single_copy);
-    free(previous_mode_copy);
     free(previous_cache_copy);
     cleanup_incremental_repo();
     PASS();
@@ -6394,17 +6032,10 @@ TEST(pipeline_incremental_delete_direct_zova_matches_fresh_full) {
     if (setup_incremental_repo() != 0) {
         FAIL("setup failed");
     }
-    const char *saved_mode = getenv("CBM_ZOVA_MODE");
-    char *saved_mode_copy = saved_mode ? strdup(saved_mode) : NULL;
-    char incremental_db[512];
-    char full_db[512];
     char helper_path[512];
-    snprintf(incremental_db, sizeof(incremental_db), "%s/delete-incremental.db", g_incr_tmpdir);
-    snprintf(full_db, sizeof(full_db), "%s/delete-full.db", g_incr_tmpdir);
     snprintf(helper_path, sizeof(helper_path), "%s/helper.go", g_incr_tmpdir);
-    cbm_setenv("CBM_ZOVA_MODE", "graph_read", 1);
 
-    cbm_pipeline_t *initial = cbm_pipeline_new(g_incr_tmpdir, incremental_db, CBM_MODE_FULL);
+    cbm_pipeline_t *initial = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(initial);
     ASSERT_EQ(cbm_pipeline_run(initial), 0);
     char *project = strdup(cbm_pipeline_project_name(initial));
@@ -6412,42 +6043,29 @@ TEST(pipeline_incremental_delete_direct_zova_matches_fresh_full) {
     cbm_pipeline_free(initial);
 
     ASSERT_EQ(unlink(helper_path), 0);
-    cbm_pipeline_t *incremental = cbm_pipeline_new(g_incr_tmpdir, incremental_db, CBM_MODE_FULL);
+    cbm_pipeline_t *incremental = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(incremental);
     ASSERT_EQ(cbm_pipeline_run(incremental), 0);
+    ASSERT_EQ(cbm_pipeline_get_last_route(incremental), CBM_PIPELINE_ROUTE_INCREMENTAL);
     cbm_pipeline_free(incremental);
-
-    cbm_pipeline_t *control = cbm_pipeline_new(g_incr_tmpdir, full_db, CBM_MODE_FULL);
-    ASSERT_NOT_NULL(control);
-    ASSERT_EQ(cbm_pipeline_run(control), 0);
-    cbm_pipeline_free(control);
-
-    ASSERT_EQ(pipeline_project_sql_parity(incremental_db, full_db, project), 0);
-    pipeline_zova_sidecar_info_t incremental_zova;
-    pipeline_zova_sidecar_info_t full_zova;
-    ASSERT_EQ(pipeline_zova_sidecar_info(incremental_db, g_incr_tmpdir, project, &incremental_zova),
-              0);
-    ASSERT_EQ(pipeline_zova_sidecar_info(full_db, g_incr_tmpdir, project, &full_zova), 0);
-    ASSERT_EQ(incremental_zova.graph_nodes, full_zova.graph_nodes);
-    ASSERT_EQ(incremental_zova.graph_edges, full_zova.graph_edges);
-    ASSERT_EQ(incremental_zova.calls_walk_count, 1); /* only depth-0 main remains */
-    ASSERT_EQ(incremental_zova.calls_walk_hash, full_zova.calls_walk_hash);
-    ASSERT_EQ(incremental_zova.node_vectors, full_zova.node_vectors);
-    ASSERT_EQ(incremental_zova.token_vectors, full_zova.token_vectors);
 
     char helper_qn[512];
     ASSERT_TRUE(snprintf(helper_qn, sizeof(helper_qn), "%s.Helper", project) <
                 (int)sizeof(helper_qn));
     bool old_helper_exists = true;
-    ASSERT_EQ(pipeline_zova_trace_node_exists(incremental_db, project, "Function", "helper.go",
-                                              helper_qn, &old_helper_exists),
+    ASSERT_EQ(pipeline_zova_trace_node_exists(project, "Function", "helper.go", helper_qn,
+                                              &old_helper_exists),
               0);
     ASSERT_FALSE(old_helper_exists);
 
+    pipeline_zova_project_info_t incremental_info;
+    pipeline_zova_project_info_t full_info;
+    ASSERT_EQ(pipeline_zova_project_info(project, &incremental_info), 0);
+    ASSERT_EQ(incremental_info.calls_walk_count, 1); /* only depth-0 main remains */
+    ASSERT_EQ(pipeline_zova_fresh_full_info(project, &full_info), 0);
+    ASSERT_TRUE(pipeline_zova_project_info_equal(&incremental_info, &full_info));
+
     free(project);
-    if (saved_mode_copy) cbm_setenv("CBM_ZOVA_MODE", saved_mode_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_MODE");
-    free(saved_mode_copy);
     cleanup_incremental_repo();
     PASS();
 #endif
@@ -6460,21 +6078,14 @@ TEST(pipeline_incremental_rename_direct_zova_matches_fresh_full) {
     if (setup_incremental_repo() != 0) {
         FAIL("setup failed");
     }
-    const char *saved_mode = getenv("CBM_ZOVA_MODE");
-    char *saved_mode_copy = saved_mode ? strdup(saved_mode) : NULL;
-    char incremental_db[512];
-    char full_db[512];
     char old_helper_path[512];
     char helpers_dir[512];
     char new_helper_path[512];
-    snprintf(incremental_db, sizeof(incremental_db), "%s/rename-incremental.db", g_incr_tmpdir);
-    snprintf(full_db, sizeof(full_db), "%s/rename-full.db", g_incr_tmpdir);
     snprintf(old_helper_path, sizeof(old_helper_path), "%s/helper.go", g_incr_tmpdir);
     snprintf(helpers_dir, sizeof(helpers_dir), "%s/helpers", g_incr_tmpdir);
     snprintf(new_helper_path, sizeof(new_helper_path), "%s/helpers/helper.go", g_incr_tmpdir);
-    cbm_setenv("CBM_ZOVA_MODE", "graph_read", 1);
 
-    cbm_pipeline_t *initial = cbm_pipeline_new(g_incr_tmpdir, incremental_db, CBM_MODE_FULL);
+    cbm_pipeline_t *initial = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(initial);
     ASSERT_EQ(cbm_pipeline_run(initial), 0);
     char *project = strdup(cbm_pipeline_project_name(initial));
@@ -6483,28 +6094,11 @@ TEST(pipeline_incremental_rename_direct_zova_matches_fresh_full) {
 
     ASSERT_EQ(cbm_mkdir(helpers_dir), 0);
     ASSERT_EQ(rename(old_helper_path, new_helper_path), 0);
-    cbm_pipeline_t *incremental = cbm_pipeline_new(g_incr_tmpdir, incremental_db, CBM_MODE_FULL);
+    cbm_pipeline_t *incremental = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(incremental);
     ASSERT_EQ(cbm_pipeline_run(incremental), 0);
+    ASSERT_EQ(cbm_pipeline_get_last_route(incremental), CBM_PIPELINE_ROUTE_INCREMENTAL);
     cbm_pipeline_free(incremental);
-
-    cbm_pipeline_t *control = cbm_pipeline_new(g_incr_tmpdir, full_db, CBM_MODE_FULL);
-    ASSERT_NOT_NULL(control);
-    ASSERT_EQ(cbm_pipeline_run(control), 0);
-    cbm_pipeline_free(control);
-
-    ASSERT_EQ(pipeline_project_sql_parity(incremental_db, full_db, project), 0);
-    pipeline_zova_sidecar_info_t incremental_zova;
-    pipeline_zova_sidecar_info_t full_zova;
-    ASSERT_EQ(pipeline_zova_sidecar_info(incremental_db, g_incr_tmpdir, project, &incremental_zova),
-              0);
-    ASSERT_EQ(pipeline_zova_sidecar_info(full_db, g_incr_tmpdir, project, &full_zova), 0);
-    ASSERT_EQ(incremental_zova.graph_nodes, full_zova.graph_nodes);
-    ASSERT_EQ(incremental_zova.graph_edges, full_zova.graph_edges);
-    ASSERT_GT(incremental_zova.calls_walk_count, 1);
-    ASSERT_EQ(incremental_zova.calls_walk_hash, full_zova.calls_walk_hash);
-    ASSERT_EQ(incremental_zova.node_vectors, full_zova.node_vectors);
-    ASSERT_EQ(incremental_zova.token_vectors, full_zova.token_vectors);
 
     char helper_qn[512];
     char renamed_helper_qn[512];
@@ -6514,20 +6108,23 @@ TEST(pipeline_incremental_rename_direct_zova_matches_fresh_full) {
                          project) < (int)sizeof(renamed_helper_qn));
     bool old_helper_exists = true;
     bool new_helper_exists = false;
-    ASSERT_EQ(pipeline_zova_trace_node_exists(incremental_db, project, "Function", "helper.go",
-                                              helper_qn, &old_helper_exists),
+    ASSERT_EQ(pipeline_zova_trace_node_exists(project, "Function", "helper.go", helper_qn,
+                                              &old_helper_exists),
               0);
-    ASSERT_EQ(pipeline_zova_trace_node_exists(incremental_db, project, "Function",
-                                              "helpers/helper.go", renamed_helper_qn,
-                                              &new_helper_exists),
+    ASSERT_EQ(pipeline_zova_trace_node_exists(project, "Function", "helpers/helper.go",
+                                              renamed_helper_qn, &new_helper_exists),
               0);
     ASSERT_FALSE(old_helper_exists);
     ASSERT_TRUE(new_helper_exists);
 
+    pipeline_zova_project_info_t incremental_info;
+    pipeline_zova_project_info_t full_info;
+    ASSERT_EQ(pipeline_zova_project_info(project, &incremental_info), 0);
+    ASSERT_GT(incremental_info.calls_walk_count, 1);
+    ASSERT_EQ(pipeline_zova_fresh_full_info(project, &full_info), 0);
+    ASSERT_TRUE(pipeline_zova_project_info_equal(&incremental_info, &full_info));
+
     free(project);
-    if (saved_mode_copy) cbm_setenv("CBM_ZOVA_MODE", saved_mode_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_MODE");
-    free(saved_mode_copy);
     cleanup_incremental_repo();
     PASS();
 #endif
@@ -6552,13 +6149,11 @@ TEST(pipeline_fastapi_depends_edges) {
     if (setup_lang_repo(files, contents, 2) != 0) {
         FAIL("tmpdir");
     }
-    char db[512];
-    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
-    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db);
+    cbm_store_t *s = th_open_repo_store(g_lang_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
 
@@ -6599,26 +6194,26 @@ TEST(incremental_full_then_noop) {
     }
 
     /* First: full index */
-    cbm_pipeline_t *p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     char *project = strdup(cbm_pipeline_project_name(p));
     cbm_pipeline_free(p);
 
     /* Verify nodes exist */
-    cbm_store_t *s = cbm_store_open_path(g_incr_dbpath);
+    cbm_store_t *s = th_open_repo_store(g_incr_tmpdir);
     ASSERT_NOT_NULL(s);
     int nodes_before = cbm_store_count_nodes(s, project);
     ASSERT_GT(nodes_before, 0);
     cbm_store_close(s);
 
     /* Second: incremental — nothing changed → should be no-op */
-    p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    p = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     cbm_pipeline_free(p);
 
-    s = cbm_store_open_path(g_incr_dbpath);
+    s = th_open_repo_store(g_incr_tmpdir);
     ASSERT_NOT_NULL(s);
     int nodes_after = cbm_store_count_nodes(s, project);
     /* Node count should be same (no duplicates, no loss) */
@@ -6637,7 +6232,7 @@ TEST(incremental_detects_changed_file) {
     }
 
     /* First: full index */
-    cbm_pipeline_t *p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     char *project = strdup(cbm_pipeline_project_name(p));
@@ -6654,12 +6249,12 @@ TEST(incremental_detects_changed_file) {
     fclose(f);
 
     /* Second: incremental — should detect change and re-index */
-    p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    p = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
     /* Verify node count increased (NewFunc was added) */
-    cbm_store_t *s = cbm_store_open_path(g_incr_dbpath);
+    cbm_store_t *s = th_open_repo_store(g_incr_tmpdir);
     ASSERT_NOT_NULL(s);
     int nodes_after = cbm_store_count_nodes(s, project);
     ASSERT_GT(nodes_after, 0);
@@ -6678,7 +6273,7 @@ TEST(incremental_detects_deleted_file) {
     }
 
     /* First: full index */
-    cbm_pipeline_t *p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     char *project = strdup(cbm_pipeline_project_name(p));
@@ -6690,12 +6285,12 @@ TEST(incremental_detects_deleted_file) {
     unlink(path);
 
     /* Second: incremental — should remove Helper nodes */
-    p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    p = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
     /* Verify node count decreased (Helper's file was deleted) */
-    cbm_store_t *s = cbm_store_open_path(g_incr_dbpath);
+    cbm_store_t *s = th_open_repo_store(g_incr_tmpdir);
     ASSERT_NOT_NULL(s);
     int nodes_after = cbm_store_count_nodes(s, project);
     ASSERT_GT(nodes_after, 0); /* still has main.go nodes */
@@ -6714,7 +6309,7 @@ TEST(incremental_new_file_added) {
     }
 
     /* First: full index */
-    cbm_pipeline_t *p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     char *project = strdup(cbm_pipeline_project_name(p));
@@ -6729,11 +6324,11 @@ TEST(incremental_new_file_added) {
     fclose(f);
 
     /* Second: incremental — should pick up Extra */
-    p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    p = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(g_incr_dbpath);
+    cbm_store_t *s = th_open_repo_store(g_incr_tmpdir);
     ASSERT_NOT_NULL(s);
     int nodes_after = cbm_store_count_nodes(s, project);
     ASSERT_GT(nodes_after, 0);
@@ -6762,8 +6357,6 @@ TEST(incremental_fast_preserves_mode_skipped_tools_dir) {
     if (!cbm_mkdtemp(tmpdir)) {
         FAIL("tmpdir");
     }
-    char dbpath[512];
-    snprintf(dbpath, sizeof(dbpath), "%s/test.db", tmpdir);
 
     char path[512];
     FILE *f;
@@ -6787,13 +6380,13 @@ TEST(incremental_fast_preserves_mode_skipped_tools_dir) {
     fclose(f);
 
     /* Step 1: full-mode index — both files should be present */
-    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, dbpath, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     char *project = strdup(cbm_pipeline_project_name(p));
     cbm_pipeline_free(p);
 
-    cbm_store_t *s = cbm_store_open_path(dbpath);
+    cbm_store_t *s = th_open_repo_store(tmpdir);
     ASSERT_NOT_NULL(s);
     cbm_node_t *tools_nodes_before = NULL;
     int tools_count_before = 0;
@@ -6805,12 +6398,12 @@ TEST(incremental_fast_preserves_mode_skipped_tools_dir) {
     cbm_store_close(s);
 
     /* Step 2: fast-mode reindex — tools/util.go MUST survive (additive semantics) */
-    p = cbm_pipeline_new(tmpdir, dbpath, CBM_MODE_FAST);
+    p = cbm_pipeline_new(tmpdir, NULL, CBM_MODE_FAST);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     cbm_pipeline_free(p);
 
-    s = cbm_store_open_path(dbpath);
+    s = th_open_repo_store(tmpdir);
     ASSERT_NOT_NULL(s);
     cbm_node_t *tools_nodes_after = NULL;
     int tools_count_after = 0;
@@ -6852,12 +6445,12 @@ TEST(incremental_fast_preserves_mode_skipped_tools_dir) {
     }
 #endif /* !_WIN32 */
 
-    p = cbm_pipeline_new(tmpdir, dbpath, CBM_MODE_FAST);
+    p = cbm_pipeline_new(tmpdir, NULL, CBM_MODE_FAST);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     cbm_pipeline_free(p);
 
-    s = cbm_store_open_path(dbpath);
+    s = th_open_repo_store(tmpdir);
     ASSERT_NOT_NULL(s);
     cbm_node_t *tools_nodes_run3 = NULL;
     int tools_count_run3 = 0;
@@ -6875,12 +6468,12 @@ TEST(incremental_fast_preserves_mode_skipped_tools_dir) {
     snprintf(path, sizeof(path), "%s/tools/util.go", tmpdir);
     unlink(path);
 
-    p = cbm_pipeline_new(tmpdir, dbpath, CBM_MODE_FULL);
+    p = cbm_pipeline_new(tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     cbm_pipeline_free(p);
 
-    s = cbm_store_open_path(dbpath);
+    s = th_open_repo_store(tmpdir);
     ASSERT_NOT_NULL(s);
     cbm_node_t *tools_nodes_deleted = NULL;
     int tools_count_deleted = 0;
@@ -6903,8 +6496,6 @@ TEST(incremental_k8s_manifest_indexed) {
     if (!cbm_mkdtemp(tmpdir)) {
         FAIL("tmpdir");
     }
-    char dbpath[512];
-    snprintf(dbpath, sizeof(dbpath), "%s/test.db", tmpdir);
     char path[512];
     FILE *f;
 
@@ -6916,14 +6507,14 @@ TEST(incremental_k8s_manifest_indexed) {
     fclose(f);
 
     /* Full index */
-    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, dbpath, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     char *project = strdup(cbm_pipeline_project_name(p));
     cbm_pipeline_free(p);
 
     /* Verify Resource node created by full index */
-    cbm_store_t *s = cbm_store_open_path(dbpath);
+    cbm_store_t *s = th_open_repo_store(tmpdir);
     ASSERT_NOT_NULL(s);
     cbm_node_t *nodes = NULL;
     int count = 0;
@@ -6940,13 +6531,13 @@ TEST(incremental_k8s_manifest_indexed) {
     fclose(f);
 
     /* Incremental re-index */
-    p = cbm_pipeline_new(tmpdir, dbpath, CBM_MODE_FULL);
+    p = cbm_pipeline_new(tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     cbm_pipeline_free(p);
 
     /* Verify both Resource nodes now present */
-    s = cbm_store_open_path(dbpath);
+    s = th_open_repo_store(tmpdir);
     ASSERT_NOT_NULL(s);
     nodes = NULL;
     count = 0;
@@ -6968,8 +6559,6 @@ TEST(incremental_kustomize_module_indexed) {
     if (!cbm_mkdtemp(tmpdir)) {
         FAIL("tmpdir");
     }
-    char dbpath[512];
-    snprintf(dbpath, sizeof(dbpath), "%s/test.db", tmpdir);
     char path[512];
     FILE *f;
 
@@ -6981,7 +6570,7 @@ TEST(incremental_kustomize_module_indexed) {
     fclose(f);
 
     /* Full index */
-    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, dbpath, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     char *project = strdup(cbm_pipeline_project_name(p));
@@ -6998,13 +6587,13 @@ TEST(incremental_kustomize_module_indexed) {
     fclose(f);
 
     /* Incremental re-index */
-    p = cbm_pipeline_new(tmpdir, dbpath, CBM_MODE_FULL);
+    p = cbm_pipeline_new(tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
     cbm_pipeline_free(p);
 
     /* Verify Module node created for the kustomization overlay */
-    cbm_store_t *s = cbm_store_open_path(dbpath);
+    cbm_store_t *s = th_open_repo_store(tmpdir);
     ASSERT_NOT_NULL(s);
     cbm_node_t *nodes = NULL;
     int count = 0;
@@ -7582,14 +7171,11 @@ TEST(pipeline_complexity_transitive_loop_depth) {
                     "\t}\n"
                     "}\n");
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/cx.db", tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(cbm_pipeline_run(p), 0);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
 
@@ -7707,10 +7293,7 @@ TEST(pipeline_committed_counts_match_persisted) {
         FAIL("failed to create temp dir");
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/committed_test.db", g_tmpdir);
-
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     ASSERT_EQ(rc, 0);
@@ -7719,7 +7302,7 @@ TEST(pipeline_committed_counts_match_persisted) {
     int committed_edges = -1;
     cbm_pipeline_get_committed_counts(p, &committed_nodes, &committed_edges);
 
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     ASSERT_NOT_NULL(s);
     const char *project = cbm_pipeline_project_name(p);
     int persisted_nodes = cbm_store_count_nodes(s, project);
@@ -7864,16 +7447,14 @@ TEST(pipeline_seq_ts_cross_uses_shared_registry) {
         fclose(f);
     }
 
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/seqts.db", g_tmpdir);
     cbm_ts_full_registry_builds_reset();
-    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
     ASSERT_NOT_NULL(p);
     int rc = cbm_pipeline_run(p);
     long builds = cbm_ts_full_registry_builds();
 
     /* Quality guard FIRST: the cross-file call must resolve either way. */
-    cbm_store_t *s = cbm_store_open_path(db_path);
+    cbm_store_t *s = th_open_repo_store(g_tmpdir);
     bool linked = false;
     if (s) {
         linked =
@@ -7910,8 +7491,6 @@ SUITE(pipeline) {
     /* Sequential cross-LSP shared registry (ms-typescript quadratic) */
     RUN_TEST(pipeline_seq_ts_cross_uses_shared_registry);
     /* File persistence */
-    RUN_TEST(store_file_persistence);
-    RUN_TEST(store_bulk_persistence);
     /* Integration: structure pass */
     RUN_TEST(pipeline_structure_nodes);
     RUN_TEST(pipeline_committed_counts_match_persisted);

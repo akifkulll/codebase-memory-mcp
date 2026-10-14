@@ -30,7 +30,7 @@ runner_group_for_suite() {
 # per-project store until its fixtures are converted.
 suite_reads_zova() {
   case "$1" in
-    integration|index_resilience|lang_contract|edge_imports|edge_structural|\
+    integration|index_resilience|pipeline|lang_contract|edge_imports|edge_structural|\
     lsp_resolution_probe|node_creation_probe|edge_types_probe|convergence_probe|\
     matrix_known_classes|matrix_new_constructs|grammar_probe_[a-g])
       return 0

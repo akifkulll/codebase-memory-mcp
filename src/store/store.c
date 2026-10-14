@@ -2172,10 +2172,41 @@ int cbm_store_find_edges_by_type(cbm_store_t *s, const char *project, const char
         return CBM_STORE_ERR;
     }
     bind_proj_type_t b = {project, type};
-    return find_edges_generic(s, &s->stmt_find_edges_by_type,
-                              "SELECT id, project, source_id, target_id, type, properties "
-                              "FROM edges WHERE project = ?1 AND type = ?2;",
-                              bind_proj_and_type, &b, out, count);
+    int rc = find_edges_generic(s, &s->stmt_find_edges_by_type,
+                                "SELECT id, project, source_id, target_id, type, properties "
+                                "FROM edges WHERE project = ?1 AND type = ?2;",
+                                bind_proj_and_type, &b, out, count);
+    if (rc != CBM_STORE_OK || !s->zova_legacy_edges || *count == 0) {
+        return rc;
+    }
+    /* The temp edges carry Zova node keys; return the node ids that
+     * cbm_store_find_node_by_id and the other Zova reads use. */
+    int key_count = *count * 2;
+    int64_t *keys = malloc((size_t)key_count * sizeof(*keys));
+    cbm_node_t *nodes = NULL;
+    rc = CBM_STORE_ERR;
+    if (keys) {
+        for (int i = 0; i < *count; i++) {
+            keys[2 * i] = (*out)[i].source_id;
+            keys[(2 * i) + 1] = (*out)[i].target_id;
+        }
+        rc = cbm_zova_repository_find_nodes_by_keys(s->zova_repository,
+                                                    s->zova_graph_workspace_id, keys, key_count,
+                                                    &nodes);
+    }
+    free(keys);
+    if (rc != CBM_STORE_OK) {
+        cbm_store_free_edges(*out, *count);
+        *out = NULL;
+        *count = 0;
+        return CBM_STORE_ERR;
+    }
+    for (int i = 0; i < *count; i++) {
+        (*out)[i].source_id = nodes[2 * i].id;
+        (*out)[i].target_id = nodes[(2 * i) + 1].id;
+    }
+    cbm_store_free_nodes(nodes, key_count);
+    return CBM_STORE_OK;
 }
 
 int cbm_store_count_edges(cbm_store_t *s, const char *project) {
