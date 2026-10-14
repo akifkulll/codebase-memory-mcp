@@ -1207,16 +1207,21 @@ static char *build_no_store_error(const char *project) {
                    : build_missing_project_error();
 }
 
+/* The error result for a missing or unknown project. Frees project. */
+static char *project_not_found_result(char *project) {
+    char *err = build_no_store_error(project && project[0] ? project : NULL);
+    char *res = cbm_mcp_text_result(err, true);
+    free(err);
+    free(project);
+    return res;
+}
+
 /* Bail with the right error when no store is available. */
-#define REQUIRE_STORE(store, project)                     \
-    do {                                                  \
-        if (!(store)) {                                   \
-            char *_err = build_no_store_error(project);   \
-            char *_res = cbm_mcp_text_result(_err, true); \
-            free(_err);                                   \
-            free(project);                                \
-            return _res;                                  \
-        }                                                 \
+#define REQUIRE_STORE(store, project)                  \
+    do {                                               \
+        if (!(store)) {                                \
+            return project_not_found_result(project);  \
+        }                                              \
     } while (0)
 
 /* ── Tool handler implementations ─────────────────────────────── */
@@ -1244,6 +1249,8 @@ static char *handle_list_zova_projects(void) {
         const cbm_zova_catalog_project_t *project = &listed.projects[i];
         yyjson_mut_val *entry = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_strcpy(doc, entry, "name", project->selector);
+        /* The name index_repository reports and qualified names start with. */
+        yyjson_mut_obj_add_strcpy(doc, entry, "project", project->project);
         yyjson_mut_obj_add_strcpy(doc, entry, "root_path", project->root_path);
         yyjson_mut_obj_add_sint(doc, entry, "generation", project->generation);
         yyjson_mut_obj_add_bool(doc, entry, "ready", project->ready);
@@ -1566,14 +1573,10 @@ static void emit_flagged_fts_results(yyjson_mut_doc *doc, yyjson_mut_val *root,
 
 static char *handle_search_graph_flagged(const char *args, char *project) {
     char path[CBM_SZ_1K];
-    if (!project || !project[0] || cbm_zova_user_database_path(path, sizeof(path)) != 0) {
-        free(project);
-        return cbm_mcp_text_result("project not indexed in shared cbm.zova", true);
-    }
-    cbm_zova_repository_t *repo = cbm_zova_repository_open(path, project);
-    if (!repo) {
-        free(project);
-        return cbm_mcp_text_result("project not indexed in shared cbm.zova", true);
+    cbm_zova_repository_t *repo = NULL;
+    if (!project || !project[0] || cbm_zova_user_database_path(path, sizeof(path)) != 0 ||
+        !(repo = cbm_zova_repository_open(path, project))) {
+        return project_not_found_result(project);
     }
     const char *workspace_id = cbm_zova_repository_workspace_id(repo);
     char *query = cbm_mcp_get_string_arg(args, "query");
@@ -1973,9 +1976,12 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result("query is required", true);
     }
     if (!project || cbm_zova_user_database_path(path, sizeof(path)) != 0 ||
-        !(repo = cbm_zova_repository_open(path, project)) ||
-        cbm_zova_workspace_id_validate(cbm_zova_repository_workspace_id(repo)) != 0) {
-        if (repo) cbm_zova_repository_close(repo);
+        !(repo = cbm_zova_repository_open(path, project))) {
+        free(query);
+        return project_not_found_result(project);
+    }
+    if (cbm_zova_workspace_id_validate(cbm_zova_repository_workspace_id(repo)) != 0) {
+        cbm_zova_repository_close(repo);
         free(query); free(project);
         return cbm_mcp_text_result("workspace-scoped Zova Cypher request is invalid", true);
     }
@@ -2050,13 +2056,9 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     }
     yyjson_mut_obj_add_val(doc, root, "rows", rows);
     yyjson_mut_obj_add_int(doc, root, "total", result.row_count);
-    yyjson_mut_obj_add_str(doc, root, "route",
-                           route == CBM_CYPHER_ROUTE_NATIVE_GRAPH
-                               ? "native_graph" : "in_database_compat");
     if (result.warning) {
         yyjson_mut_obj_add_str(doc, root, "warning", result.warning);
     }
-    yyjson_mut_obj_add_sint(doc, root, "generation", generation);
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
     cbm_cypher_result_free(&result);
@@ -2071,8 +2073,7 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     cbm_zova_repository_t *repo = NULL;
     if (!project || cbm_zova_user_database_path(path, sizeof(path)) != 0 ||
         !(repo = cbm_zova_repository_open(path, project))) {
-        free(project);
-        return cbm_mcp_text_result("project not indexed in shared cbm.zova", true);
+        return project_not_found_result(project);
     }
     int nodes = 0, edges = 0;
     cbm_project_t info = {0};

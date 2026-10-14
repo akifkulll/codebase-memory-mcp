@@ -259,8 +259,8 @@ TEST(integ_index_has_calls) {
 TEST(integ_mcp_list_projects) {
     char *resp = call_tool("list_projects", "{}");
     ASSERT_NOT_NULL(resp);
-    /* Should contain the project name derived from temp path */
-    ASSERT_NOT_NULL(strstr(resp, "project"));
+    /* Lists the path-derived project name next to the short selector. */
+    ASSERT_NOT_NULL(strstr(resp, g_project));
     free(resp);
     PASS();
 }
@@ -304,6 +304,10 @@ TEST(integ_mcp_query_graph_functions) {
      * At minimum, should not be an error. */
     ASSERT_TRUE(strstr(resp, "row") || strstr(resp, "greet") || strstr(resp, "Add") ||
                 strstr(resp, "result") || strstr(resp, "f.name"));
+    /* No execution diagnostics in the result. */
+    ASSERT_NULL(strstr(resp, "in_database_compat"));
+    ASSERT_NULL(strstr(resp, "native_graph"));
+    ASSERT_NULL(strstr(resp, "generation"));
     free(resp);
     PASS();
 }
@@ -372,6 +376,26 @@ TEST(integ_mcp_index_status) {
     ASSERT_NOT_NULL(resp);
     /* Should show indexed status with node/edge counts */
     ASSERT_NOT_NULL(strstr(resp, g_project));
+    free(resp);
+    PASS();
+}
+
+TEST(integ_mcp_unknown_project_lists_projects) {
+    static const char *const calls[][2] = {
+        {"search_graph", "{\"project\":\"no-such-project\",\"name_pattern\":\"x\"}"},
+        {"query_graph", "{\"project\":\"no-such-project\",\"query\":\"MATCH (n) RETURN n\"}"},
+        {"index_status", "{\"project\":\"no-such-project\"}"},
+    };
+    for (size_t i = 0; i < sizeof(calls) / sizeof(calls[0]); i++) {
+        char *resp = call_tool(calls[i][0], calls[i][1]);
+        ASSERT_NOT_NULL(resp);
+        ASSERT_NOT_NULL(strstr(resp, "project not found or not indexed"));
+        ASSERT_NOT_NULL(strstr(resp, "available_projects"));
+        free(resp);
+    }
+    char *resp = call_tool("index_status", "{}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "missing required argument: project"));
     free(resp);
     PASS();
 }
@@ -583,6 +607,7 @@ SUITE(integration) {
     RUN_TEST(integ_mcp_get_architecture);
     RUN_TEST(integ_mcp_trace_path);
     RUN_TEST(integ_mcp_index_status);
+    RUN_TEST(integ_mcp_unknown_project_lists_projects);
 
     /* Store query validation */
     RUN_TEST(integ_store_search_by_degree);
