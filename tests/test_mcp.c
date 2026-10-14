@@ -81,31 +81,6 @@ static void mcp_capture_log(const char *line) {
     snprintf(mcp_log_buf, sizeof(mcp_log_buf), "%s", line ? line : "");
 }
 
-static char *mcp_normalized_tool_payload(const char *response, bool normalize_elapsed) {
-    if (!response) return NULL;
-    yyjson_doc *outer = yyjson_read(response, strlen(response), 0);
-    yyjson_val *result = outer ? yyjson_obj_get(yyjson_doc_get_root(outer), "result") : NULL;
-    yyjson_val *content = result ? yyjson_obj_get(result, "content") : NULL;
-    yyjson_val *item = content ? yyjson_arr_get(content, 0) : NULL;
-    const char *text = item ? yyjson_get_str(yyjson_obj_get(item, "text")) : NULL;
-    yyjson_doc *payload = text ? yyjson_read(text, strlen(text), 0) : NULL;
-    yyjson_mut_doc *normalized = payload ? yyjson_doc_mut_copy(payload, NULL) : NULL;
-    if (normalized) {
-        yyjson_mut_val *root = yyjson_mut_doc_get_root(normalized);
-        /* Normalize only route/generation diagnostics and, when explicitly
-         * requested for search_code, nondeterministic elapsed time. User
-         * payload, order, counts, scores, and errors remain byte-exact. */
-        (void)yyjson_mut_obj_remove_key(root, "route");
-        (void)yyjson_mut_obj_remove_key(root, "generation");
-        if (normalize_elapsed) (void)yyjson_mut_obj_remove_key(root, "elapsed_ms");
-    }
-    char *json = normalized ? yyjson_mut_write(normalized, 0, NULL) : NULL;
-    yyjson_mut_doc_free(normalized);
-    yyjson_doc_free(payload);
-    yyjson_doc_free(outer);
-    return json;
-}
-
 static bool response_contains_json_fragment(const char *response, const char *fragment) {
     if (!response || !fragment) {
         return false;
