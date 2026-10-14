@@ -116,12 +116,10 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line);
 /* Handle a tools/call request. Returns MCP tool result JSON. */
 char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const char *args_json);
 
-/* Shared indexing entry-point boundary guard (upstream 7fa5b077, #17).
- * Routes the MCP index_repository handler and the UI POST /api/index route
- * through one decision: canonicalize the candidate root, then enforce the
+/* Indexing boundary guard (upstream 7fa5b077, #17) used by the MCP
+ * index_repository handler: canonicalize the candidate root, then enforce the
  * CBM_ALLOWED_ROOT containment boundary using path-component semantics (a
- * sibling prefix like /home/alice vs /home/alice-evil must NOT count), so a
- * boundary that holds on one entry point holds on every entry point.
+ * sibling prefix like /home/alice vs /home/alice-evil must NOT count).
  *
  * repo_path may be NULL. canonical_out (when non-NULL/canonical_sz>0) receives
  * the realpath-resolved path (or the input if it cannot be resolved). Returns

@@ -3775,11 +3775,9 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
 
     repo_path = canonicalize_repo_path_if_exists(repo_path);
 
-    /* Shared workspace boundary (upstream 7fa5b077, #17): every indexing
-     * entry point — this MCP handler and the UI POST /api/index route — routes
-     * through cbm_mcp_check_index_root so a CBM_ALLOWED_ROOT boundary that
-     * holds on one also holds on the other. Unset by default, so the standard
-     * "index the path I gave you" behaviour is unchanged. */
+    /* Workspace boundary (upstream 7fa5b077, #17): cbm_mcp_check_index_root
+     * enforces CBM_ALLOWED_ROOT. Unset by default, so the standard "index the
+     * path I gave you" behaviour is unchanged. */
     const char *boundary_reason = NULL;
     char canonbuf[CBM_SZ_4K];
     if (cbm_mcp_check_index_root(repo_path, canonbuf, sizeof(canonbuf), &boundary_reason) != 0) {
@@ -4046,9 +4044,10 @@ int cbm_mcp_check_index_root(const char *repo_path, char *canonical_out, size_t 
     if (out_reason) {
         *out_reason = NULL;
     }
+    /* Function scope: `resolved` may point here until the end. */
+    char real[CBM_SZ_4K];
     const char *resolved = repo_path;
     if (repo_path && repo_path[0]) {
-        char real[CBM_SZ_4K];
 #ifdef _WIN32
         if (_fullpath(real, repo_path, sizeof(real))) {
             cbm_normalize_path_sep(real);

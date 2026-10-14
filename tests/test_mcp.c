@@ -4651,10 +4651,10 @@ TEST(index_repository_honors_allowed_root) {
 }
 
 /* #17 boundary semantics (upstream 7fa5b077): cbm_mcp_check_index_root is the
- * shared entry-point guard behind both the MCP index_repository handler and
- * the UI POST /api/index route. It must use path-COMPONENT boundaries, so a
- * sibling prefix (/home/alice-evil vs root /home/alice) and an already-in-root
- * path are distinguished, and symlink aliases resolve before judging. */
+ * guard behind the MCP index_repository handler. It must use path-COMPONENT
+ * boundaries, so a sibling prefix (/home/alice-evil vs root /home/alice) and an
+ * already-in-root path are distinguished, and symlink aliases resolve before
+ * judging. */
 TEST(index_root_boundary_is_component_aware) {
     char base[512];
     snprintf(base, sizeof(base), "%s/cbm_bound_XXXXXX", cbm_tmpdir());
@@ -4692,6 +4692,30 @@ TEST(index_root_boundary_is_component_aware) {
     reason = NULL;
     ASSERT_LT(cbm_mcp_check_index_root(cbm_tmpdir(), canon, sizeof(canon), &reason), 0);
     ASSERT_NOT_NULL(strstr(reason, "outside the allowed root"));
+
+#ifndef _WIN32
+    /* 5. Symlink aliases are judged by their target, and the canonical output
+     * is the resolved path (it must outlive the resolution buffer). */
+    char real_inside[CBM_SZ_4K];
+    ASSERT_NOT_NULL(realpath(inside, real_inside));
+    char out_link[640];
+    snprintf(out_link, sizeof(out_link), "%s_link_in", base); /* outside -> inside */
+    ASSERT_EQ(symlink(inside, out_link), 0);
+    char in_link[640];
+    snprintf(in_link, sizeof(in_link), "%s/link_out", base); /* inside -> sibling */
+    ASSERT_EQ(symlink(sibling, in_link), 0);
+
+    reason = NULL;
+    ASSERT_EQ(cbm_mcp_check_index_root(out_link, canon, sizeof(canon), &reason), 0);
+    ASSERT_NULL(reason);
+    ASSERT_STR_EQ(canon, real_inside);
+    reason = NULL;
+    ASSERT_LT(cbm_mcp_check_index_root(in_link, canon, sizeof(canon), &reason), 0);
+    ASSERT_NOT_NULL(reason);
+
+    cbm_unlink(out_link);
+    cbm_unlink(in_link);
+#endif
 
     cbm_unsetenv("CBM_ALLOWED_ROOT");
     cbm_rmdir(inside);
