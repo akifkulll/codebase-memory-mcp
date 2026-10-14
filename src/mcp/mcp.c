@@ -91,7 +91,6 @@ enum {
 #define STORE_IDLE_TIMEOUT_S 60
 
 /* Directory permissions: rwxr-xr-x */
-#define ADR_DIR_PERMS 0755
 
 /* JSON-RPC 2.0 standard error codes */
 #define JSONRPC_PARSE_ERROR (-32700)
@@ -497,12 +496,6 @@ static const tool_def_t TOOLS[] = {
      "\"Git ref or tag to compare from (e.g. HEAD~5, v0.5.0). Diffs <ref>...HEAD.\"}},"
      "\"required\":"
      "[\"project\"]}"},
-
-    {"manage_adr", "Manage ADR", "Create or update Architecture Decision Records",
-     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},\"mode\":{\"type\":"
-     "\"string\",\"enum\":[\"get\",\"update\",\"sections\"]},\"content\":{\"type\":\"string\"},"
-     "\"sections\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"project\"]"
-     "}"},
 
     {"ingest_traces", "Ingest traces", "Ingest runtime traces to enhance the knowledge graph",
      "{\"type\":\"object\",\"properties\":{\"traces\":{\"type\":\"array\",\"items\":{\"type\":"
@@ -1384,26 +1377,6 @@ static char *build_no_store_error(const char *project) {
         }                                                 \
     } while (0)
 
-static bool project_has_adr(cbm_store_t *store, const char *project, const char *root_path) {
-    if (store && project) {
-        cbm_adr_t adr;
-        memset(&adr, 0, sizeof(adr));
-        if (cbm_store_adr_get(store, project, &adr) == CBM_STORE_OK) {
-            cbm_store_adr_free(&adr);
-            return true;
-        }
-    }
-
-    if (!root_path) {
-        return false;
-    }
-
-    char adr_path[CBM_SZ_4K];
-    snprintf(adr_path, sizeof(adr_path), "%s/.codebase-memory/adr.md", root_path);
-    struct stat adr_st;
-    return stat(adr_path, &adr_st) == 0;
-}
-
 /* ── Tool handler implementations ─────────────────────────────── */
 
 /* Return true if filename is a valid project .db file (not temp/internal).
@@ -1700,19 +1673,6 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
     }
     yyjson_mut_obj_add_val(doc, root, "edge_types", types);
 
-    /* Check ADR presence */
-    cbm_project_t proj_info = {0};
-    if (cbm_store_get_project(store, project, &proj_info) == 0 && proj_info.root_path) {
-        bool adr_exists = project_has_adr(store, project, proj_info.root_path);
-        yyjson_mut_obj_add_bool(doc, root, "adr_present", adr_exists);
-        if (!adr_exists) {
-            yyjson_mut_obj_add_str(
-                doc, root, "adr_hint",
-                "No ADR found. Use manage_adr(mode='update') to persist architectural "
-                "decisions across sessions. Run get_architecture(aspects=['all']) first.");
-        }
-        cbm_project_free_fields(&proj_info);
-    }
 
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
@@ -4452,16 +4412,6 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
         }
     }
 
-    bool adr_exists = project_has_adr(store, project_name, repo_path);
-    yyjson_mut_obj_add_bool(doc, root, "adr_present", adr_exists);
-    if (!adr_exists && !degraded) {
-        yyjson_mut_obj_add_str(
-            doc, root, "adr_hint",
-            "Project indexed. Consider creating an Architecture Decision Record: "
-            "explore the codebase with get_architecture(aspects=['all']), then use "
-            "manage_adr(mode='update') to persist architectural insights across sessions.");
-    }
-
     return degraded;
 }
 
@@ -6636,186 +6586,6 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     return result;
 }
 
-/* ── manage_adr ───────────────────────────────────────────────── */
-
-/* ADR "sections" mode: list markdown headers ('#'-prefixed lines) from the
- * ADR content string. */
-static void adr_list_sections_from_content(yyjson_mut_doc *doc, yyjson_mut_val *root_obj,
-                                           const char *content) {
-    yyjson_mut_val *sections = yyjson_mut_arr(doc);
-    const char *p = content;
-    while (p && *p) {
-        const char *eol = strchr(p, '\n');
-        size_t linelen = eol ? (size_t)(eol - p) : strlen(p);
-        while (linelen > 0 && p[linelen - SKIP_ONE] == '\r') {
-            linelen--;
-        }
-        if (linelen > 0 && p[0] == '#') {
-            char hdr[CBM_SZ_1K];
-            if (linelen >= sizeof(hdr)) {
-                linelen = sizeof(hdr) - SKIP_ONE;
-            }
-            memcpy(hdr, p, linelen);
-            hdr[linelen] = '\0';
-            yyjson_mut_arr_add_strcpy(doc, sections, hdr);
-        }
-        if (!eol) {
-            break;
-        }
-        p = eol + SKIP_ONE;
-    }
-    yyjson_mut_obj_add_val(doc, root_obj, "sections", sections);
-}
-
-/* Read the legacy file-based ADR (<root>/.codebase-memory/adr.md), used by
- * older versions. Returns a heap buffer (caller frees) or NULL if missing/
- * empty. Kept only to migrate old ADRs into the store (#256). */
-static char *adr_read_legacy_file(const char *root_path) {
-    if (!root_path) {
-        return NULL;
-    }
-    char adr_path[CBM_SZ_4K];
-    snprintf(adr_path, sizeof(adr_path), "%s/.codebase-memory/adr.md", root_path);
-    FILE *fp = cbm_fopen(adr_path, "r");
-    if (!fp) {
-        return NULL;
-    }
-    (void)fseek(fp, 0, SEEK_END);
-    long sz = ftell(fp);
-    if (sz <= 0) {
-        (void)fclose(fp);
-        return NULL;
-    }
-    (void)fseek(fp, 0, SEEK_SET);
-    char *buf = malloc((size_t)sz + SKIP_ONE);
-    if (!buf) {
-        (void)fclose(fp);
-        return NULL;
-    }
-    size_t n = fread(buf, SKIP_ONE, (size_t)sz, fp);
-    buf[n] = '\0';
-    (void)fclose(fp);
-    if (buf[0] == '\0') {
-        free(buf);
-        return NULL;
-    }
-    return buf;
-}
-
-#define ADR_EMPTY_HINT                                                             \
-    "No ADR yet. Create one with manage_adr(mode='update', "                       \
-    "content='## PURPOSE\\n...\\n\\n## STACK\\n...\\n\\n## ARCHITECTURE\\n..."     \
-    "\\n\\n## PATTERNS\\n...\\n\\n## TRADEOFFS\\n...\\n\\n## PHILOSOPHY\\n...'). " \
-    "For guided creation: explore the codebase with get_architecture, "            \
-    "then draft and store. Sections: PURPOSE, STACK, ARCHITECTURE, "               \
-    "PATTERNS, TRADEOFFS, PHILOSOPHY."
-
-static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
-    char *project = get_project_arg(args);
-    char *mode_str = cbm_mcp_get_string_arg(args, "mode");
-    char *content = cbm_mcp_get_string_arg(args, "content");
-
-    if (!mode_str) {
-        mode_str = heap_strdup("get");
-    }
-
-    /* ADRs are stored in the SQLite store (project_summaries), the SAME
-     * backend the UI /api/adr endpoints use — so writes via the MCP tool and
-     * the UI are visible to each other (#256). */
-    cbm_store_t *resolved = resolve_store(srv, project);
-    if (!resolved) {
-        char *err = build_no_store_error(project);
-        char *res = cbm_mcp_text_result(err, true);
-        free(err);
-        free(project);
-        free(mode_str);
-        free(content);
-        return res;
-    }
-
-    /* resolve_store opens file-backed projects READ-ONLY (query stores must
-     * not mutate the DB). manage_adr is the only resolve_store caller that
-     * WRITES, so it needs a writable handle. For a file-backed project open a
-     * dedicated read-write handle to the same DB file (the project is verified
-     * to exist via resolve_store, so cbm_store_open_path won't create a ghost
-     * DB). For an in-memory / embedded store (db_path == NULL) the resolved
-     * store is already writable — use it directly. */
-    cbm_store_t *store = resolved;
-    cbm_store_t *owned_rw = NULL;
-    const char *resolved_db_path = cbm_store_db_path(resolved);
-    if (resolved_db_path) {
-        owned_rw = cbm_store_open_path(resolved_db_path);
-        if (!owned_rw) {
-            char *err = build_no_store_error(project);
-            char *res = cbm_mcp_text_result(err, true);
-            free(err);
-            free(project);
-            free(mode_str);
-            free(content);
-            return res;
-        }
-        store = owned_rw;
-    }
-
-    /* One-time migration: older versions wrote ADRs to a file at
-     * <root>/.codebase-memory/adr.md. If the store has no ADR yet but that
-     * legacy file exists, import it so nothing is lost on upgrade. */
-    cbm_adr_t adr;
-    memset(&adr, 0, sizeof(adr));
-    bool have_adr = (cbm_store_adr_get(store, project, &adr) == CBM_STORE_OK);
-    if (!have_adr) {
-        char *root_path = get_project_root(srv, project);
-        char *legacy = adr_read_legacy_file(root_path);
-        free(root_path);
-        if (legacy) {
-            if (cbm_store_adr_store(store, project, legacy) == CBM_STORE_OK) {
-                have_adr = (cbm_store_adr_get(store, project, &adr) == CBM_STORE_OK);
-            }
-            free(legacy);
-        }
-    }
-
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root_obj = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root_obj);
-
-    bool is_error = false;
-    if ((strcmp(mode_str, "update") == 0 || strcmp(mode_str, "store") == 0) && content) {
-        if (cbm_store_adr_store(store, project, content) == CBM_STORE_OK) {
-            yyjson_mut_obj_add_str(doc, root_obj, "status", "updated");
-        } else {
-            yyjson_mut_obj_add_str(doc, root_obj, "status", "write_error");
-            is_error = true;
-        }
-    } else if (strcmp(mode_str, "sections") == 0) {
-        adr_list_sections_from_content(doc, root_obj, have_adr ? adr.content : NULL);
-    } else { /* get */
-        if (have_adr && adr.content) {
-            yyjson_mut_obj_add_strcpy(doc, root_obj, "content", adr.content);
-        } else {
-            yyjson_mut_obj_add_str(doc, root_obj, "content", "");
-            yyjson_mut_obj_add_str(doc, root_obj, "status", "no_adr");
-            yyjson_mut_obj_add_str(doc, root_obj, "adr_hint", ADR_EMPTY_HINT);
-        }
-    }
-
-    char *json = yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
-    if (have_adr) {
-        cbm_store_adr_free(&adr);
-    }
-    if (owned_rw) {
-        cbm_store_close(owned_rw);
-    }
-    free(project);
-    free(mode_str);
-    free(content);
-
-    char *result = cbm_mcp_text_result(json, is_error);
-    free(json);
-    return result;
-}
-
 /* ── ingest_traces ────────────────────────────────────────────── */
 
 static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
@@ -6894,9 +6664,6 @@ char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const ch
     }
     if (strcmp(tool_name, "detect_changes") == 0) {
         return handle_detect_changes(srv, args_json);
-    }
-    if (strcmp(tool_name, "manage_adr") == 0) {
-        return handle_manage_adr(srv, args_json);
     }
     if (strcmp(tool_name, "ingest_traces") == 0) {
         return handle_ingest_traces(srv, args_json);

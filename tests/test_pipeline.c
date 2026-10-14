@@ -341,7 +341,7 @@ TEST(pipeline_structure_nodes) {
     PASS();
 }
 
-/* Issue #516: an ADR stored via manage_adr (project_summaries) must survive a
+/* Issue #516: an ADR stored in project_summaries must survive a
  * full re-index. A full re-index deletes the DB and rebuilds it from the graph
  * buffer, which writes an empty project_summaries table; the fix captures the
  * ADR before the delete and restores it after the rebuild. Reproduce-first:

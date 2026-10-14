@@ -1883,27 +1883,6 @@ TEST(tool_detect_changes_depth) {
     PASS();
 }
 
-/* ── manage_adr ────────────────────────────────────────────────── */
-
-TEST(tool_adr_get) {
-    double ms;
-    char *r =
-        call_tool_timed("manage_adr", &ms, "{\"project\":\"%s\",\"mode\":\"get\"}", g_project);
-    TOOL_OK(r, ms);
-    /* May return empty if no ADR exists yet */
-    free(r);
-    PASS();
-}
-
-TEST(tool_adr_sections) {
-    double ms;
-    char *r =
-        call_tool_timed("manage_adr", &ms, "{\"project\":\"%s\",\"mode\":\"sections\"}", g_project);
-    TOOL_OK(r, ms);
-    free(r);
-    PASS();
-}
-
 /* ── ingest_traces ─────────────────────────────────────────────── */
 
 TEST(tool_ingest_traces_empty) {
@@ -2300,36 +2279,6 @@ TEST(tool_arch_multi_aspects) {
 TEST(tool_detect_changes_scope) {
     double ms;
     char *r = call_tool_timed("detect_changes", &ms, "{\"project\":\"%s\",\"scope\":\"fastapi/\"}",
-                              g_project);
-    TOOL_OK(r, ms);
-    free(r);
-    PASS();
-}
-
-/* ── manage_adr: update + content ──────────────────────────────── */
-
-TEST(tool_adr_update) {
-    double ms;
-    char *r = call_tool_timed("manage_adr", &ms,
-                              "{\"project\":\"%s\",\"mode\":\"update\","
-                              "\"content\":\"# Test ADR\\n\\nThis is a test ADR.\"}",
-                              g_project);
-    TOOL_OK(r, ms);
-    free(r);
-
-    /* Verify it was stored */
-    r = call_tool_timed("manage_adr", &ms, "{\"project\":\"%s\",\"mode\":\"get\"}", g_project);
-    TOOL_OK(r, ms);
-    ASSERT(strstr(r, "Test ADR") != NULL);
-    free(r);
-    PASS();
-}
-
-TEST(tool_adr_sections_array) {
-    double ms;
-    char *r = call_tool_timed("manage_adr", &ms,
-                              "{\"project\":\"%s\",\"mode\":\"sections\","
-                              "\"sections\":[\"overview\",\"decisions\"]}",
                               g_project);
     TOOL_OK(r, ms);
     free(r);
@@ -2770,29 +2719,6 @@ TEST(tool_detect_depth_1) {
     PASS();
 }
 
-/* ── manage_adr: default mode (omitted) ────────────────────────── */
-
-TEST(tool_adr_default_mode) {
-    double ms;
-    char *r = call_tool_timed("manage_adr", &ms, "{\"project\":\"%s\"}", g_project);
-    TOOL_OK(r, ms);
-    free(r);
-    PASS();
-}
-
-/* ── manage_adr: update with empty content ─────────────────────── */
-
-TEST(tool_adr_update_empty) {
-    double ms;
-    char *r = call_tool_timed("manage_adr", &ms,
-                              "{\"project\":\"%s\",\"mode\":\"update\","
-                              "\"content\":\"\"}",
-                              g_project);
-    TOOL_OK(r, ms);
-    free(r);
-    PASS();
-}
-
 /* ── ingest_traces: trace with missing fields ──────────────────── */
 
 TEST(tool_ingest_traces_partial) {
@@ -2820,17 +2746,6 @@ TEST(tool_err_schema_bad_project) {
 TEST(tool_err_index_status_no_project) {
     double ms;
     char *r = call_tool_timed("index_status", &ms, "{}");
-    TOOL_OK(r, ms);
-    free(r);
-    PASS();
-}
-
-/* ── Error: manage_adr bad project ─────────────────────────────── */
-
-TEST(tool_err_adr_bad_project) {
-    double ms;
-    char *r =
-        call_tool_timed("manage_adr", &ms, "{\"project\":\"nonexistent-xyz\",\"mode\":\"get\"}");
     TOOL_OK(r, ms);
     free(r);
     PASS();
@@ -3189,10 +3104,6 @@ SUITE(incremental) {
     RUN_TEST(tool_detect_changes_since_precedence);
     RUN_TEST(tool_detect_changes_depth);
 
-    /* Phase 16: manage_adr */
-    RUN_TEST(tool_adr_get);
-    RUN_TEST(tool_adr_sections);
-
     /* Phase 17: ingest_traces */
     RUN_TEST(tool_ingest_traces_empty);
     RUN_TEST(tool_ingest_traces_basic);
@@ -3241,10 +3152,6 @@ SUITE(incremental) {
 
     /* Phase 25: detect_changes scope */
     RUN_TEST(tool_detect_changes_scope);
-
-    /* Phase 26: manage_adr update + sections */
-    RUN_TEST(tool_adr_update);
-    RUN_TEST(tool_adr_sections_array);
 
     /* Phase 27: ingest_traces multiple */
     RUN_TEST(tool_ingest_traces_multiple);
@@ -3297,17 +3204,12 @@ SUITE(incremental) {
     RUN_TEST(tool_detect_nonexistent_branch);
     RUN_TEST(tool_detect_depth_1);
 
-    /* Phase 37: manage_adr remaining */
-    RUN_TEST(tool_adr_default_mode);
-    RUN_TEST(tool_adr_update_empty);
-
     /* Phase 38: ingest_traces remaining */
     RUN_TEST(tool_ingest_traces_partial);
 
     /* Phase 39: error handling remaining tools */
     RUN_TEST(tool_err_schema_bad_project);
     RUN_TEST(tool_err_index_status_no_project);
-    RUN_TEST(tool_err_adr_bad_project);
     RUN_TEST(tool_err_ingest_bad_project);
     RUN_TEST(tool_err_ingest_no_traces);
 

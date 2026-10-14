@@ -236,7 +236,6 @@ if [ -f "$MCP_FILE" ]; then
     # Known safe file reads in mcp.c (with line-range context)
     # - search_code: writes pattern to tmpfile, reads grep output
     # - get_code_snippet: reads source via read_file_lines (path-contained)
-    # - manage_adr: reads/writes ADR files
     # - detect_changes: reads git diff output
     # - update check: reads the version-check HTTP response (fixed buffer)
     # - HTTP transport: reads the incoming request body (content-length bound)

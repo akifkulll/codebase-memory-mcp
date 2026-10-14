@@ -55,7 +55,7 @@ Full indexing remains the current tradeoff. Zova's advantage is strongest for re
 - **120x fewer tokens** — 5 structural queries: ~3,400 tokens vs ~412,000 via file-by-file search. One graph query replaces dozens of grep/read cycles.
 - **11 agents, one command** — `install` auto-detects Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode, VS Code, OpenClaw, and Kiro — configures MCP entries, instruction files, and pre-tool hooks for each.
 - **Infrastructure-as-code indexing** — Dockerfiles, Kubernetes manifests, and Kustomize overlays indexed as graph nodes with cross-references. `Resource` nodes for K8s kinds, `Module` nodes for Kustomize overlays with `IMPORTS` edges to referenced resources.
-- **14 MCP tools** — search, trace, architecture, impact analysis, Cypher queries, dead code detection, cross-service HTTP linking, ADR management, and more.
+- **13 MCP tools** — search, trace, architecture, impact analysis, Cypher queries, dead code detection, cross-service HTTP linking, and more.
 
 ## Quick Start
 
@@ -150,7 +150,6 @@ Removes the installed binary, agent configs, skills, hooks, and instructions. Th
 
 ### Graph & analysis
 - **Architecture overview**: `get_architecture` returns languages, packages, entry points, routes, hotspots, boundaries, layers, and clusters in a single call
-- **Architecture Decision Records**: `manage_adr` persists architectural decisions across sessions
 - **Louvain community detection**: Discovers functional modules by clustering call edges
 - **Git diff impact mapping**: `detect_changes` maps uncommitted changes to affected symbols with risk classification
 - **Call graph**: Resolves function calls across files and packages (import-aware, type-inferred)
@@ -310,7 +309,7 @@ Add to `~/.claude/.mcp.json` (global) or project `.mcp.json`:
 }
 ```
 
-Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` with 14 tools.
+Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` with 13 tools.
 
 </details>
 
@@ -520,9 +519,8 @@ promotion tests, not routine development tests.
 | `query_graph` | Execute Cypher-like graph queries (read-only). |
 | `get_graph_schema` | Node/edge counts, relationship patterns, property definitions per label. Run this first. |
 | `get_code_snippet` | Read source code for a function by qualified name. |
-| `get_architecture` | Codebase overview: languages, packages, routes, hotspots, clusters, ADR. |
+| `get_architecture` | Codebase overview: languages, packages, routes, hotspots, clusters. |
 | `search_code` | Grep-like text search within indexed project files. |
-| `manage_adr` | CRUD for Architecture Decision Records. |
 | `ingest_traces` | Ingest runtime traces to validate HTTP_CALLS edges. |
 
 ### Cross-repository search with Zova
@@ -694,7 +692,7 @@ Also supported (not yet benchmarked): Ada, Agda, Apex, Assembly (NASM), Astro, A
 ```
 src/
   main.c              Entry point (MCP stdio server + CLI + install/update/config)
-  mcp/                MCP server (14 tools, JSON-RPC 2.0, session detection, auto-index)
+  mcp/                MCP server (13 tools, JSON-RPC 2.0, session detection, auto-index)
   cli/                Install/uninstall/update/config (10 agents, hooks, instructions)
   store/              Query/storage compatibility layer and cross-workspace search
   zova/               Shared database, native graph/vector publication, migration, and operations
