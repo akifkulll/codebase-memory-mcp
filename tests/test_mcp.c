@@ -1558,6 +1558,65 @@ TEST(tool_trace_call_path_prefers_definition) {
     PASS();
 }
 
+/* Upstream cc7b4a88 (#1294): a caller under a project-root tests/ tree
+ * (no test_ naming) is hidden from trace_call_path by default. The path
+ * filter only matched a nested ".../tests/..." path. */
+TEST(tool_trace_call_path_hides_root_tests_subtree_issue1294) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "t1294-proj";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/t1294");
+    cbm_node_t tgt = {.project = proj, .label = "Function", .name = "tgt1294",
+                      .qualified_name = "t1294-proj.a.tgt1294", .file_path = "a.c",
+                      .start_line = 1, .end_line = 5};
+    cbm_node_t prod = {.project = proj, .label = "Function", .name = "prod_caller",
+                       .qualified_name = "t1294-proj.a.prod_caller", .file_path = "a.c",
+                       .start_line = 10, .end_line = 15};
+    cbm_node_t tst = {.project = proj, .label = "Function", .name = "repro_caller",
+                      .qualified_name = "t1294-proj.t.repro_caller",
+                      .file_path = "tests/repro/helper.c", .start_line = 1, .end_line = 5};
+    int64_t tid = cbm_store_upsert_node(st, &tgt);
+    int64_t pid = cbm_store_upsert_node(st, &prod);
+    int64_t xid = cbm_store_upsert_node(st, &tst);
+    ASSERT_GT(tid, 0);
+    ASSERT_GT(pid, 0);
+    ASSERT_GT(xid, 0);
+    cbm_edge_t e1 = {.project = proj, .source_id = pid, .target_id = tid, .type = "CALLS"};
+    cbm_edge_t e2 = {.project = proj, .source_id = xid, .target_id = tid, .type = "CALLS"};
+    ASSERT_GT(cbm_store_insert_edge(st, &e1), 0);
+    ASSERT_GT(cbm_store_insert_edge(st, &e2), 0);
+
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(st, proj), 0);
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":92,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"trace_call_path\",\"arguments\":{\"project\":\"t1294-proj\","
+             "\"function_name\":\"tgt1294\",\"direction\":\"inbound\"}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    free(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "prod_caller"));
+    ASSERT_NULL(strstr(inner, "repro_caller"));
+    free(inner);
+
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":93,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"trace_call_path\",\"arguments\":{\"project\":\"t1294-proj\","
+             "\"function_name\":\"tgt1294\",\"direction\":\"inbound\","
+             "\"include_tests\":true}}}");
+    ASSERT_NOT_NULL(resp);
+    inner = extract_text_content(resp);
+    free(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "prod_caller"));
+    ASSERT_NOT_NULL(strstr(inner, "repro_caller"));
+    free(inner);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 /* Reproduce-first (#887): the client-supplied `depth` on trace_call_path must be
  * clamped to the MCP ceiling (cbm_mcp_max_depth(), default 15). On origin/main
  * an MCP_MAX_DEPTH=15 constant was defined but never applied — `depth` flowed
@@ -5032,6 +5091,7 @@ SUITE(mcp) {
     RUN_TEST(tool_trace_missing_function_name);
     RUN_TEST(tool_trace_call_path_ambiguous);
     RUN_TEST(tool_trace_call_path_prefers_definition);
+    RUN_TEST(tool_trace_call_path_hides_root_tests_subtree_issue1294);
     RUN_TEST(tool_trace_call_path_depth_clamped);
     RUN_TEST(tool_trace_call_path_distinct_defs_not_over_unioned);
     RUN_TEST(tool_trace_call_path_dts_stub_unions_with_impl);

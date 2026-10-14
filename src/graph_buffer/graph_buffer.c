@@ -1075,12 +1075,28 @@ void cbm_gbuf_foreach_edge(const cbm_gbuf_t *gb, cbm_gbuf_edge_visitor_fn fn, vo
 
 /* ── Edge operations ─────────────────────────────────────────────── */
 
+/* "confidence":<double> from an edge property blob; -1 when absent, so a blob
+ * that states a confidence outranks one that does not. */
+static double edge_properties_confidence(const char *props_json) {
+    static const char conf_key[] = "\"confidence\":";
+    const char *p = props_json ? strstr(props_json, conf_key) : NULL;
+    return p ? strtod(p + sizeof(conf_key) - SKIP_ONE, NULL) : -1.0;
+}
+
+/* A total order over the two candidates, so the result does not depend on
+ * arrival order: higher confidence wins (an LSP-resolved call outranks a
+ * textual match, upstream d08fccd9), then the smaller blob. */
 static bool edge_properties_should_replace(const char *existing, const char *candidate) {
     if (!candidate || strcmp(candidate, "{}") == 0) {
         return false;
     }
     if (!existing || strcmp(existing, "{}") == 0) {
         return true;
+    }
+    double cand_conf = edge_properties_confidence(candidate);
+    double cur_conf = edge_properties_confidence(existing);
+    if (cand_conf != cur_conf) {
+        return cand_conf > cur_conf;
     }
     return strcmp(candidate, existing) < 0;
 }

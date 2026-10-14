@@ -3227,6 +3227,8 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
         def.qualified_name = rust_cfg_qualified_name(a, def.qualified_name, def.decorators);
         def.is_test = rust_def_is_test(def.decorators);
     }
+    // Every function in a test file is test code, whatever its own name (#1294).
+    def.is_test = def.is_test || ctx->result->is_test_file;
 
     // Docstring
     def.docstring = extract_docstring(a, node, ctx->source, ctx->language);
@@ -3990,6 +3992,21 @@ static TSNode find_class_body(TSNode class_node, CBMLanguage lang) {
     return null_node;
 }
 
+/* Java keeps enum constants directly in enum_body, but methods, fields and
+ * nested types after the semicolon sit in an enum_body_declarations child.
+ * find_class_body() keeps returning the raw body so enum-member extraction
+ * still sees the constants; consumers that walk declarations use this
+ * (upstream 87a0e3f, #1234). */
+static TSNode find_class_member_body(TSNode class_node, CBMLanguage lang) {
+    TSNode body = find_class_body(class_node, lang);
+    if (ts_node_is_null(body) || lang != CBM_LANG_JAVA ||
+        strcmp(ts_node_type(body), "enum_body") != 0) {
+        return body;
+    }
+    TSNode declarations = cbm_find_child_by_kind(body, "enum_body_declarations");
+    return ts_node_is_null(declarations) ? body : declarations;
+}
+
 // Dart: resolve method name from method_signature/function_signature.
 static TSNode resolve_dart_method_name(TSNode child, const char *ck) {
     if (strcmp(ck, "method_signature") == 0) {
@@ -4151,6 +4168,9 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, TSNode class_node,
     // MinHash fingerprint
     compute_fingerprint(ctx, &def, child);
 
+    // A method on a class in a test file is test code too (#1294).
+    def.is_test = def.is_test || ctx->result->is_test_file;
+
     cbm_defs_push(&ctx->result->defs, a, def);
 }
 
@@ -4175,7 +4195,7 @@ static void extract_objc_impl_methods(CBMExtractCtx *ctx, TSNode impl_node, cons
 // Extract methods inside a class body
 static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const char *class_qn,
                                   const CBMLangSpec *spec) {
-    TSNode body = find_class_body(class_node, ctx->language);
+    TSNode body = find_class_member_body(class_node, ctx->language);
     if (ts_node_is_null(body)) {
         return;
     }
@@ -5511,7 +5531,7 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
         return;
     }
 
-    TSNode body = find_class_body(class_node, ctx->language);
+    TSNode body = find_class_member_body(class_node, ctx->language);
     if (ts_node_is_null(body)) {
         return;
     }
@@ -5613,7 +5633,7 @@ static void extract_class_variables(CBMExtractCtx *ctx, TSNode class_node,
         return;
     }
 
-    TSNode body = find_class_body(class_node, ctx->language);
+    TSNode body = find_class_member_body(class_node, ctx->language);
     if (ts_node_is_null(body)) {
         return;
     }
@@ -5834,6 +5854,16 @@ static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const char 
 // Push nested class children from a class body container onto the walk stack.
 static void push_class_body_children(TSNode node, const CBMLangSpec *spec, wd_stack_t *s,
                                      const char *new_enclosing, CBMArena *arena) {
+    /* Java interface and enum bodies are member containers too. Without this
+     * the walk descended into them and re-extracted their methods as free
+     * Functions next to the Methods extract_class_methods emits (#1234). */
+    if (spec->language == CBM_LANG_JAVA) {
+        TSNode body = find_class_member_body(node, spec->language);
+        if (!ts_node_is_null(body)) {
+            push_nested_class_nodes(body, spec, s, new_enclosing, arena);
+            return;
+        }
+    }
     uint32_t nc = ts_node_child_count(node);
     for (uint32_t ci = 0; ci < nc; ci++) {
         TSNode child = ts_node_child(node, ci);

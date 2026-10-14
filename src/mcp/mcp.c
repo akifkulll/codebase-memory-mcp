@@ -2627,7 +2627,12 @@ static bool is_test_file(const char *path) {
     }
     return strstr(path, "/test") != NULL || strstr(path, "test_") != NULL ||
            strstr(path, "_test.") != NULL || strstr(path, "/tests/") != NULL ||
-           strstr(path, "/spec/") != NULL || strstr(path, ".test.") != NULL;
+           strstr(path, "/spec/") != NULL || strstr(path, ".test.") != NULL ||
+           /* project-root-relative test trees have no leading slash (#1294) */
+           strncmp(path, "tests/", SLEN("tests/")) == 0 ||
+           strncmp(path, "test/", SLEN("test/")) == 0 ||
+           strncmp(path, "spec/", SLEN("spec/")) == 0 ||
+           strncmp(path, "__tests__/", SLEN("__tests__/")) == 0;
 }
 
 static yyjson_mut_val *trace_json_append(yyjson_mut_doc *doc, yyjson_mut_val *arr,

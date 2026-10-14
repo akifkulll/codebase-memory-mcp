@@ -813,6 +813,29 @@ TEST(tsjs_suppress_keeps_high_confidence_and_non_methods) {
 
 /* ── Suite ─────────────────────────────────────────────────────── */
 
+/* Ported from upstream 7fda9f71. */
+/* from M import execute as bridge_execute + bridge_execute() — IMPORTS target is
+ * already the def QN. Must CALLS→execute, not invent …M.bridge_execute.
+ * Yui G1 shape (alongside resolve_import_map_bare_alias). */
+TEST(resolve_import_map_aliased_from_import) {
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add(r, "execute", "proj.services.satori_bridge.gate.execute", "Function");
+    /* Alias ghost must not win if somehow registered. */
+    cbm_registry_add(r, "bridge_execute", "proj.services.satori_bridge.gate.bridge_execute",
+                     "Function");
+
+    const char *keys[] = {"bridge_execute"};
+    const char *vals[] = {"proj.services.satori_bridge.gate.execute"};
+
+    cbm_resolution_t res =
+        cbm_registry_resolve(r, "bridge_execute", "proj.services.yui_core.router", keys, vals, 1);
+    ASSERT_STR_EQ(res.qualified_name, "proj.services.satori_bridge.gate.execute");
+    ASSERT_STR_EQ(res.strategy, "import_map");
+
+    cbm_registry_free(r);
+    PASS();
+}
+
 SUITE(registry) {
     /* FQN */
     RUN_TEST(fqn_simple);
@@ -880,4 +903,5 @@ SUITE(registry) {
     RUN_TEST(cross_language_suffix_match_drops_py_vs_js);
     RUN_TEST(tsjs_suppress_drops_weak_method_matches);
     RUN_TEST(tsjs_suppress_keeps_high_confidence_and_non_methods);
+    RUN_TEST(resolve_import_map_aliased_from_import);
 }

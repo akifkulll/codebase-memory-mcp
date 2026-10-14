@@ -359,6 +359,55 @@ TEST(java_interface) {
     PASS();
 }
 
+/* Regression for #1234: Java interface/enum methods were emitted as both a
+ * Method node (correct, via extract_class_methods) and a duplicate Function
+ * node (incorrect, via walk_defs). Prevention in push_class_body_children
+ * (gated to Java) recognizes interface_body and enum_body as class body
+ * containers, stopping the fallback path from re-walking method_declaration
+ * children as top-level functions. */
+TEST(java_interface_no_duplicate_function_issue1234) {
+    CBMFileResult *r =
+        extract("public interface MarketplaceService {\n"
+                "    ReservationDTO createReservation(Authentication auth, RequestDTO req);\n"
+                "    void cancelReservation(long id);\n"
+                "}\n",
+                CBM_LANG_JAVA, "t", "MarketplaceService.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    ASSERT(has_def(r, "Interface", "MarketplaceService"));
+    ASSERT(has_def(r, "Method", "createReservation"));
+    ASSERT(has_def(r, "Method", "cancelReservation"));
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
+
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(java_enum_dedup_preserves_calls_issue1234) {
+    CBMFileResult *r =
+        extract("package app;\n\nenum Day {\n"
+                "    MON, TUE, WED, THU, FRI, SAT, SUN;\n\n"
+                "    public boolean isWeekend() { return this == SAT || this == SUN; }\n"
+                "    public String label() { return name().toLowerCase(); }\n}\n\n"
+                "class DayUtil {\n"
+                "    static String describe(Day d) {\n"
+                "        return d.label() + (d.isWeekend() ? \"(rest)\" : \"(work)\");\n    }\n}\n",
+                CBM_LANG_JAVA, "t", "Day.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    ASSERT(has_def(r, "Enum", "Day"));
+    ASSERT(has_def(r, "Method", "isWeekend"));
+    ASSERT(has_def(r, "Method", "label"));
+    ASSERT(has_def(r, "Class", "DayUtil"));
+    ASSERT(has_def(r, "Method", "describe"));
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
+
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Regression for #279: a Java class declaring both `extends` and
  * `implements` must produce one INHERITS edge per base — the extends parent
  * AND every implements interface — with bare type names (not the keyword
@@ -3570,6 +3619,195 @@ TEST(extract_wide_flat_file_is_linear) {
     PASS();
 }
 
+/* Ported from upstream a029b3a6. */
+/* Issue #1006: JS/TS template-literal URLs must flatten ${...} substitutions
+ * to the canonical "{}" placeholder, both as call arguments (HTTP_CALLS) and
+ * as URL-shaped string_refs collected from const/return positions. */
+TEST(extract_ts_template_string_url_issue1006) {
+    CBMFileResult *r = extract("export function detailPath(id: string): string {\n"
+                               "  return `/api/v1/things/${id}/detail`;\n"
+                               "}\n"
+                               "export function load(id: string) {\n"
+                               "  return fetch(`/api/v1/things/${id}`);\n"
+                               "}\n",
+                               CBM_LANG_TYPESCRIPT, "t", "paths.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMCall *c = find_call_by_callee(r, "fetch");
+    ASSERT_NOT_NULL(c);
+    ASSERT_NOT_NULL(c->first_string_arg);
+    ASSERT_STR_EQ(c->first_string_arg, "/api/v1/things/{}");
+    int found = 0;
+    for (int i = 0; i < r->string_refs.count; i++) {
+        if (r->string_refs.items[i].value &&
+            strcmp(r->string_refs.items[i].value, "/api/v1/things/{}/detail") == 0) {
+            found = 1;
+            break;
+        }
+    }
+    ASSERT(found);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Ported from upstream 478ce25c. */
+/* Issue #1249: a mux route built as `configVar + "/literal"` (Go's idiomatic
+ * configurable-base-path pattern) must index the literal suffix, both for a
+ * route registration and for an outbound URL built the same way. A real BFF
+ * with 47 such registrations produced only 9 Route nodes before this fix. */
+TEST(extract_go_binary_concat_url_issue1249) {
+    CBMFileResult *r = extract("package main\n"
+                               "import \"net/http\"\n"
+                               "func setup(mux *http.ServeMux, base string) {\n"
+                               "    mux.HandleFunc(base+\"/login\", loginHandler)\n"
+                               "}\n"
+                               "func report(host string, port string) {\n"
+                               "    http.Get(\"http://\" + host + \":\" + port + \"/log\")\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "routes.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    const CBMCall *reg = find_call_by_callee(r, "mux.HandleFunc");
+    ASSERT_NOT_NULL(reg);
+    ASSERT_NOT_NULL(reg->first_string_arg);
+    ASSERT_STR_EQ(reg->first_string_arg, "/login");
+
+    const CBMCall *out = find_call_by_callee(r, "http.Get");
+    ASSERT_NOT_NULL(out);
+    ASSERT_NOT_NULL(out->first_string_arg);
+    ASSERT_STR_EQ(out->first_string_arg, "/log");
+
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Same issue: when the right side of the concatenation is not itself a
+ * literal (`base + suffixVar`), there is no literal route to recover. The
+ * fix must leave this unresolved rather than fabricate a path. */
+TEST(extract_go_binary_concat_url_no_literal_suffix_issue1249) {
+    CBMFileResult *r = extract("package main\n"
+                               "func setup(mux *http.ServeMux, base string, suffix string) {\n"
+                               "    mux.HandleFunc(base+suffix, dynHandler)\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "routes.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    const CBMCall *reg = find_call_by_callee(r, "mux.HandleFunc");
+    ASSERT_NOT_NULL(reg);
+    ASSERT_NULL(reg->first_string_arg);
+
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Ported from upstream cc7b4a88. */
+/* Function.is_test must follow the file's test-directory membership, not just
+ * a test_/_test basename convention: a helper under tests/ with none of those
+ * naming conventions (tests/helpers/fixtures.c) was previously indexed as an
+ * ordinary, non-test Function — invisible to store.c's `is_test != 1`
+ * dead-code/search filters even though trace_path's own independent path
+ * check already treated the same file as a test (#1294). */
+TEST(extract_c_test_dir_marks_is_test_issue1294) {
+    const char *src = "void helper(void) {}\n";
+
+    /* Regression: a test_*-named file directly under tests/ must remain a
+     * test (this already worked before the fix). */
+    CBMFileResult *r1 = extract(src, CBM_LANG_C, "t", "tests/test_pipeline.c");
+    ASSERT_NOT_NULL(r1);
+    ASSERT_FALSE(r1->has_error);
+    ASSERT(has_def(r1, "Function", "helper"));
+    int reg = -1;
+    for (int i = 0; i < r1->defs.count; i++) {
+        if (strcmp(r1->defs.items[i].label, "Function") == 0 && r1->defs.items[i].name &&
+            strcmp(r1->defs.items[i].name, "helper") == 0) {
+            reg = r1->defs.items[i].is_test ? 1 : 0;
+        }
+    }
+    ASSERT(reg == 1 && "test_*.c directly under tests/ is a test (regression)");
+    cbm_free_result(r1);
+
+    /* Positive: a file under tests/ that matches none of the test_/_test
+     * naming conventions must now ALSO be a test. */
+    CBMFileResult *r2 = extract(src, CBM_LANG_C, "t", "tests/helpers/fixtures.c");
+    ASSERT_NOT_NULL(r2);
+    ASSERT_FALSE(r2->has_error);
+    ASSERT(has_def(r2, "Function", "helper"));
+    int nonconv = -1;
+    for (int i = 0; i < r2->defs.count; i++) {
+        if (strcmp(r2->defs.items[i].label, "Function") == 0 && r2->defs.items[i].name &&
+            strcmp(r2->defs.items[i].name, "helper") == 0) {
+            nonconv = r2->defs.items[i].is_test ? 1 : 0;
+        }
+    }
+    ASSERT(nonconv == 1 && "non-test_-named file under tests/ is now a test");
+    cbm_free_result(r2);
+
+    /* Negative: a file with no test/ directory or test_/_test naming in its
+     * path must never be flagged — this fix must not widen detection beyond
+     * the tests/ (and sibling) directory tree. */
+    CBMFileResult *r3 = extract(src, CBM_LANG_C, "t", "src/pipeline/helper.c");
+    ASSERT_NOT_NULL(r3);
+    ASSERT_FALSE(r3->has_error);
+    ASSERT(has_def(r3, "Function", "helper"));
+    int outside = -1;
+    for (int i = 0; i < r3->defs.count; i++) {
+        if (strcmp(r3->defs.items[i].label, "Function") == 0 && r3->defs.items[i].name &&
+            strcmp(r3->defs.items[i].name, "helper") == 0) {
+            outside = r3->defs.items[i].is_test ? 1 : 0;
+        }
+    }
+    ASSERT(outside == 0 && "file outside tests/ is never a test");
+    cbm_free_result(r3);
+
+    PASS();
+}
+
+/* Same convergence for Method definitions (push_method_def), which take a
+ * separate code path from free functions: a class method on a class defined
+ * under tests/ with no test_/_test naming (e.g. tests/helpers/base.py) must
+ * be marked is_test too, and a method on the same class outside tests/ must
+ * not be (#1294). */
+TEST(extract_python_method_test_dir_marks_is_test_issue1294) {
+    const char *src = "class Foo:\n"
+                       "    def helper(self):\n"
+                       "        pass\n";
+
+    /* Python's LSP layer injects synthetic builtin stub Methods (str.upper,
+     * dict.get, ...) into defs.items alongside real ones (py_builtins.c), so
+     * matching must key on name, not just label="Method". */
+    CBMFileResult *r1 = extract(src, CBM_LANG_PYTHON, "t", "tests/helpers/base.py");
+    ASSERT_NOT_NULL(r1);
+    ASSERT_FALSE(r1->has_error);
+    ASSERT(has_def(r1, "Method", "helper"));
+    int in_tests = -1;
+    for (int i = 0; i < r1->defs.count; i++) {
+        if (strcmp(r1->defs.items[i].label, "Method") == 0 && r1->defs.items[i].name &&
+            strcmp(r1->defs.items[i].name, "helper") == 0) {
+            in_tests = r1->defs.items[i].is_test ? 1 : 0;
+        }
+    }
+    ASSERT(in_tests == 1 && "method on a class under tests/helpers/ is a test");
+    cbm_free_result(r1);
+
+    CBMFileResult *r2 = extract(src, CBM_LANG_PYTHON, "t", "app/models/base.py");
+    ASSERT_NOT_NULL(r2);
+    ASSERT_FALSE(r2->has_error);
+    ASSERT(has_def(r2, "Method", "helper"));
+    int outside_tests = -1;
+    for (int i = 0; i < r2->defs.count; i++) {
+        if (strcmp(r2->defs.items[i].label, "Method") == 0 && r2->defs.items[i].name &&
+            strcmp(r2->defs.items[i].name, "helper") == 0) {
+            outside_tests = r2->defs.items[i].is_test ? 1 : 0;
+        }
+    }
+    ASSERT(outside_tests == 0 && "method on a class outside tests/ is never a test");
+    cbm_free_result(r2);
+
+    PASS();
+}
+
 SUITE(extraction) {
     /* Initialize extraction library */
     cbm_init();
@@ -3605,6 +3843,8 @@ SUITE(extraction) {
     RUN_TEST(java_class);
     RUN_TEST(java_method);
     RUN_TEST(java_interface);
+    RUN_TEST(java_interface_no_duplicate_function_issue1234);
+    RUN_TEST(java_enum_dedup_preserves_calls_issue1234);
     RUN_TEST(java_class_extends_and_implements);
     RUN_TEST(python_class_base_extracted_bare);
     RUN_TEST(php_class);
@@ -3827,4 +4067,9 @@ SUITE(extraction) {
     RUN_TEST(extract_rust_test_attr_marks_is_test_issue855);
 
     cbm_shutdown();
+    RUN_TEST(extract_ts_template_string_url_issue1006);
+    RUN_TEST(extract_go_binary_concat_url_issue1249);
+    RUN_TEST(extract_go_binary_concat_url_no_literal_suffix_issue1249);
+    RUN_TEST(extract_c_test_dir_marks_is_test_issue1294);
+    RUN_TEST(extract_python_method_test_dir_marks_is_test_issue1294);
 }
