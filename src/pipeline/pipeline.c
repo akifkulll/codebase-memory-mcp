@@ -50,8 +50,9 @@ static inline void *intptr_to_ptr(intptr_t v) {
     return p;
 }
 
-/* ── Global index lock ─────────────────────────────────────────── */
-/* Prevents concurrent pipeline runs on the same DB file.
+/* ── In-process pipeline lock ──────────────────────────────────── */
+/* One in-process run at a time (g_pkgmap and the envscan pattern init are
+ * process-global). Cross-process exclusion is the workspace lease.
  * Atomic spinlock: 0 = free, 1 = locked. */
 static atomic_int g_pipeline_busy = 0;
 

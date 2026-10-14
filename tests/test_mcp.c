@@ -69,6 +69,7 @@ TEST(index_job_queue_is_fifo_and_blocks_second_contender) {
 #define cbm_chdir _chdir
 #define cbm_getcwd _getcwd
 #else
+#include <signal.h>
 #include <sys/wait.h> /* waitpid — #845 fork+alarm harness */
 #include <unistd.h>
 #define cbm_chdir chdir
@@ -1059,6 +1060,119 @@ TEST(tool_index_repository_reports_zova_committed_counts) {
     ASSERT_TRUE(deleted);
     ASSERT_TRUE(gone);
     ASSERT_TRUE(repeated_not_found);
+    PASS();
+#endif
+}
+
+/* ADR-0001: index_repository refuses with a machine-readable busy result while
+ * another process (or this one) holds the workspace lease, and delete_project
+ * refuses while an index run holds it. The holder dying frees the workspace. */
+TEST(tool_index_repository_refuses_while_workspace_lease_is_held) {
+#if !CBM_WITH_ZOVA || defined(_WIN32)
+    PASS();
+#else
+    char root[512], cache[512];
+    snprintf(root, sizeof(root), "%s/cbm-mcp-lease-root-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-lease-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    char source_path[640];
+    snprintf(source_path, sizeof(source_path), "%s/main.c", root);
+    FILE *source = fopen(source_path, "wb");
+    ASSERT_NOT_NULL(source);
+    fputs("int main(void) { return 0; }\n", source);
+    ASSERT_EQ(fclose(source), 0);
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    const char *saved_wait = getenv("CBM_INDEX_LEASE_TIMEOUT_S");
+    char *saved_wait_copy = saved_wait ? strdup(saved_wait) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    cbm_setenv("CBM_INDEX_LEASE_TIMEOUT_S", "0", 1);
+    char user_db[640];
+    ASSERT_EQ(cbm_zova_user_database_path(user_db, sizeof(user_db)), 0);
+
+    int ready[2];
+    ASSERT_EQ(pipe(ready), 0);
+    pid_t holder = fork();
+    ASSERT_TRUE(holder >= 0);
+    if (holder == 0) {
+        close(ready[0]);
+        cbm_zova_index_hold_t hold;
+        if (cbm_mcp_index_hold_acquire(root, 0, &hold, NULL, 0) != CBM_ZOVA_COORD_OK) _exit(10);
+        (void)write(ready[1], "R", 1);
+        for (;;) pause();
+    }
+    close(ready[1]);
+    char byte = 0;
+    ssize_t got = read(ready[0], &byte, 1);
+    close(ready[0]);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"fast\",\"name\":\"lease\"}",
+             root);
+    char *refused = cbm_mcp_handle_tool(srv, "index_repository", args);
+    bool refused_busy = refused &&
+                        response_contains_json_fragment(refused, "\"status\":\"busy\"") &&
+                        response_contains_json_fragment(refused, "\"reason\":\"workspace_busy\"");
+    bool untouched = access(user_db, F_OK) != 0;
+    kill(holder, SIGKILL);
+    waitpid(holder, NULL, 0);
+
+    char *indexed = cbm_mcp_handle_tool(srv, "index_repository", args);
+    bool indexed_ok =
+        indexed && response_contains_json_fragment(indexed, "\"status\":\"indexed\"");
+
+    cbm_zova_index_hold_t hold;
+    char workspace_id[64] = {0};
+    cbm_zova_coord_status_t held =
+        cbm_mcp_index_hold_acquire(root, 0, &hold, workspace_id, sizeof(workspace_id));
+    char *in_process = cbm_mcp_handle_tool(srv, "index_repository", args);
+    bool in_process_busy =
+        in_process &&
+        response_contains_json_fragment(in_process, "\"reason\":\"workspace_busy\"");
+    char *delete_refused = cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"lease\"}");
+    bool delete_busy =
+        delete_refused &&
+        response_contains_json_fragment(delete_refused, "\"status\":\"delete_failed\"") &&
+        response_contains_json_fragment(delete_refused, "\"error\":\"workspace_busy\"");
+    cbm_zova_index_hold_release(&hold);
+    char *deleted = cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"lease\"}");
+    bool deleted_ok = deleted && response_contains_json_fragment(deleted, "\"status\":\"deleted\"");
+
+    free(refused);
+    free(indexed);
+    free(in_process);
+    free(delete_refused);
+    free(deleted);
+    cbm_mcp_server_free(srv);
+    const char *suffixes[] = {"", "-wal", "-shm", ".writer.lock", ".prepare.lock"};
+    char file[768];
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        snprintf(file, sizeof(file), "%s%s", user_db, suffixes[i]);
+        cbm_unlink(file);
+    }
+    snprintf(file, sizeof(file), "%s.ws-%s.lock", user_db, workspace_id);
+    cbm_unlink(file);
+    cbm_unlink(source_path);
+    cbm_rmdir(root);
+    cbm_rmdir(cache);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+    if (saved_wait_copy) cbm_setenv("CBM_INDEX_LEASE_TIMEOUT_S", saved_wait_copy, 1);
+    else cbm_unsetenv("CBM_INDEX_LEASE_TIMEOUT_S");
+    free(saved_wait_copy);
+
+    ASSERT_EQ(got, 1);
+    ASSERT_TRUE(refused_busy);
+    ASSERT_TRUE(untouched);
+    ASSERT_TRUE(indexed_ok);
+    ASSERT_EQ(held, CBM_ZOVA_COORD_OK);
+    ASSERT_TRUE(in_process_busy);
+    ASSERT_TRUE(delete_busy);
+    ASSERT_TRUE(deleted_ok);
     PASS();
 #endif
 }
@@ -4815,6 +4929,7 @@ SUITE(mcp) {
     RUN_TEST(tool_search_graph_rejects_empty_projects);
     RUN_TEST(tool_search_graph_searches_two_zova_projects_globally);
     RUN_TEST(tool_index_repository_reports_zova_committed_counts);
+    RUN_TEST(tool_index_repository_refuses_while_workspace_lease_is_held);
     RUN_TEST(tool_search_graph_includes_node_properties);
     RUN_TEST(tool_search_graph_query_honors_file_pattern_issue552);
     RUN_TEST(tool_query_graph_basic);

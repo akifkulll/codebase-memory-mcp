@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "zova/cbm_zova_coordination.h"
+
 /* ── Forward declarations ─────────────────────────────────────── */
 
 typedef struct cbm_store cbm_store_t; /* from store/store.h */
@@ -140,6 +142,19 @@ int cbm_mcp_check_index_root(const char *repo_path, char *canonical_out, size_t 
  * is not a supervisor host). This is the shared entry the watcher re-index
  * (main.c) and the session auto-index (mcp.c) route through. */
 char *cbm_mcp_index_run_supervised_path(const char *root_path);
+
+/* Index hold (ADR-0001) for root_path, canonicalized the way index_repository
+ * canonicalizes repo_path: the preparation barrier shared, then the workspace
+ * lease. wait_ms 0 tries once (background work); release with
+ * cbm_zova_index_hold_release. */
+cbm_zova_coord_status_t cbm_mcp_index_hold_acquire(const char *root_path, int64_t wait_ms,
+                                                   cbm_zova_index_hold_t *out,
+                                                   char *out_workspace_id,
+                                                   size_t out_workspace_id_size);
+/* Machine-readable reason for a failed hold: workspace_busy,
+ * database_replacement_in_progress, cancelled or coordination_unavailable. */
+const char *cbm_mcp_index_hold_refusal_reason(cbm_zova_coord_status_t status,
+                                              const cbm_zova_index_hold_t *hold);
 uint64_t cbm_index_job_queue_waiter_count(const cbm_mcp_server_t *srv);
 void cbm_index_job_queue_enter(cbm_mcp_server_t *srv);
 void cbm_index_job_queue_leave(cbm_mcp_server_t *srv);

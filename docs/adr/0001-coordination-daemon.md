@@ -1,7 +1,8 @@
 # ADR-0001: Coordination daemon for one shared Zova database
 
-- **Status:** Proposed (pending maintainer approval)
-- **Date:** 2026-09-04
+- **Status:** Accepted 2026-10-14, without a daemon. Implemented; see
+  [Implementation](#implementation-2026-10-14) and [Amendments](#amendments-at-acceptance-2026-10-14).
+- **Date:** 2026-09-04 (proposed), 2026-10-14 (accepted)
 - **Relates to:** [#16](https://github.com/0ctacity/codebase-memory-mcp/issues/16), parent [#4](https://github.com/0ctacity/codebase-memory-mcp/issues/4)
 - **Baseline:** upstream `DeusData/codebase-memory-mcp` `v0.10.8` (`46ae198f`); fork `main` (`68ec1b9`)
 - **Scope:** architecture decision for #16. No daemon code merges under #16; the per-workspace
@@ -34,6 +35,34 @@ gate for every actual Zova mutation and every whole-file operation.**
 6. **Daemon process — rejected** for now, per the analysis below. Revisit only if the gates in
    [Revisit triggers](#revisit-triggers) are met.
 
+## Amendments at acceptance (2026-10-14)
+
+The analysis below was written against fork `main` `68ec1b9`. Four things it states have since
+changed, and one child task was implemented differently. Where the text below disagrees with
+this list, this list wins.
+
+1. **Publish is not uniformly last-writer-wins.** Incremental (delta) publication now checks the
+   expected generation and refuses a stale delta. Full publication has no such check and is
+   still last-writer-wins, so the lease still matters for full runs; for incremental runs it
+   saves the wasted work rather than preventing a stale publish.
+2. **The UI HTTP server was removed.** Everything about UI ownership, `127.0.0.1:9749`,
+   `ui.unavailable` and `http_server.c` is obsolete. Deferred item 7 is now watcher ownership only.
+3. **The pure-SQLite compatibility route was removed.** The parity invariant ("both routes must
+   refuse identically") no longer applies; there is one route.
+4. **Line references have drifted.** Treat them as pointers into `68ec1b9`. Current locations are
+   in [Implementation](#implementation-2026-10-14).
+5. **Child task 3 deviates: the in-process pipeline lock stays, narrowed.** `g_pipeline_busy`
+   cannot be retired yet: pipelines share process-global state (`g_pkgmap` in `pipeline.c`,
+   "one active pipeline at a time", and the lazy pattern compile in `pass_envscan.c`), so two
+   in-process `cbm_pipeline_run` calls are unsafe. The lock is now an in-process guard held only
+   around an in-process run. It is no longer held around a supervised worker run (the watcher
+   path) or by `delete_project`; the workspace lease replaced it there. Supervised runs, the
+   default, are separate processes, so different workspaces do index concurrently across
+   processes. Retiring the lock fully needs `g_pkgmap` made per-pipeline and the envscan init
+   made once-only — a structural change, not done here.
+6. **No daemon, confirmed.** Coordination is file locks next to `cbm.zova` only. Deferred item 7,
+   if it is ever needed, gets a claim record (a file lock), not a supervisor process.
+
 ### Why the daemon itself is rejected
 
 **Upstream's daemon does not own database connections.** `frontend.h:1-3` calls the client a
@@ -48,7 +77,8 @@ the daemon is often assumed to solve.
 The defect this fixes is real and specific: today two processes indexing the same workspace both
 run to completion and publish serially, and **last writer wins with the loser's entire run
 wasted** — minutes of CPU and multi-GB RSS under the supervised-worker model. There is no
-stale-generation check in the publish path. The lease moves that failure to the *start* of the
+stale-generation check in the full publish path (incremental publish has one; see Amendment 1).
+The lease moves that failure to the *start* of the
 run, where it costs nothing.
 
 Note what this preserves: the pipeline already runs **outside** the writer gate — the gate is
@@ -341,9 +371,10 @@ generation at open time.
 
 ### Contract position: watcher and UI ownership
 
-**Interim contract (this decision).** There is no ownership claim and no transfer.
+**Interim contract (this decision).** There is no ownership claim and no transfer. (The UI
+bullet is obsolete: the UI was removed, Amendment 2.)
 
-- **UI:** the first process to bind owns `127.0.0.1:9749` for its lifetime. Any later session
+- **UI (removed):** the first process to bind owns `127.0.0.1:9749` for its lifetime. Any later session
   logs `ui.unavailable` / `in_use` and continues without a UI (`http_server.c:1784-1793`). This
   is the existing behaviour, now stated as the contract rather than an accident.
 - **Watcher:** one watcher per MCP server process, uncoordinated across processes. Two sessions
@@ -361,8 +392,8 @@ child work below.
 ### Invariants to verify
 
 - Atomic publication, generation, and workspace-health semantics are unchanged.
-- **Parity:** the Zova and pure-SQLite compatibility routes must refuse identically on lease
-  contention.
+- ~~**Parity:** the Zova and pure-SQLite compatibility routes must refuse identically on lease
+  contention.~~ Obsolete: the SQLite route was removed (Amendment 3).
 - **Zero unexpected fallbacks:** if the lock file cannot be created (read-only cache,
   permissions), fail with an explicit error — never proceed uncoordinated.
 - Incremental publication and `delete-workspace` take the same lease.
@@ -467,7 +498,7 @@ Absent these, the daemon's cost is not justified by any measured problem.
 
 ---
 
-## Proposed child work (none starts before this ADR is approved)
+## Child work (approved 2026-10-14; 1, 2 and 4 implemented, 3 narrowed per Amendment 5)
 
 ### In scope now
 
@@ -511,8 +542,8 @@ Absent these, the daemon's cost is not justified by any measured problem.
   `workspace_id` and reinforces workspace isolation.
 - Atomic publication, workspace health, backup, recovery, fault behaviour — **preserved**; the
   writer gate and the publish path are unchanged.
-- Exact parity with the pure-SQLite compatibility route — **must be verified**: both routes must
-  refuse identically on lease contention.
+- ~~Exact parity with the pure-SQLite compatibility route~~ — obsolete; the route was removed
+  (Amendment 3).
 - Zero unexpected fallbacks — **must hold**: if a lock file cannot be created, fail with an
   explicit error, never proceed uncoordinated.
 - Cross-repository search with exact project selectors — **unaffected**; the lease changes who
@@ -534,3 +565,54 @@ Absent these, the daemon's cost is not justified by any measured problem.
   `src/main.c:670-820`, `src/watcher/watcher.c:565-651`, `src/ui/http_server.c:1767-1805`,
   `tests/test_zova.c:127-200`, `tests/test_zova_operations.c:1131-1200` and `:3011`,
   `README.md:22`, `:215`, `:255`, `:472-482`.
+
+## Implementation (2026-10-14)
+
+No daemon, no IPC, no new process. Three lock files sit next to `cbm.zova` in the cache
+directory, all `fcntl` record locks on POSIX and `LockFileEx` on Windows, all released by the OS
+when the holder dies, created on demand and never removed:
+
+| Lock file | Mode | Held by |
+|---|---|---|
+| `cbm.zova.prepare.lock` (barrier) | shared | every index run, for the whole run; `workspace_recover` |
+| | exclusive | `restore` (and `import`, which restores), `repack` |
+| `cbm.zova.ws-<workspace_id>.lock` (lease) | exclusive | every index run of that workspace; `delete-workspace`; `workspace_recover` |
+| `cbm.zova.writer.lock` (writer gate) | exclusive | every Zova mutation, unchanged |
+
+Order is always barrier, then lease, then writer gate.
+
+- **Primitive:** `src/foundation/file_lock.{h,c}`. The writer gate (`cbm_zova_writer_gate.c`) is
+  rebuilt on it with its API unchanged.
+- **Lease and barrier:** `src/zova/cbm_zova_coordination.{h,c}`. A POSIX record lock belongs to
+  the process, so threads never conflict on it and closing a second descriptor would drop it.
+  The module therefore holds each lock file at most once per process and keeps in-process
+  accounting (exclusive or a shared count) on top. Waits poll every 20 ms against a deadline
+  and a cancel flag; a raw blocking wait is never used.
+- **Entry points:**
+
+| Path | Wait | On contention |
+|---|---|---|
+| `index_repository` (MCP and CLI, full and incremental) | `CBM_INDEX_LEASE_TIMEOUT_S`, default 300 s | `{"status":"busy","reason":"workspace_busy"}` or `"database_replacement_in_progress"`, with `workspace_id` and a hint; `"cancelled"` on shutdown; `"status":"error","reason":"coordination_unavailable"` if the lock file cannot be used |
+| Session auto-index | none (one try) | log `autoindex.skip`, still register the watcher |
+| Watcher re-index | none (one try) | log `watcher.skip`, retry next poll |
+| `delete_project` (MCP) | retries every 50 ms up to the same budget | `delete_failed` with `error: workspace_busy` |
+| `cbm_zova_workspace_delete`, `cbm_zova_workspace_recover`, `cbm_zova_database_repack` | none | `CBM_ZOVA_OPERATION_BUSY`, reason `workspace_busy`, `database_replacement_in_progress` or `indexing_in_progress` |
+| `cbm_zova_database_restore` (and `import`) | same budget as `index_repository` | `CBM_ZOVA_OPERATION_BUSY`, reason `indexing_in_progress` |
+
+- **Supervised worker:** the parent that received the request holds the barrier and lease for
+  the worker's whole life. The worker (`cbm_index_worker_active()`) never acquires them.
+- **Identity:** the lease key is `cbm_zova_workspace_id_for_root` of the root canonicalized the
+  same way `index_repository` canonicalizes `repo_path`, so it names the workspace the run
+  publishes.
+
+### Known limits
+
+- An exclusive barrier request polls; a steady stream of overlapping index runs can keep it
+  waiting until its budget runs out. There is no writer preference across processes.
+- `workspace_import` takes the writer gate but not the lease: its workspace id is only known
+  part way through the import.
+- The watcher's prune of a vanished root (`delete_cached_project`) does not wait: if an index
+  run of that workspace holds the lease at that moment, the delete is skipped and logged
+  (`watcher.zova_delete_failed`, `workspace_busy`) and is not retried; `delete_project` removes it.
+- The per-server FIFO job queue for supervised `index_repository` calls is unchanged, so one
+  server still runs its explicit index requests one at a time.

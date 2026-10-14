@@ -6,6 +6,7 @@
 #include "foundation/sha256.h"
 #include "mcp/mcp.h"
 #include "zova/cbm_zova.h"
+#include "zova/cbm_zova_coordination.h"
 #include "zova/cbm_zova_operations.h"
 #include "zova/cbm_zova_repository.h"
 #include "zova/cbm_zova_writer_gate.h"
@@ -901,6 +902,69 @@ TEST(zova_operations_workspace_delete_requires_exact_confirmation_without_writes
     ASSERT_EQ(operations_file_digest(path, after), 0);
     ASSERT_EQ(memcmp(before, after, sizeof(before)), 0);
     cbm_unlink(path);
+    PASS();
+}
+
+/* ADR-0001: a workspace mutation refuses while that workspace's index lease is
+ * held, and a database replacement refuses while an index run holds the
+ * preparation barrier. Neither touches the file when it refuses. */
+TEST(zova_operations_refuse_while_index_coordination_is_held) {
+    const char *saved_wait = getenv("CBM_INDEX_LEASE_TIMEOUT_S");
+    char *saved_wait_copy = saved_wait ? strdup(saved_wait) : NULL;
+    cbm_setenv("CBM_INDEX_LEASE_TIMEOUT_S", "0", 1);
+    char path[OPERATIONS_PATH_MAX];
+    operations_path(path, sizeof(path), "coordination-refusal");
+    cbm_zova_workspace_generation_result_t rich = {0};
+    ASSERT_EQ(operations_publish_rich_fixture(path, &rich), 0);
+    uint8_t before[CBM_SHA256_DIGEST_LEN], after[CBM_SHA256_DIGEST_LEN];
+    ASSERT_EQ(operations_file_digest(path, before), 0);
+
+    cbm_zova_coord_hold_t barrier = {0}, lease = {0};
+    ASSERT_EQ(cbm_zova_prepare_barrier_acquire(path, false, 0, &barrier), CBM_ZOVA_COORD_OK);
+    ASSERT_EQ(cbm_zova_workspace_lease_acquire(path, rich.workspace_id, 0, &lease),
+              CBM_ZOVA_COORD_OK);
+
+    cbm_zova_operation_report_t report = {0};
+    ASSERT_EQ(cbm_zova_workspace_delete(path, rich.workspace_id, rich.workspace_id, &report),
+              CBM_ZOVA_OPERATION_BUSY);
+    ASSERT_STR_EQ(report.operation, "delete_workspace");
+    ASSERT_STR_EQ(report.reason, "workspace_busy");
+    ASSERT_EQ(cbm_zova_workspace_recover(path, rich.workspace_id, "/tmp/unused", &report),
+              CBM_ZOVA_OPERATION_BUSY);
+    ASSERT_STR_EQ(report.reason, "workspace_busy");
+    ASSERT_EQ(cbm_zova_database_restore(path, "/tmp/operations-coordination-backup", true,
+                                        &report),
+              CBM_ZOVA_OPERATION_BUSY);
+    ASSERT_STR_EQ(report.operation, "restore");
+    ASSERT_STR_EQ(report.reason, "indexing_in_progress");
+    cbm_zova_repack_request_t repack = {.live_path = path};
+    cbm_zova_repack_report_t repack_report;
+    ASSERT_EQ(cbm_zova_database_repack(&repack, &repack_report), CBM_ZOVA_OPERATION_BUSY);
+    ASSERT_EQ(repack_report.code, CBM_ZOVA_OPERATION_BUSY);
+    ASSERT_EQ(operations_file_digest(path, after), 0);
+    ASSERT_EQ(memcmp(before, after, sizeof(before)), 0);
+
+    /* Lease released, barrier still shared: delete proceeds, restore still waits. */
+    cbm_zova_coord_release(&lease);
+    ASSERT_EQ(cbm_zova_database_restore(path, "/tmp/operations-coordination-backup", true,
+                                        &report),
+              CBM_ZOVA_OPERATION_BUSY);
+    ASSERT_EQ(cbm_zova_workspace_delete(path, rich.workspace_id, rich.workspace_id, &report),
+              CBM_ZOVA_OPERATION_OK);
+    cbm_zova_coord_release(&barrier);
+    ASSERT_EQ(cbm_zova_database_restore(path, "/tmp/operations-coordination-backup", true,
+                                        &report),
+              CBM_ZOVA_OPERATION_INVALID);
+
+    char lock_path[OPERATIONS_PATH_MAX + 128];
+    snprintf(lock_path, sizeof(lock_path), "%s.prepare.lock", path);
+    cbm_unlink(lock_path);
+    snprintf(lock_path, sizeof(lock_path), "%s.ws-%s.lock", path, rich.workspace_id);
+    cbm_unlink(lock_path);
+    cbm_unlink(path);
+    if (saved_wait_copy) cbm_setenv("CBM_INDEX_LEASE_TIMEOUT_S", saved_wait_copy, 1);
+    else cbm_unsetenv("CBM_INDEX_LEASE_TIMEOUT_S");
+    free(saved_wait_copy);
     PASS();
 }
 
@@ -3224,6 +3288,7 @@ SUITE(zova_operations) {
     RUN_TEST(zova_operations_delete_primitive_removes_health_before_registry);
     RUN_TEST(zova_operations_workspace_delete_requires_exact_confirmation_without_writes);
     RUN_TEST(zova_operations_workspace_delete_is_isolated_reported_and_idempotent);
+    RUN_TEST(zova_operations_refuse_while_index_coordination_is_held);
     RUN_TEST(zova_operations_migrate_format_upgrades_format9_database);
     RUN_TEST(zova_operations_database_compact_noops_below_policy_threshold);
     RUN_TEST(zova_operations_database_compact_reclaims_verified_database);

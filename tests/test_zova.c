@@ -12,6 +12,8 @@
 #include "zova/cbm_zova_repository.h"
 #include "cypher/cypher.h"
 #include "zova/cbm_zova_writer_gate.h"
+#include "zova/cbm_zova_coordination.h"
+#include "foundation/file_lock.h"
 #include "graph_buffer/graph_buffer.h"
 #include "../internal/cbm/dump_types.h"
 
@@ -196,6 +198,240 @@ TEST(zova_writer_gate_serializes_processes_and_releases_after_crash) {
     char lock_path[TZ_PATH_MAX + 32];
     snprintf(lock_path, sizeof(lock_path), "%s.writer.lock", path);
     cbm_unlink(lock_path);
+    PASS();
+}
+#endif
+
+#ifndef _WIN32
+/* Child holds `path` in `mode` until the parent writes to *release_fd (or kills
+ * it). Returns the child pid, or -1 when the child could not take the lock. */
+static pid_t tz_lock_holder(const char *path, cbm_file_lock_mode_t mode, int *release_fd) {
+    int ready[2], release[2];
+    if (pipe(ready) != 0 || pipe(release) != 0) return -1;
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        close(ready[0]); close(release[1]);
+        cbm_file_lock_t lock;
+        if (cbm_file_lock_acquire(path, mode, false, &lock) != 0) {
+            (void)write(ready[1], "F", 1);
+            _exit(10);
+        }
+        (void)write(ready[1], "R", 1);
+        char byte;
+        (void)read(release[0], &byte, 1);
+        cbm_file_lock_release(&lock);
+        _exit(0);
+    }
+    close(ready[1]); close(release[0]);
+    char byte = 0;
+    ssize_t n = read(ready[0], &byte, 1);
+    close(ready[0]);
+    *release_fd = release[1];
+    if (n != 1 || byte != 'R') {
+        close(release[1]);
+        (void)waitpid(pid, NULL, 0);
+        return -1;
+    }
+    return pid;
+}
+
+static bool tz_lock_holder_finish(pid_t pid, int release_fd) {
+    (void)write(release_fd, "X", 1);
+    close(release_fd);
+    int status = 0;
+    return waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+TEST(file_lock_modes_conflict_across_processes_and_release_on_crash) {
+    char path[TZ_PATH_MAX];
+    snprintf(path, sizeof(path), "%s/cbm-file-lock-%d.lock", cbm_tmpdir(), getpid());
+    cbm_file_lock_t lock;
+    int release_fd = -1;
+
+    /* shared + shared is allowed; shared blocks exclusive */
+    pid_t holder = tz_lock_holder(path, CBM_FILE_LOCK_SHARED, &release_fd);
+    ASSERT_TRUE(holder > 0);
+    ASSERT_EQ(cbm_file_lock_acquire(path, CBM_FILE_LOCK_SHARED, false, &lock), 0);
+    cbm_file_lock_release(&lock);
+    ASSERT_EQ(lock.handle, -1);
+    ASSERT_EQ(cbm_file_lock_acquire(path, CBM_FILE_LOCK_EXCLUSIVE, false, &lock),
+              CBM_FILE_LOCK_BUSY);
+    ASSERT_EQ(lock.handle, -1);
+    ASSERT_TRUE(tz_lock_holder_finish(holder, release_fd));
+
+    /* exclusive blocks shared, and the blocking acquire returns once released */
+    holder = tz_lock_holder(path, CBM_FILE_LOCK_EXCLUSIVE, &release_fd);
+    ASSERT_TRUE(holder > 0);
+    ASSERT_EQ(cbm_file_lock_acquire(path, CBM_FILE_LOCK_SHARED, false, &lock),
+              CBM_FILE_LOCK_BUSY);
+    ASSERT_TRUE(tz_lock_holder_finish(holder, release_fd));
+    ASSERT_EQ(cbm_file_lock_acquire(path, CBM_FILE_LOCK_EXCLUSIVE, true, &lock), 0);
+    cbm_file_lock_release(&lock);
+    cbm_file_lock_release(&lock); /* idempotent */
+
+    /* a killed holder never leaves the lock stuck */
+    holder = tz_lock_holder(path, CBM_FILE_LOCK_EXCLUSIVE, &release_fd);
+    ASSERT_TRUE(holder > 0);
+    ASSERT_EQ(kill(holder, SIGKILL), 0);
+    ASSERT_EQ(waitpid(holder, NULL, 0), holder);
+    close(release_fd);
+    ASSERT_EQ(cbm_file_lock_acquire(path, CBM_FILE_LOCK_EXCLUSIVE, false, &lock), 0);
+    cbm_file_lock_release(&lock);
+
+    ASSERT_EQ(cbm_file_lock_acquire("", CBM_FILE_LOCK_SHARED, false, &lock), -1);
+    cbm_unlink(path);
+    PASS();
+}
+
+static int64_t tz_now_ms(void) {
+    struct timespec ts;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+TEST(zova_coordination_lease_and_barrier_in_process) {
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    char base[TZ_PATH_MAX], cache[TZ_PATH_MAX + 32], zova_path[TZ_PATH_MAX + 64];
+    snprintf(base, sizeof(base), "%s/cbm-coord-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(base));
+    /* The cache directory does not exist yet: the first hold creates it. */
+    snprintf(cache, sizeof(cache), "%s/cache/nested", base);
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    ASSERT_EQ(cbm_zova_user_database_path(zova_path, sizeof(zova_path)), 0);
+
+    cbm_zova_index_hold_t a, again, b;
+    char workspace_id[64] = {0};
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-root-a", 0, &a, workspace_id,
+                                          sizeof(workspace_id)),
+              CBM_ZOVA_COORD_OK);
+    ASSERT_TRUE(strncmp(workspace_id, "w1_", 3) == 0);
+    ASSERT_TRUE(a.lease.held && a.barrier.held);
+    struct stat st;
+    ASSERT_EQ(stat(a.lease.path, &st), 0);
+    ASSERT_EQ(stat(a.barrier.path, &st), 0);
+
+    /* Same workspace from the same process: the lease excludes it (threads of
+     * one process share the process's file lock, so this is the in-process
+     * accounting at work). The failed attempt leaves nothing extra held. */
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-root-a", 0, &again, NULL, 0),
+              CBM_ZOVA_COORD_BUSY);
+    ASSERT_FALSE(again.barrier_busy);
+    ASSERT_FALSE(again.lease.held || again.barrier.held);
+    cbm_zova_coord_hold_t lease;
+    ASSERT_EQ(cbm_zova_workspace_lease_acquire(zova_path, workspace_id, 0, &lease),
+              CBM_ZOVA_COORD_BUSY);
+
+    /* Bounded wait gives up at the deadline. */
+    int64_t started = tz_now_ms();
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-root-a", 150, &again, NULL, 0),
+              CBM_ZOVA_COORD_BUSY);
+    ASSERT_TRUE(tz_now_ms() - started >= 140);
+
+    /* Another workspace runs alongside: both share the barrier. */
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-root-b", 0, &b, NULL, 0),
+              CBM_ZOVA_COORD_OK);
+    cbm_zova_coord_hold_t barrier;
+    ASSERT_EQ(cbm_zova_prepare_barrier_acquire(zova_path, true, 0, &barrier),
+              CBM_ZOVA_COORD_BUSY);
+    cbm_zova_index_hold_release(&a);
+    cbm_zova_index_hold_release(&a); /* idempotent */
+    ASSERT_EQ(cbm_zova_prepare_barrier_acquire(zova_path, true, 0, &barrier),
+              CBM_ZOVA_COORD_BUSY); /* b still holds it shared */
+    cbm_zova_index_hold_release(&b);
+
+    /* A database replacement holds the barrier exclusive: index runs refuse. */
+    ASSERT_EQ(cbm_zova_prepare_barrier_acquire(zova_path, true, 0, &barrier), CBM_ZOVA_COORD_OK);
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-root-a", 0, &again, NULL, 0),
+              CBM_ZOVA_COORD_BUSY);
+    ASSERT_TRUE(again.barrier_busy);
+    cbm_zova_coord_release(&barrier);
+
+    /* Shutdown cancels waits. */
+    cbm_zova_coord_set_cancelled(true);
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-root-a", 1000, &again, NULL, 0),
+              CBM_ZOVA_COORD_CANCELLED);
+    cbm_zova_coord_set_cancelled(false);
+
+    ASSERT_EQ(cbm_zova_workspace_lease_acquire(zova_path, "not a workspace id", 0, &lease),
+              CBM_ZOVA_COORD_ERROR);
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-root-a", 0, &a, NULL, 0), CBM_ZOVA_COORD_OK);
+    cbm_unlink(a.lease.path);
+    cbm_unlink(a.barrier.path);
+    cbm_zova_index_hold_release(&a);
+    char lease_b[TZ_PATH_MAX + 128], wid_b[64];
+    ASSERT_EQ(cbm_zova_workspace_id_for_root("/tmp/coord-root-b", wid_b, sizeof(wid_b)), 0);
+    snprintf(lease_b, sizeof(lease_b), "%s.ws-%s.lock", zova_path, wid_b);
+    cbm_unlink(lease_b);
+    if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+    else cbm_unsetenv("CBM_CACHE_DIR");
+    free(saved_cache_copy);
+    char dir[TZ_PATH_MAX + 32];
+    rmdir(cache);
+    snprintf(dir, sizeof(dir), "%s/cache", base);
+    rmdir(dir);
+    rmdir(base);
+    PASS();
+}
+
+TEST(zova_coordination_lease_excludes_other_processes_and_survives_crash) {
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    char cache[TZ_PATH_MAX];
+    snprintf(cache, sizeof(cache), "%s/cbm-coord-proc-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    int ready[2];
+    ASSERT_EQ(pipe(ready), 0);
+    pid_t holder = fork();
+    ASSERT_TRUE(holder >= 0);
+    if (holder == 0) {
+        close(ready[0]);
+        cbm_zova_index_hold_t hold;
+        if (cbm_zova_index_hold_acquire("/tmp/coord-proc-root", 0, &hold, NULL, 0) !=
+            CBM_ZOVA_COORD_OK)
+            _exit(10);
+        (void)write(ready[1], "R", 1);
+        for (;;) pause();
+    }
+    close(ready[1]);
+    char byte = 0;
+    ASSERT_EQ(read(ready[0], &byte, 1), 1);
+    close(ready[0]);
+
+    cbm_zova_index_hold_t hold, other;
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-proc-root", 0, &hold, NULL, 0),
+              CBM_ZOVA_COORD_BUSY);
+    ASSERT_FALSE(hold.barrier_busy);
+    /* Another workspace is unaffected; a replacement must wait for the holder. */
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-proc-other", 0, &other, NULL, 0),
+              CBM_ZOVA_COORD_OK);
+    cbm_zova_index_hold_release(&other);
+    char zova_path[TZ_PATH_MAX + 32];
+    ASSERT_EQ(cbm_zova_user_database_path(zova_path, sizeof(zova_path)), 0);
+    cbm_zova_coord_hold_t barrier;
+    ASSERT_EQ(cbm_zova_prepare_barrier_acquire(zova_path, true, 0, &barrier),
+              CBM_ZOVA_COORD_BUSY);
+
+    ASSERT_EQ(kill(holder, SIGKILL), 0);
+    ASSERT_EQ(waitpid(holder, NULL, 0), holder);
+    ASSERT_EQ(cbm_zova_index_hold_acquire("/tmp/coord-proc-root", 0, &hold, NULL, 0),
+              CBM_ZOVA_COORD_OK);
+    cbm_unlink(hold.lease.path);
+    cbm_zova_index_hold_release(&hold);
+    ASSERT_EQ(cbm_zova_prepare_barrier_acquire(zova_path, true, 0, &barrier), CBM_ZOVA_COORD_OK);
+    cbm_unlink(barrier.path);
+    cbm_zova_coord_release(&barrier);
+    char wid[64], lease_other[TZ_PATH_MAX + 128];
+    ASSERT_EQ(cbm_zova_workspace_id_for_root("/tmp/coord-proc-other", wid, sizeof(wid)), 0);
+    snprintf(lease_other, sizeof(lease_other), "%s.ws-%s.lock", zova_path, wid);
+    cbm_unlink(lease_other);
+    if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+    else cbm_unsetenv("CBM_CACHE_DIR");
+    free(saved_cache_copy);
+    rmdir(cache);
     PASS();
 }
 #endif
@@ -3923,6 +4159,9 @@ SUITE(zova) {
     RUN_TEST(zova_edge_payload_codec_is_compact_deterministic_and_strict);
 #ifndef _WIN32
     RUN_TEST(zova_writer_gate_serializes_processes_and_releases_after_crash);
+    RUN_TEST(file_lock_modes_conflict_across_processes_and_release_on_crash);
+    RUN_TEST(zova_coordination_lease_and_barrier_in_process);
+    RUN_TEST(zova_coordination_lease_excludes_other_processes_and_survives_crash);
 #endif
     RUN_TEST(zova_route_uses_user_cache_database);
     RUN_TEST(zova_workspace_scoped_names_and_node_ids_are_deterministic);

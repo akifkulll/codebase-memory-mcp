@@ -6,6 +6,7 @@
 #include "foundation/log.h"
 #include "pipeline/pipeline.h"
 #include "zova/cbm_zova_repository.h"
+#include "zova/cbm_zova_coordination.h"
 #include "zova/cbm_zova_route.h"
 #include "zova/cbm_zova_writer_gate.h"
 #include "zova/cbm_zova_v5_snapshot.h"
@@ -954,7 +955,7 @@ static void operations_copy_status_metrics(cbm_zova_operation_report_t *out,
     out->freelist_count = status->freelist_count;
 }
 
-cbm_zova_operation_code_t cbm_zova_workspace_delete(
+static cbm_zova_operation_code_t cbm_zova_workspace_delete_body(
     const char *path, const char *workspace_id, const char *confirmation,
     cbm_zova_operation_report_t *out) {
     operations_report(out, CBM_ZOVA_OPERATION_INVALID, "delete_workspace", "invalid_argument");
@@ -1820,7 +1821,7 @@ cbm_zova_operation_code_t cbm_zova_database_health(
 #endif
 }
 
-cbm_zova_operation_code_t cbm_zova_workspace_recover(
+static cbm_zova_operation_code_t cbm_zova_workspace_recover_body(
     const char *path, const char *workspace_id, const char *repo_path,
     cbm_zova_operation_report_t *out) {
     operations_report(out, CBM_ZOVA_OPERATION_INVALID, "recover_workspace",
@@ -1957,7 +1958,7 @@ cbm_zova_operation_code_t cbm_zova_database_backup(
 #endif
 }
 
-cbm_zova_operation_code_t cbm_zova_database_restore(
+static cbm_zova_operation_code_t cbm_zova_database_restore_body(
     const char *live_path, const char *backup_path, bool confirm_replace,
     cbm_zova_operation_report_t *out) {
     operations_report(out, CBM_ZOVA_OPERATION_INVALID, "restore", "invalid_argument");
@@ -2446,7 +2447,7 @@ done:
 #endif
 }
 
-cbm_zova_operation_code_t cbm_zova_database_repack(
+static cbm_zova_operation_code_t cbm_zova_database_repack_body(
     const cbm_zova_repack_request_t *request, cbm_zova_repack_report_t *out) {
     if (out) memset(out, 0, sizeof(*out));
     if (!request || !request->live_path || !request->live_path[0] || !out) {
@@ -2614,4 +2615,102 @@ done:
     cbm_zova_writer_guard_release(&guard);
     return out->code;
 #endif
+}
+
+/* ── Coordination (ADR-0001) ─────────────────────────────────────── */
+
+/* Map a refused lease or barrier acquisition onto the operation report. */
+static cbm_zova_operation_code_t operations_coord_refusal(cbm_zova_operation_report_t *out,
+                                                          const char *operation,
+                                                          cbm_zova_coord_status_t status,
+                                                          const char *busy_reason) {
+    if (status == CBM_ZOVA_COORD_ERROR) {
+        operations_report(out, CBM_ZOVA_OPERATION_VERIFY_FAILED, operation,
+                          "coordination_unavailable");
+        return CBM_ZOVA_OPERATION_VERIFY_FAILED;
+    }
+    operations_report(out, CBM_ZOVA_OPERATION_BUSY, operation,
+                      status == CBM_ZOVA_COORD_CANCELLED ? "cancelled" : busy_reason);
+    return CBM_ZOVA_OPERATION_BUSY;
+}
+
+/* Deleting a workspace mutates it, so it takes the workspace lease. It does not
+ * wait: callers that should wait (MCP delete_project) retry on BUSY. */
+cbm_zova_operation_code_t cbm_zova_workspace_delete(
+    const char *path, const char *workspace_id, const char *confirmation,
+    cbm_zova_operation_report_t *out) {
+    if (!CBM_WITH_ZOVA || !path || !path[0] || cbm_zova_workspace_id_validate(workspace_id) != 0)
+        return cbm_zova_workspace_delete_body(path, workspace_id, confirmation, out);
+    cbm_zova_coord_hold_t lease = {0};
+    cbm_zova_coord_status_t status = cbm_zova_workspace_lease_acquire(path, workspace_id, 0, &lease);
+    if (status != CBM_ZOVA_COORD_OK)
+        return operations_coord_refusal(out, "delete_workspace", status, "workspace_busy");
+    cbm_zova_operation_code_t code =
+        cbm_zova_workspace_delete_body(path, workspace_id, confirmation, out);
+    cbm_zova_coord_release(&lease);
+    return code;
+}
+
+/* Recovery rebuilds the workspace through a pipeline, so it holds what every
+ * index run holds: the barrier shared, then the workspace lease. */
+cbm_zova_operation_code_t cbm_zova_workspace_recover(
+    const char *path, const char *workspace_id, const char *repo_path,
+    cbm_zova_operation_report_t *out) {
+    if (!CBM_WITH_ZOVA || !path || !path[0] || cbm_zova_workspace_id_validate(workspace_id) != 0)
+        return cbm_zova_workspace_recover_body(path, workspace_id, repo_path, out);
+    cbm_zova_coord_hold_t barrier = {0}, lease = {0};
+    cbm_zova_coord_status_t status = cbm_zova_prepare_barrier_acquire(path, false, 0, &barrier);
+    if (status != CBM_ZOVA_COORD_OK)
+        return operations_coord_refusal(out, "recover_workspace", status,
+                                        "database_replacement_in_progress");
+    status = cbm_zova_workspace_lease_acquire(path, workspace_id, 0, &lease);
+    if (status != CBM_ZOVA_COORD_OK) {
+        cbm_zova_coord_release(&barrier);
+        return operations_coord_refusal(out, "recover_workspace", status, "workspace_busy");
+    }
+    cbm_zova_operation_code_t code =
+        cbm_zova_workspace_recover_body(path, workspace_id, repo_path, out);
+    cbm_zova_coord_release(&lease);
+    cbm_zova_coord_release(&barrier);
+    return code;
+}
+
+/* Restore replaces the database file, so it waits (bounded) for index runs
+ * that prepared against the current file to finish, and keeps new ones from
+ * starting until the replacement is done. */
+cbm_zova_operation_code_t cbm_zova_database_restore(
+    const char *live_path, const char *backup_path, bool confirm_replace,
+    cbm_zova_operation_report_t *out) {
+    if (!CBM_WITH_ZOVA || !live_path || !live_path[0] || !backup_path || !backup_path[0] ||
+        !confirm_replace)
+        return cbm_zova_database_restore_body(live_path, backup_path, confirm_replace, out);
+    cbm_zova_coord_hold_t barrier = {0};
+    cbm_zova_coord_status_t status = cbm_zova_prepare_barrier_acquire(
+        live_path, true, cbm_zova_coord_default_wait_ms(), &barrier);
+    if (status != CBM_ZOVA_COORD_OK)
+        return operations_coord_refusal(out, "restore", status, "indexing_in_progress");
+    cbm_zova_operation_code_t code =
+        cbm_zova_database_restore_body(live_path, backup_path, confirm_replace, out);
+    cbm_zova_coord_release(&barrier);
+    return code;
+}
+
+/* Repack replaces the database file; like its writer-gate acquisition it does
+ * not wait. */
+cbm_zova_operation_code_t cbm_zova_database_repack(
+    const cbm_zova_repack_request_t *request, cbm_zova_repack_report_t *out) {
+    if (!CBM_WITH_ZOVA || !request || !request->live_path || !request->live_path[0] || !out)
+        return cbm_zova_database_repack_body(request, out);
+    cbm_zova_coord_hold_t barrier = {0};
+    cbm_zova_coord_status_t status =
+        cbm_zova_prepare_barrier_acquire(request->live_path, true, 0, &barrier);
+    if (status != CBM_ZOVA_COORD_OK) {
+        memset(out, 0, sizeof(*out));
+        out->code = status == CBM_ZOVA_COORD_ERROR ? CBM_ZOVA_OPERATION_VERIFY_FAILED
+                                                   : CBM_ZOVA_OPERATION_BUSY;
+        return out->code;
+    }
+    cbm_zova_operation_code_t code = cbm_zova_database_repack_body(request, out);
+    cbm_zova_coord_release(&barrier);
+    return code;
 }

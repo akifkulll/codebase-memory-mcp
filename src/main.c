@@ -19,6 +19,7 @@
 #include "cli/cli.h"
 #include "cli/progress_sink.h"
 #include "zova/cbm_zova.h"
+#include "zova/cbm_zova_coordination.h"
 #include "zova/cbm_zova_operations.h"
 #include "zova/cbm_zova_route.h"
 #include "foundation/constants.h"
@@ -81,6 +82,8 @@ static void request_shutdown(void) {
     }
     /* Release pipeline lock to prevent stale lock on restart */
     cbm_pipeline_unlock();
+    /* Make pending index-lease and barrier waits return at once */
+    cbm_zova_coord_set_cancelled(true);
 
     if (g_watcher) {
         cbm_watcher_stop(g_watcher);
@@ -146,10 +149,14 @@ static int watcher_index_fn(const char *project_name, const char *root_path, voi
         return 0;
     }
 
-    /* Non-blocking: skip if another pipeline is already running.
-     * Watcher will retry on next poll cycle (5-60s). */
-    if (!cbm_pipeline_try_lock()) {
-        cbm_log_info("watcher.skip", "project", project_name, "reason", "pipeline_busy");
+    /* Non-blocking: skip if another process or thread is already indexing this
+     * workspace, or a database replacement is in progress. The watcher retries
+     * on its next poll cycle (5-60s). */
+    cbm_zova_index_hold_t hold;
+    cbm_zova_coord_status_t hold_status = cbm_mcp_index_hold_acquire(root_path, 0, &hold, NULL, 0);
+    if (hold_status != CBM_ZOVA_COORD_OK) {
+        cbm_log_info("watcher.skip", "project", project_name, "reason",
+                     cbm_mcp_index_hold_refusal_reason(hold_status, &hold));
         return 0;
     }
 
@@ -159,28 +166,37 @@ static int watcher_index_fn(const char *project_name, const char *root_path, voi
      * long-lived server process hands its RSS back to the OS on every cycle
      * instead of ratcheting (mimalloc v3 does not reclaim pages that worker
      * threads abandon at exit). The child writes the DB; the parent only needs the
-     * return code. The pipeline lock (already held) still serialises re-indexes.
+     * return code and holds the index hold for the child's life.
      * Degrade to the in-process pipeline when the supervisor is off (kill switch)
      * or the spawn fails. */
     if (cbm_index_supervisor_should_wrap()) {
         char *resp = cbm_mcp_index_run_supervised_path(root_path);
         if (resp) {
             free(resp);
-            cbm_pipeline_unlock();
+            cbm_zova_index_hold_release(&hold);
             return 0;
         }
         /* resp == NULL → spawn-failure degrade → fall through to in-process. */
     }
 
+    /* One in-process pipeline at a time (process-global pipeline state). */
+    if (!cbm_pipeline_try_lock()) {
+        cbm_zova_index_hold_release(&hold);
+        cbm_log_info("watcher.skip", "project", project_name, "reason", "pipeline_busy");
+        return 0;
+    }
+
     cbm_pipeline_t *p = cbm_pipeline_new(root_path, NULL, CBM_MODE_FULL);
     if (!p) {
         cbm_pipeline_unlock();
+        cbm_zova_index_hold_release(&hold);
         return CBM_NOT_FOUND;
     }
 
     int rc = cbm_pipeline_run(p);
     cbm_pipeline_free(p);
     cbm_pipeline_unlock();
+    cbm_zova_index_hold_release(&hold);
     return rc;
 }
 

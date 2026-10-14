@@ -55,6 +55,7 @@ enum {
 #include "foundation/str_util.h"
 #include "foundation/dump_verify.h"
 #include "foundation/compat_regex.h"
+#include "zova/cbm_zova_coordination.h"
 #include "zova/cbm_zova_operations.h"
 #include "zova/cbm_zova_repository.h"
 #include "zova/cbm_zova_route.h"
@@ -2104,6 +2105,8 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     return result;
 }
 
+enum { DELETE_RETRY_MS = 50 };
+
 /* delete_project: delete the project's workspace from the shared cbm.zova. */
 static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
     char *name = get_project_arg(args);
@@ -2121,9 +2124,6 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
         srv->current_project = NULL;
     }
 
-    /* Wait for any in-progress pipeline to finish before deleting */
-    cbm_pipeline_lock();
-
     char path[CBM_SZ_1K];
     const char *status = "not_found";
     const char *error_detail = NULL;
@@ -2138,9 +2138,19 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
                  cbm_zova_repository_workspace_id(repo));
         cbm_zova_repository_close(repo);
     }
-    cbm_zova_operation_code_t code =
-        workspace_id[0] ? cbm_zova_workspace_delete(path, workspace_id, workspace_id, &report)
-                        : CBM_ZOVA_OPERATION_NOOP;
+    /* The delete takes the workspace lease without waiting; wait here (bounded)
+     * for an index run of this workspace to finish. */
+    cbm_zova_operation_code_t code = CBM_ZOVA_OPERATION_NOOP;
+    for (int64_t wait_left_ms = cbm_zova_coord_default_wait_ms(); workspace_id[0];
+         wait_left_ms -= DELETE_RETRY_MS) {
+        code = cbm_zova_workspace_delete(path, workspace_id, workspace_id, &report);
+        if (code != CBM_ZOVA_OPERATION_BUSY || strcmp(report.reason, "workspace_busy") != 0 ||
+            wait_left_ms <= 0) {
+            break;
+        }
+        struct timespec pause = {.tv_sec = 0, .tv_nsec = DELETE_RETRY_MS * 1000000L};
+        cbm_nanosleep(&pause, NULL);
+    }
     if (code == CBM_ZOVA_OPERATION_OK) {
         status = "deleted";
     } else if (code == CBM_ZOVA_OPERATION_NOOP) {
@@ -2150,8 +2160,6 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
         error_detail = report.reason;
         is_error = true;
     }
-
-    cbm_pipeline_unlock();
 
     if (srv->watcher) {
         cbm_watcher_unwatch(srv->watcher, name);
@@ -3746,7 +3754,101 @@ char *cbm_mcp_index_run_supervised_path(const char *root_path) {
 
 bool cbm_path_within_root(const char *root_path, const char *abs_path); /* defined below */
 
+/* Index hold for root_path (ADR-0001): the preparation barrier shared, then the
+ * workspace lease. The root is canonicalized the way handle_index_repository
+ * canonicalizes repo_path, so the lease names the workspace the run publishes. */
+cbm_zova_coord_status_t cbm_mcp_index_hold_acquire(const char *root_path, int64_t wait_ms,
+                                                   cbm_zova_index_hold_t *out,
+                                                   char *out_workspace_id,
+                                                   size_t out_workspace_id_size) {
+    char *root = root_path ? heap_strdup(root_path) : NULL;
+    if (!root) {
+        if (out) memset(out, 0, sizeof(*out));
+        return CBM_ZOVA_COORD_ERROR;
+    }
+    cbm_normalize_path_sep(root);
+    root = canonicalize_repo_path_if_exists(root);
+    cbm_zova_coord_status_t status =
+        cbm_zova_index_hold_acquire(root, wait_ms, out, out_workspace_id, out_workspace_id_size);
+    free(root);
+    return status;
+}
+
+const char *cbm_mcp_index_hold_refusal_reason(cbm_zova_coord_status_t status,
+                                              const cbm_zova_index_hold_t *hold) {
+    switch (status) {
+    case CBM_ZOVA_COORD_OK:
+        return "ok";
+    case CBM_ZOVA_COORD_CANCELLED:
+        return "cancelled";
+    case CBM_ZOVA_COORD_BUSY:
+        return hold && hold->barrier_busy ? "database_replacement_in_progress" : "workspace_busy";
+    default:
+        return "coordination_unavailable";
+    }
+}
+
+/* Machine-readable refusal, in the BUSY + reason shape of the Zova operations. */
+static char *index_hold_refusal(cbm_zova_coord_status_t status, const cbm_zova_index_hold_t *hold,
+                                const char *workspace_id) {
+    const char *reason = cbm_mcp_index_hold_refusal_reason(status, hold);
+    const char *hint =
+        status == CBM_ZOVA_COORD_ERROR
+            ? "Cannot use the coordination lock file next to cbm.zova; check the cache "
+              "directory permissions."
+        : status == CBM_ZOVA_COORD_CANCELLED ? "The server is shutting down."
+        : strcmp(reason, "workspace_busy") == 0
+            ? "Another process is indexing this workspace. Retry when it finishes; "
+              "CBM_INDEX_LEASE_TIMEOUT_S sets how long a request waits."
+            : "A restore, import or repack is replacing cbm.zova. Retry when it finishes.";
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_str(doc, root, "status", status == CBM_ZOVA_COORD_ERROR ? "error" : "busy");
+    yyjson_mut_obj_add_str(doc, root, "reason", reason);
+    if (workspace_id && workspace_id[0]) {
+        yyjson_mut_obj_add_strcpy(doc, root, "workspace_id", workspace_id);
+    }
+    yyjson_mut_obj_add_str(doc, root, "hint", hint);
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    char *result = cbm_mcp_text_result(json ? json : "{\"status\":\"busy\"}", true);
+    free(json);
+    return result;
+}
+
+static char *index_repository_run(cbm_mcp_server_t *srv, const char *args);
+
+/* The process that received the request holds the index hold for the whole
+ * run, including a supervised worker's life. The worker itself never takes it:
+ * POSIX record locks are not inherited, so it would conflict with its parent. */
 static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
+    if (cbm_index_worker_active()) {
+        return index_repository_run(srv, args);
+    }
+    char *repo_path = cbm_mcp_get_string_arg(args, "repo_path");
+    if (!repo_path) {
+        repo_path = cbm_mcp_get_string_arg(args, "path");
+    }
+    if (!repo_path) {
+        return index_repository_run(srv, args); /* reports the missing field */
+    }
+    cbm_zova_index_hold_t hold;
+    char workspace_id[CBM_SZ_128] = {0};
+    cbm_zova_coord_status_t status = cbm_mcp_index_hold_acquire(
+        repo_path, cbm_zova_coord_default_wait_ms(), &hold, workspace_id, sizeof(workspace_id));
+    free(repo_path);
+    if (status != CBM_ZOVA_COORD_OK) {
+        cbm_log_warn("index.hold.refused", "reason",
+                     cbm_mcp_index_hold_refusal_reason(status, &hold), "workspace", workspace_id);
+        return index_hold_refusal(status, &hold, workspace_id);
+    }
+    char *result = index_repository_run(srv, args);
+    cbm_zova_index_hold_release(&hold);
+    return result;
+}
+
+static char *index_repository_run(cbm_mcp_server_t *srv, const char *args) {
     /* Supervisor gate: run the index in a crash/hang-isolating worker subprocess
      * unless this process IS the worker or the kill switch (CBM_INDEX_SUPERVISOR=0)
      * is set. On spawn failure, fall through to the in-process path (degrade). */
@@ -3820,7 +3922,9 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     free(srv->current_project);
     srv->current_project = NULL;
 
-    /* Serialize pipeline runs to prevent concurrent writes.
+    /* One in-process pipeline at a time: pipelines share process-global state
+     * (the package map). Same-workspace exclusion across processes is the
+     * workspace lease held by handle_index_repository.
      * Track active pipeline so signal handler and notifications/cancelled
      * can cancel it mid-run. */
     cbm_pipeline_lock();
@@ -5654,6 +5758,21 @@ static void *autoindex_thread(void *arg) {
 
     cbm_log_info("autoindex.start", "project", srv->session_project, "path", srv->session_root);
 
+    /* Background work does not wait: if another process is already indexing
+     * this workspace, its result is the one we would produce. */
+    cbm_zova_index_hold_t hold;
+    cbm_zova_coord_status_t hold_status =
+        cbm_mcp_index_hold_acquire(srv->session_root, 0, &hold, NULL, 0);
+    if (hold_status != CBM_ZOVA_COORD_OK) {
+        cbm_log_info("autoindex.skip", "reason",
+                     cbm_mcp_index_hold_refusal_reason(hold_status, &hold), "project",
+                     srv->session_project);
+        if (hold_status == CBM_ZOVA_COORD_BUSY) {
+            register_watcher_if_enabled(srv);
+        }
+        return NULL;
+    }
+
     /* #832: prefer the supervised worker subprocess. Indexing the whole session in
      * this long-lived server thread ratchets RSS (mimalloc v3 does not reclaim the
      * pages worker threads abandon at exit); running it in a child that exits hands
@@ -5668,6 +5787,7 @@ static void *autoindex_thread(void *arg) {
              * auto_watch (#849), same as the in-process branch below. A bare
              * `if (srv->watcher)` would register even when the user set
              * `config set auto_watch false`, since srv->watcher is always set. */
+            cbm_zova_index_hold_release(&hold);
             register_watcher_if_enabled(srv);
             return NULL;
         }
@@ -5676,14 +5796,16 @@ static void *autoindex_thread(void *arg) {
 
     cbm_pipeline_t *p = cbm_pipeline_new(srv->session_root, NULL, CBM_MODE_FULL);
     if (!p) {
+        cbm_zova_index_hold_release(&hold);
         cbm_log_warn("autoindex.err", "msg", "pipeline_create_failed");
         return NULL;
     }
 
-    /* Block until any concurrent pipeline finishes */
+    /* One in-process pipeline at a time (process-global pipeline state). */
     cbm_pipeline_lock();
     int rc = cbm_pipeline_run(p);
     cbm_pipeline_unlock();
+    cbm_zova_index_hold_release(&hold);
 
     cbm_pipeline_free(p);
     cbm_mem_collect(); /* return mimalloc pages to OS after indexing (in-process only) */

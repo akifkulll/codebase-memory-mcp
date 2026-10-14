@@ -216,18 +216,21 @@ void cbm_pipeline_add_file_error(cbm_pipeline_t *p, const char *path, const char
  * nothing was skipped. Do not free. */
 void cbm_pipeline_get_file_errors(const cbm_pipeline_t *p, cbm_file_error_t **out, int *count);
 
-/* ── Index lock (prevents concurrent pipeline runs on same DB) ──── */
+/* ── In-process pipeline lock ───────────────────────────────────── */
 
-/* Try to acquire the global index lock. Returns true if acquired,
- * false if another pipeline is already running (non-blocking).
- * Use this in the watcher — skip reindex if busy. */
+/* One cbm_pipeline_run at a time within this process: pipelines share
+ * process-global state (the package map, envscan pattern init). This lock does
+ * not coordinate processes; same-workspace exclusion across processes is the
+ * workspace lease (zova/cbm_zova_coordination.h), taken at the index entry
+ * points. Hold it only around an in-process run. */
+
+/* Non-blocking acquire. Returns false if another in-process run holds it. */
 bool cbm_pipeline_try_lock(void);
 
-/* Acquire the global index lock, blocking until available.
- * Use this in MCP handler and autoindex — wait for busy watcher to finish. */
+/* Blocking acquire. */
 void cbm_pipeline_lock(void);
 
-/* Release the global index lock. */
+/* Release. */
 void cbm_pipeline_unlock(void);
 
 /* ── FQN helpers (used by passes and external callers) ──────────── */
