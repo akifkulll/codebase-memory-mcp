@@ -142,9 +142,9 @@ static void *watcher_thread(void *arg) {
 static int watcher_index_fn(const char *project_name, const char *root_path, void *user_data) {
     (void)user_data;
 
-    /* Skip indexing if shutdown is in progress */
+    /* Skip indexing if shutdown is in progress (skipped, not indexed) */
     if (atomic_load(&g_shutdown)) {
-        return 0;
+        return 1;
     }
 
     /* Non-blocking: skip if another process or thread is already indexing this
@@ -155,7 +155,7 @@ static int watcher_index_fn(const char *project_name, const char *root_path, voi
     if (hold_status != CBM_ZOVA_COORD_OK) {
         cbm_log_info("watcher.skip", "project", project_name, "reason",
                      cbm_mcp_index_hold_refusal_reason(hold_status, &hold));
-        return 0;
+        return 1; /* skipped: the watcher keeps the change and retries */
     }
 
     cbm_log_info("watcher.reindex", "project", project_name, "path", root_path);
