@@ -17,7 +17,7 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 
 ## This fork
 
-The current development version uses **CBM schema 7** with a pinned **Zova format 12 / ABI 1.2.0** SDK. Compared with the original pure-SQLite implementation, it adds:
+The current development version uses **CBM schema 7** with a pinned **Zova format 12 / ABI 1.3.0** SDK. Compared with the original pure-SQLite implementation, it adds:
 
 - **One shared database** — multiple repositories live as isolated workspaces in `cbm.zova`.
 - **Cross-repository discovery** — one `search_graph` request can search selected projects or every healthy workspace and identifies the owning project for each result.

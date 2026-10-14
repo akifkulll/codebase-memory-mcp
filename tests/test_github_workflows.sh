@@ -21,7 +21,7 @@ for path in \
 done
 
 grep -q 'repository: ata-sesli/zova' "$ROOT/.github/actions/setup-zova/action.yml"
-grep -q 'ref: ea6fbc2890b795090c0b2d5e9ed363b248e289ef' \
+grep -q 'ref: a30581ef7070ebc335fed06bbc46ea94a8326c5f' \
   "$ROOT/.github/actions/setup-zova/action.yml"
 grep -q 'version: 0.17.0' "$ROOT/.github/actions/setup-zova/action.yml"
 grep -q '^  cpu:' "$ROOT/.github/actions/setup-zova/action.yml"
