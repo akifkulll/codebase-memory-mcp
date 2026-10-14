@@ -17,12 +17,24 @@
 #if CBM_WITH_ZOVA
 #include "zova.h"
 
+typedef struct {
+    int64_t numeric_id;
+    size_t order;
+    int64_t node_key;
+    char *stable_id;
+} repo_numeric_id_entry_t;
+
 struct cbm_zova_repository {
     zova_database *db;
     char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
     char project[CBM_SZ_4K];
     int64_t workspace_key;
     int64_t generation;
+    /* Graph nodes sorted by numeric id (the hash of the stable id), built on
+     * the first id lookup so per-node reads do not rescan the whole graph. */
+    repo_numeric_id_entry_t *numeric_ids;
+    size_t numeric_id_count;
+    struct repo_string_arena *numeric_id_strings;
 };
 
 struct cbm_zova_catalog {
@@ -47,7 +59,7 @@ typedef struct repo_string_arena_chunk {
     char data[];
 } repo_string_arena_chunk_t;
 
-typedef struct {
+typedef struct repo_string_arena {
     repo_string_arena_chunk_t *head;
     uint64_t chunk_count;
     uint64_t bytes_used;
@@ -178,36 +190,104 @@ static int repo_graph_name(const cbm_zova_repository_t *repo, char *out, size_t 
         ? 0 : -1;
 }
 
-static int repo_node_key_for_stable_id(cbm_zova_repository_t *repo, const char *stable_id,
-                                       int64_t *out_key) {
-    if (!repo || !stable_id || !stable_id[0] || !out_key) return -1;
-    *out_key = 0;
+static int repo_numeric_id_compare(const void *left, const void *right) {
+    const repo_numeric_id_entry_t *a = left, *b = right;
+    if (a->numeric_id != b->numeric_id) return a->numeric_id < b->numeric_id ? -1 : 1;
+    return a->order < b->order ? -1 : a->order > b->order;
+}
+
+static void repo_numeric_ids_clear(cbm_zova_repository_t *repo) {
+    free(repo->numeric_ids);
+    repo_string_arena_free(repo->numeric_id_strings);
+    repo->numeric_ids = NULL;
+    repo->numeric_id_count = 0;
+    repo->numeric_id_strings = NULL;
+}
+
+/* One paged scan of the workspace graph; equal numeric ids keep scan order so
+ * the lookup returns the same node the former linear search found first. */
+static int repo_numeric_ids_build(cbm_zova_repository_t *repo) {
+    repo_numeric_ids_clear(repo);
     char graph_name[REPO_GRAPH_NAME_CAP];
-    if (repo_graph_name(repo, graph_name, sizeof(graph_name)) != 0) return -1;
+    if (repo_graph_name(repo, graph_name, sizeof(graph_name)) != 0) return CBM_STORE_ERR;
+    repo->numeric_id_strings = calloc(1, sizeof(*repo->numeric_id_strings));
+    if (!repo->numeric_id_strings) return CBM_STORE_ERR;
+    size_t count = 0, cap = 0;
     zova_graph_scan_cursor cursor = {0};
     for (;;) {
         zova_graph_scan_results page = {0};
         zova_status status = zova_graph_scan(&(zova_graph_scan_request){
             .db = repo->db, .graph_name = graph_name, .node_after = cursor,
             .node_limit = REPO_GRAPH_SCAN_PAGE, .edge_limit = 0, .out_results = &page});
-        if (status != ZOVA_OK) return -1;
+        if (status != ZOVA_OK) goto error;
         for (size_t i = 0; i < page.nodes_len; i++) {
-            zova_graph_scan_node *node = &page.nodes[i];
-            if (node->node_id && strcmp(node->node_id, stable_id) == 0) {
-                *out_key = node->node_key;
-                zova_graph_scan_results_free(&page);
-                return *out_key > 0 ? 0 : -1;
+            const zova_graph_scan_node *node = &page.nodes[i];
+            if (!node->node_id) continue;
+            if (count == cap) {
+                size_t next_cap = cap ? cap * 2 : REPO_GRAPH_SCAN_PAGE;
+                repo_numeric_id_entry_t *grown =
+                    realloc(repo->numeric_ids, next_cap * sizeof(*grown));
+                if (!grown) { zova_graph_scan_results_free(&page); goto error; }
+                repo->numeric_ids = grown;
+                cap = next_cap;
             }
+            char *stable = repo_string_arena_dup(repo->numeric_id_strings,
+                                                 (const uint8_t *)node->node_id,
+                                                 strlen(node->node_id));
+            if (!stable) { zova_graph_scan_results_free(&page); goto error; }
+            repo->numeric_ids[count] = (repo_numeric_id_entry_t){
+                .numeric_id = stable_numeric_id(stable), .order = count,
+                .node_key = node->node_key, .stable_id = stable};
+            count++;
         }
         if (page.nodes_len) {
-            zova_graph_scan_node *last = &page.nodes[page.nodes_len - 1];
+            const zova_graph_scan_node *last = &page.nodes[page.nodes_len - 1];
             cursor = (zova_graph_scan_cursor){.created_order = last->created_order,
                                               .key = last->node_key};
         }
         uint8_t more = page.has_more_nodes;
         zova_graph_scan_results_free(&page);
-        if (!more) return 1;
+        if (!more) break;
     }
+    if (count) qsort(repo->numeric_ids, count, sizeof(*repo->numeric_ids),
+                     repo_numeric_id_compare);
+    repo->numeric_id_count = count;
+    return CBM_STORE_OK;
+error:
+    repo_numeric_ids_clear(repo);
+    return CBM_STORE_ERR;
+}
+
+/* First entry with numeric_id, or NULL; equal ids follow it contiguously. */
+static const repo_numeric_id_entry_t *repo_numeric_ids_find(cbm_zova_repository_t *repo,
+                                                            int64_t numeric_id) {
+    if (!repo->numeric_id_strings && repo_numeric_ids_build(repo) != CBM_STORE_OK)
+        return NULL;
+    size_t lo = 0, hi = repo->numeric_id_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (repo->numeric_ids[mid].numeric_id < numeric_id) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < repo->numeric_id_count && repo->numeric_ids[lo].numeric_id == numeric_id
+               ? &repo->numeric_ids[lo] : NULL;
+}
+
+static int repo_node_key_for_stable_id(cbm_zova_repository_t *repo, const char *stable_id,
+                                       int64_t *out_key) {
+    if (!repo || !stable_id || !stable_id[0] || !out_key) return -1;
+    *out_key = 0;
+    int64_t numeric_id = stable_numeric_id(stable_id);
+    const repo_numeric_id_entry_t *entry = repo_numeric_ids_find(repo, numeric_id);
+    if (!entry && !repo->numeric_id_strings) return -1;
+    const repo_numeric_id_entry_t *end = repo->numeric_ids + repo->numeric_id_count;
+    for (; entry && entry < end && entry->numeric_id == numeric_id; entry++) {
+        if (strcmp(entry->stable_id, stable_id) == 0) {
+            *out_key = entry->node_key;
+            return *out_key > 0 ? 0 : -1;
+        }
+    }
+    return 1;
 }
 
 static int repo_native_nodes_by_key(cbm_zova_repository_t *repo, const int64_t *keys,
@@ -329,6 +409,8 @@ cbm_zova_repository_t *cbm_zova_repository_open(const char *path, const char *pr
 void cbm_zova_repository_close(cbm_zova_repository_t *repo) {
     if (!repo) return;
     if (repo->db) (void)zova_database_close(repo->db);
+    free(repo->numeric_ids);
+    repo_string_arena_free(repo->numeric_id_strings);
     free(repo);
 }
 
@@ -1362,33 +1444,10 @@ int cbm_zova_repository_stable_id_for_numeric_id(cbm_zova_repository_t *repo,
     if (repo_workspace_required(repo, workspace_id) != CBM_STORE_OK || !out || out_size == 0)
         return CBM_STORE_ERR;
     out[0] = '\0';
-    char graph_name[REPO_GRAPH_NAME_CAP];
-    if (repo_graph_name(repo, graph_name, sizeof(graph_name)) != 0) return CBM_STORE_ERR;
-    zova_graph_scan_cursor cursor = {0};
-    for (;;) {
-        zova_graph_scan_results page = {0};
-        zova_status status = zova_graph_scan(&(zova_graph_scan_request){
-            .db = repo->db, .graph_name = graph_name, .node_after = cursor,
-            .node_limit = REPO_GRAPH_SCAN_PAGE, .edge_limit = 0, .out_results = &page});
-        if (status != ZOVA_OK) return CBM_STORE_ERR;
-        for (size_t i = 0; i < page.nodes_len; i++) {
-            const char *stable = page.nodes[i].node_id;
-            if (stable && stable_numeric_id(stable) == numeric_id) {
-                int written = snprintf(out, out_size, "%s", stable);
-                zova_graph_scan_results_free(&page);
-                return written >= 0 && (size_t)written < out_size
-                           ? CBM_STORE_OK : CBM_STORE_ERR;
-            }
-        }
-        if (page.nodes_len) {
-            const zova_graph_scan_node *last = &page.nodes[page.nodes_len - 1];
-            cursor = (zova_graph_scan_cursor){.created_order = last->created_order,
-                                              .key = last->node_key};
-        }
-        uint8_t more = page.has_more_nodes;
-        zova_graph_scan_results_free(&page);
-        if (!more) return CBM_STORE_NOT_FOUND;
-    }
+    const repo_numeric_id_entry_t *entry = repo_numeric_ids_find(repo, numeric_id);
+    if (!entry) return repo->numeric_id_strings ? CBM_STORE_NOT_FOUND : CBM_STORE_ERR;
+    int written = snprintf(out, out_size, "%s", entry->stable_id);
+    return written >= 0 && (size_t)written < out_size ? CBM_STORE_OK : CBM_STORE_ERR;
 }
 
 int cbm_zova_repository_find_node_by_numeric_id(cbm_zova_repository_t *repo,
