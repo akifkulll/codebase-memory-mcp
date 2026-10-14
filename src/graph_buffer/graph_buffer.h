@@ -153,6 +153,12 @@ int cbm_gbuf_edge_count_by_type(const cbm_gbuf_t *gb, const char *type);
 int cbm_gbuf_delete_edges_by_type(cbm_gbuf_t *gb, const char *type);
 int cbm_gbuf_delete_edges_by_source_type(cbm_gbuf_t *gb, int64_t source_id, const char *type);
 
+/* Delete every edge of a type for which `keep` returns false. One pass. */
+typedef bool (*cbm_gbuf_edge_keep_fn)(const cbm_gbuf_t *gb, const cbm_gbuf_edge_t *edge,
+                                      void *userdata);
+int cbm_gbuf_delete_edges_by_type_unless(cbm_gbuf_t *gb, const char *type,
+                                         cbm_gbuf_edge_keep_fn keep, void *userdata);
+
 /* ── Vector storage (for semantic embeddings) ───────────────────── */
 
 /* Store an int8-quantized vector for a node. The vector data is copied.

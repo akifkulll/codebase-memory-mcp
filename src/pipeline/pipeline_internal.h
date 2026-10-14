@@ -534,6 +534,16 @@ void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb);
 /* True when a config URL under this YAML key path may become an infra Route. */
 bool cbm_pipeline_infra_route_key_allowed(const char *key_path);
 
+/* True for config files (YAML, HCL, Terraform, TOML) that may define infra Routes. */
+bool cbm_pipeline_is_infra_file(const char *rel_path);
+
+/* Mint infra Route nodes from config-file URLs and link infra topic bindings.
+ * result_cache[i] holds the extraction result of files[i] (NULL entries skipped). */
+void cbm_pipeline_extract_infra_routes(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
+                                       CBMFileResult **result_cache, int file_count);
+void cbm_pipeline_process_infra_bindings(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
+                                         CBMFileResult **result_cache, int file_count);
+
 /* ── Pass function prototypes ────────────────────────────────────── */
 
 int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,

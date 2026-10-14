@@ -524,12 +524,9 @@ typedef struct {
  * full reindex (re)computes them via a pass whose result can differ from the
  * snapshot — restoring a stale copy could leave wrong properties or even an
  * edge a full reindex would not produce:
- *   - SIMILAR_TO / SEMANTICALLY_RELATED: rebuilt wholesale by the incremental
- *     post-passes (similarity / semantic_edges) over a drifting corpus.
- *   - FILE_CHANGES_WITH (git-history coupling) and DATA_FLOWS (route data flow):
- *     produced only by full-pipeline post-passes (githistory / route_nodes)
- *     that do NOT run during incremental; they remain a known incremental
- *     limitation rather than something to restore stale.
+ *   - SIMILAR_TO / SEMANTICALLY_RELATED / FILE_CHANGES_WITH / DATA_FLOWS:
+ *     rebuilt wholesale by the incremental post-passes (similarity /
+ *     semantic_edges / githistory / route matching) over a drifting corpus.
  * Structural containment edges are regenerated from changed paths before
  * extraction, so snapshots omit them rather than retaining a pre-rename
  * parent relationship. */
@@ -780,6 +777,8 @@ static void run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *change
             cbm_log_info("pass.timing", "pass", "incr_resolve", "elapsed_ms",
                          itoa_buf((int)elapsed_ms(t)));
 
+            cbm_pipeline_extract_infra_routes(ctx->gbuf, changed_files, cache, ci);
+            cbm_pipeline_process_infra_bindings(ctx->gbuf, changed_files, cache, ci);
             for (int j = 0; j < ci; j++) {
                 if (cache[j]) {
                     cbm_free_result(cache[j]);
@@ -789,11 +788,64 @@ static void run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *change
         }
     } else {
         cbm_log_info("incremental.mode", "mode", "sequential", "changed", itoa_buf(ci));
+        /* Keep extraction results, as the full sequential path does, so the
+         * infra Route passes can read them. */
+        CBMFileResult **cache = ci > 0 ? (CBMFileResult **)calloc(ci, sizeof(CBMFileResult *))
+                                       : NULL;
+        ctx->result_cache = cache;
         cbm_pipeline_pass_definitions(ctx, changed_files, ci);
         cbm_pipeline_pass_calls(ctx, changed_files, ci);
         cbm_pipeline_pass_usages(ctx, changed_files, ci);
         cbm_pipeline_pass_semantic(ctx, changed_files, ci);
+        ctx->result_cache = NULL;
+        if (cache) {
+            cbm_pipeline_extract_infra_routes(ctx->gbuf, changed_files, cache, ci);
+            cbm_pipeline_process_infra_bindings(ctx->gbuf, changed_files, cache, ci);
+            for (int j = 0; j < ci; j++) {
+                if (cache[j]) {
+                    cbm_free_result(cache[j]);
+                }
+            }
+            free(cache);
+        }
     }
+}
+
+/* Infra Route nodes are keyed by URL across config files: a URL becomes a
+ * Route only when no config file lists it under a denied key, and the node
+ * belongs to one of the files that list it. A change to one config file can
+ * therefore change what another contributes, so when any config file changed
+ * or was deleted, every config file is re-extracted. Returns files added. */
+static int incr_expand_infra_changes(const cbm_file_info_t *files, int file_count,
+                                     bool *is_changed, char *const *deleted, int deleted_count) {
+    bool infra_touched = false;
+    for (int i = 0; i < file_count && !infra_touched; i++) {
+        infra_touched = is_changed[i] && cbm_pipeline_is_infra_file(files[i].rel_path);
+    }
+    for (int i = 0; i < deleted_count && !infra_touched; i++) {
+        infra_touched = cbm_pipeline_is_infra_file(deleted[i]);
+    }
+    if (!infra_touched) {
+        return 0;
+    }
+    int added = 0;
+    for (int i = 0; i < file_count; i++) {
+        if (!is_changed[i] && cbm_pipeline_is_infra_file(files[i].rel_path)) {
+            is_changed[i] = true;
+            added++;
+        }
+    }
+    return added;
+}
+
+/* HANDLES edges into infra Routes come only from route matching. */
+static bool incr_handles_edge_is_not_infra_match(const cbm_gbuf_t *gbuf,
+                                                 const cbm_gbuf_edge_t *edge, void *userdata) {
+    (void)userdata;
+    static const char infra_prefix[] = "__route__infra__";
+    const cbm_gbuf_node_t *target = cbm_gbuf_find_by_id(gbuf, edge->target_id);
+    return !target || !target->qualified_name ||
+           strncmp(target->qualified_name, infra_prefix, sizeof(infra_prefix) - 1) != 0;
 }
 
 /* Run post-extraction passes (tests, decorator tags, configlink). */
@@ -819,6 +871,18 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
     cbm_pipeline_pass_decorator_tags(ctx->gbuf, project);
     cbm_log_info("pass.timing", "pass", "incr_decorator_tags", "elapsed_ms",
+                 itoa_buf((int)elapsed_ms(t)));
+
+    /* Route matching is global: an infra Route in an unchanged config file can
+     * match a handler in a changed file, and DATA_FLOWS follow those matches.
+     * Remove the previous matches and data flows, then rerun the pass a full
+     * index runs, before the derived digest reads the graph. */
+    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
+    cbm_gbuf_delete_edges_by_type_unless(ctx->gbuf, "HANDLES",
+                                         incr_handles_edge_is_not_infra_match, NULL);
+    cbm_gbuf_delete_edges_by_type(ctx->gbuf, "DATA_FLOWS");
+    cbm_pipeline_create_route_nodes(ctx->gbuf);
+    cbm_log_info("pass.timing", "pass", "incr_route_match", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(t)));
 
     /* Restore the final derived node properties before comparing pass inputs.
@@ -959,6 +1023,13 @@ static int run_incremental(cbm_pipeline_t *p, cbm_file_info_t *files, int file_c
     int deleted_count =
         find_deleted_files(cbm_pipeline_repo_path(p), files, file_count, stored, stored_count,
                            &deleted, &mode_skipped, &mode_skipped_count);
+
+    if (is_changed) {
+        int infra_added =
+            incr_expand_infra_changes(files, file_count, is_changed, deleted, deleted_count);
+        n_changed += infra_added;
+        n_unchanged -= infra_added;
+    }
 
     cbm_log_info("incremental.classify", "changed", itoa_buf(n_changed), "unchanged",
                  itoa_buf(n_unchanged), "deleted", itoa_buf(deleted_count), "mode_skipped",

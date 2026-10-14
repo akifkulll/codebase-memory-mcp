@@ -1248,6 +1248,29 @@ int cbm_gbuf_delete_edges_by_source_type(cbm_gbuf_t *gb, int64_t source_id, cons
     return 0;
 }
 
+int cbm_gbuf_delete_edges_by_type_unless(cbm_gbuf_t *gb, const char *type,
+                                         cbm_gbuf_edge_keep_fn keep, void *userdata) {
+    if (!gb || !type || !keep) {
+        return CBM_NOT_FOUND;
+    }
+    int write_idx = 0;
+    for (int i = 0; i < gb->edges.count; i++) {
+        cbm_gbuf_edge_t *e = gb->edges.items[i];
+        if (strcmp(e->type, type) == 0 && !keep(gb, e, userdata)) {
+            unindex_edge(gb, e);
+            free_edge_strings(e);
+            free(e);
+        } else {
+            gb->edges.items[write_idx++] = e;
+        }
+    }
+    if (write_idx != gb->edges.count) {
+        gb->edges.count = write_idx;
+        rebuild_edge_secondary_indexes(gb);
+    }
+    return 0;
+}
+
 /* ── Merge ───────────────────────────────────────────────────────── */
 
 /* Free remap hash table entries (key = heap string, value = heap int64_t*) */

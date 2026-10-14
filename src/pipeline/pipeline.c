@@ -553,8 +553,8 @@ static int process_one_infra_binding(cbm_gbuf_t *gbuf, const CBMInfraBinding *ib
     return SKIP_ONE;
 }
 
-static void cbm_pipeline_process_infra_bindings(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
-                                                CBMFileResult **result_cache, int file_count) {
+void cbm_pipeline_process_infra_bindings(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
+                                         CBMFileResult **result_cache, int file_count) {
     int bindings = 0;
     for (int i = 0; i < file_count; i++) {
         if (!result_cache[i]) {
@@ -574,7 +574,7 @@ static void cbm_pipeline_process_infra_bindings(cbm_gbuf_t *gbuf, const cbm_file
     }
 }
 
-static bool is_infra_file(const char *fp) {
+bool cbm_pipeline_is_infra_file(const char *fp) {
     return fp != NULL &&
            (strstr(fp, ".yaml") != NULL || strstr(fp, ".yml") != NULL ||
             strstr(fp, ".tf") != NULL || strstr(fp, ".hcl") != NULL || strstr(fp, ".toml") != NULL);
@@ -678,8 +678,8 @@ static bool route_sr_denied(const CBMStringRef *sr) {
     return !cbm_pipeline_infra_route_key_allowed(sr->key_path);
 }
 
-static void cbm_pipeline_extract_infra_routes(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
-                                              CBMFileResult **result_cache, int file_count) {
+void cbm_pipeline_extract_infra_routes(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
+                                       CBMFileResult **result_cache, int file_count) {
     /* DENY-WINS-BY-VALUE: the same URL is often extracted as several string_refs
      * at different key_path granularities (full path, leaf key, flat). The Route
      * node is keyed by VALUE, so it would be minted if ANY granularity passed the
@@ -689,7 +689,7 @@ static void cbm_pipeline_extract_infra_routes(cbm_gbuf_t *gbuf, const cbm_file_i
     CBMHashTable *denied = cbm_ht_create(16);
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < file_count; i++) {
-            if (!result_cache[i] || !is_infra_file(files[i].rel_path)) {
+            if (!result_cache[i] || !cbm_pipeline_is_infra_file(files[i].rel_path)) {
                 continue;
             }
             for (int si = 0; si < result_cache[i]->string_refs.count; si++) {

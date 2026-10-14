@@ -6195,6 +6195,155 @@ TEST(pipeline_incremental_rename_direct_zova_matches_fresh_full) {
 #endif
 }
 
+#if CBM_WITH_ZOVA
+/* Index g_incr_tmpdir fully, apply `edit`, re-index on the incremental route,
+ * and compare the result with a fresh full index of the edited tree. */
+static int pipeline_incremental_edit_matches_full(void (*edit)(void), char **out_project) {
+    cbm_pipeline_t *initial = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
+    if (!initial || cbm_pipeline_run(initial) != 0) {
+        cbm_pipeline_free(initial);
+        return -1;
+    }
+    char *project = strdup(cbm_pipeline_project_name(initial));
+    cbm_pipeline_free(initial);
+    if (!project) {
+        return -1;
+    }
+    *out_project = project;
+
+    edit();
+    cbm_pipeline_t *incremental = cbm_pipeline_new(g_incr_tmpdir, NULL, CBM_MODE_FULL);
+    if (!incremental || cbm_pipeline_run(incremental) != 0 ||
+        cbm_pipeline_get_last_route(incremental) != CBM_PIPELINE_ROUTE_INCREMENTAL) {
+        cbm_pipeline_free(incremental);
+        return -2;
+    }
+    cbm_pipeline_free(incremental);
+
+    pipeline_zova_project_info_t incremental_info;
+    pipeline_zova_project_info_t full_info;
+    if (pipeline_zova_project_info(project, &incremental_info) != 0 ||
+        pipeline_zova_fresh_full_info(project, &full_info) != 0) {
+        return -3;
+    }
+    return pipeline_zova_project_info_equal(&incremental_info, &full_info) ? 0 : 1;
+}
+
+static void pipeline_route_probe_point_config_at_payments(void) {
+    th_write_file(TH_PATH(g_incr_tmpdir, "infra/config.yaml"),
+                  "hooks:\n  webhook_url: https://api.example.com/payments\n");
+}
+
+static void pipeline_route_probe_drop_url_from_owner(void) {
+    th_write_file(TH_PATH(g_incr_tmpdir, "infra/a.yaml"), "hooks:\n  retries: 3\n");
+}
+
+static void pipeline_route_probe_add_exact_handler(void) {
+    th_write_file(TH_PATH(g_incr_tmpdir, "list_api.py"),
+                  "from app import app\n\n"
+                  "@app.route(\"/orders/list\")\n"
+                  "def list_orders():\n    return \"ok\"\n");
+}
+#endif
+
+/* A changed config file must get its infra Route back, matched to the handler
+ * a full index would pick. */
+TEST(pipeline_incremental_infra_route_change_matches_fresh_full) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    if (setup_incremental_repo() != 0) {
+        FAIL("setup failed");
+    }
+    th_write_file(TH_PATH(g_incr_tmpdir, "app.py"),
+                  "from flask import Flask\napp = Flask(__name__)\n\n"
+                  "@app.route(\"/orders\")\ndef orders():\n    return \"ok\"\n\n"
+                  "@app.route(\"/payments\")\ndef payments():\n    return \"ok\"\n");
+    th_write_file(TH_PATH(g_incr_tmpdir, "infra/config.yaml"),
+                  "hooks:\n  webhook_url: https://api.example.com/orders\n");
+
+    char *project = NULL;
+    ASSERT_EQ(pipeline_incremental_edit_matches_full(pipeline_route_probe_point_config_at_payments,
+                                                     &project),
+              0);
+    bool route_exists = false;
+    ASSERT_EQ(pipeline_zova_trace_node_exists(project, "Route", "infra/config.yaml",
+                                              "__route__infra__https://api.example.com/payments",
+                                              &route_exists),
+              0);
+    ASSERT_TRUE(route_exists);
+
+    free(project);
+    cleanup_incremental_repo();
+    PASS();
+#endif
+}
+
+/* Two config files list the same URL; the Route node belongs to a.yaml. When
+ * a.yaml drops the URL, b.yaml (unchanged) must still provide it. The filler
+ * files push the re-extracted config set onto the parallel path. */
+TEST(pipeline_incremental_shared_infra_url_survives_owner_change) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    if (setup_incremental_repo() != 0) {
+        FAIL("setup failed");
+    }
+    th_write_file(TH_PATH(g_incr_tmpdir, "infra/a.yaml"),
+                  "hooks:\n  webhook_url: https://api.example.com/orders\n");
+    th_write_file(TH_PATH(g_incr_tmpdir, "infra/b.yaml"),
+                  "hooks:\n  webhook_url: https://api.example.com/orders\n");
+    for (int i = 0; i < 60; i++) {
+        char rel[64];
+        char body[64];
+        snprintf(rel, sizeof(rel), "infra/filler/f%02d.yaml", i);
+        snprintf(body, sizeof(body), "name: filler%02d\n", i);
+        th_write_file(TH_PATH(g_incr_tmpdir, rel), body);
+    }
+
+    char *project = NULL;
+    ASSERT_EQ(pipeline_incremental_edit_matches_full(pipeline_route_probe_drop_url_from_owner,
+                                                     &project),
+              0);
+    bool route_exists = false;
+    ASSERT_EQ(pipeline_zova_trace_node_exists(project, "Route", "infra/b.yaml",
+                                              "__route__infra__https://api.example.com/orders",
+                                              &route_exists),
+              0);
+    ASSERT_TRUE(route_exists);
+
+    free(project);
+    cleanup_incremental_repo();
+    PASS();
+#endif
+}
+
+/* An unchanged infra Route must be rematched when a changed code file adds a
+ * better handler: an exact path replaces the earlier prefix match. */
+TEST(pipeline_incremental_handler_change_rematches_infra_route) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    if (setup_incremental_repo() != 0) {
+        FAIL("setup failed");
+    }
+    th_write_file(TH_PATH(g_incr_tmpdir, "app.py"),
+                  "from flask import Flask\napp = Flask(__name__)\n\n"
+                  "@app.route(\"/orders\")\ndef orders():\n    return \"ok\"\n");
+    th_write_file(TH_PATH(g_incr_tmpdir, "infra/config.yaml"),
+                  "hooks:\n  webhook_url: https://api.example.com/orders/list\n");
+
+    char *project = NULL;
+    ASSERT_EQ(pipeline_incremental_edit_matches_full(pipeline_route_probe_add_exact_handler,
+                                                     &project),
+              0);
+
+    free(project);
+    cleanup_incremental_repo();
+    PASS();
+#endif
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  *  FastAPI Depends() edge tracking (PR #66, fix #27)
  * ═══════════════════════════════════════════════════════════════════ */
@@ -7752,6 +7901,9 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_single_file_preserves_and_removes_exact_project_summary);
     RUN_TEST(pipeline_incremental_delete_direct_zova_matches_fresh_full);
     RUN_TEST(pipeline_incremental_rename_direct_zova_matches_fresh_full);
+    RUN_TEST(pipeline_incremental_infra_route_change_matches_fresh_full);
+    RUN_TEST(pipeline_incremental_shared_infra_url_survives_owner_change);
+    RUN_TEST(pipeline_incremental_handler_change_rematches_infra_route);
     RUN_TEST(incremental_detects_deleted_file);
     RUN_TEST(incremental_new_file_added);
     RUN_TEST(incremental_fast_preserves_mode_skipped_tools_dir);
