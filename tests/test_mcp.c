@@ -1288,6 +1288,95 @@ TEST(tool_query_graph_basic) {
     PASS();
 }
 
+/* Upstream #1196: max_rows limits projected rows only. Two caps applied it to
+ * the input instead, so count() saw a prefix: the unlabeled scan read only
+ * max_rows*10 nodes, and each hop kept only bind_cap*10 expanded rows even
+ * when the source was labeled. 2 Class sources x 30 CALLS = 60 edges and 32
+ * nodes, queried with max_rows=2: the caps reported 20 nodes and 20 edges. */
+TEST(tool_query_graph_count_ignores_max_rows) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "count-proj";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/count");
+
+    int64_t callee[30];
+    for (int i = 0; i < 30; i++) {
+        char name[8];
+        char qn[32];
+        snprintf(name, sizeof(name), "f%02d", i);
+        snprintf(qn, sizeof(qn), "count-proj.f%02d", i);
+        cbm_node_t n = {.project = proj,
+                        .label = "Function",
+                        .name = name,
+                        .qualified_name = qn,
+                        .file_path = "callee.c",
+                        .start_line = i + 1,
+                        .end_line = i + 1};
+        callee[i] = cbm_store_upsert_node(st, &n);
+    }
+    for (int c = 0; c < 2; c++) {
+        char name[8];
+        char qn[32];
+        snprintf(name, sizeof(name), "C%d", c);
+        snprintf(qn, sizeof(qn), "count-proj.C%d", c);
+        cbm_node_t n = {.project = proj,
+                        .label = "Class",
+                        .name = name,
+                        .qualified_name = qn,
+                        .file_path = "caller.c",
+                        .start_line = c + 1,
+                        .end_line = c + 1};
+        int64_t id = cbm_store_upsert_node(st, &n);
+        for (int i = 0; i < 30; i++) {
+            cbm_edge_t e = {
+                .project = proj, .source_id = id, .target_id = callee[i], .type = "CALLS"};
+            cbm_store_insert_edge(st, &e);
+        }
+    }
+
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
+    const char *cases[][2] = {
+        {"MATCH (n) RETURN count(n) AS n", "[\"32\"]"},
+        {"MATCH (a:Class)-[r:CALLS]->(b) RETURN count(r) AS n", "[\"60\"]"},
+        {"MATCH (a)-[r:CALLS]->(b) RETURN count(r) AS n", "[\"60\"]"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char req[512];
+        snprintf(req, sizeof(req),
+                 "{\"jsonrpc\":\"2.0\",\"id\":72,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"query_graph\",\"arguments\":{\"project\":\"count-proj\","
+                 "\"query\":\"%s\",\"max_rows\":2}}}",
+                 cases[i][0]);
+        char *resp = cbm_mcp_server_handle(srv, req);
+        ASSERT_NOT_NULL(resp);
+        char *inner = extract_text_content(resp);
+        ASSERT_NOT_NULL(inner);
+        if (!strstr(inner, cases[i][1])) {
+            printf("  %s -> %s\n", cases[i][0], inner);
+        }
+        ASSERT_NOT_NULL(strstr(inner, cases[i][1]));
+        free(inner);
+        free(resp);
+    }
+
+    /* The list form still stops at max_rows. */
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":73,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"query_graph\",\"arguments\":{\"project\":\"count-proj\","
+             "\"query\":\"MATCH (a:Class)-[r:CALLS]->(b) RETURN a.name, b.name\","
+             "\"max_rows\":2}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"total\":2"));
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 TEST(tool_index_status_no_project) {
     cbm_mcp_server_t *srv = setup_mcp_with_data();
 
@@ -4934,6 +5023,7 @@ SUITE(mcp) {
     RUN_TEST(tool_search_graph_includes_node_properties);
     RUN_TEST(tool_search_graph_query_honors_file_pattern_issue552);
     RUN_TEST(tool_query_graph_basic);
+    RUN_TEST(tool_query_graph_count_ignores_max_rows);
     RUN_TEST(tool_index_status_no_project);
     RUN_TEST(tool_index_status_includes_git_metadata);
 

@@ -293,6 +293,9 @@ int cbm_store_find_nodes_by_name(cbm_store_t *s, const char *project, const char
 int cbm_store_find_nodes_by_name_any(cbm_store_t *s, const char *name, cbm_node_t **out,
                                      int *count);
 
+/* Find all nodes in a project. Returns allocated array, caller frees. */
+int cbm_store_find_nodes(cbm_store_t *s, const char *project, cbm_node_t **out, int *count);
+
 /* Find nodes by label. */
 int cbm_store_find_nodes_by_label(cbm_store_t *s, const char *project, const char *label,
                                   cbm_node_t **out, int *count);
@@ -404,7 +407,7 @@ void cbm_store_traverse_free(cbm_traverse_result_t *out);
 
 /* A store whose graph reads are answered by the caller instead of a database.
  * It serves exactly the reads the Cypher engine makes: cbm_store_search,
- * cbm_store_find_node_by_id, cbm_store_find_nodes_by_label, the four
+ * cbm_store_find_node_by_id, cbm_store_find_nodes[_by_label], the four
  * cbm_store_find_edges_by_{source,target}[_type], cbm_store_node_degree and
  * cbm_store_bfs. Every other store call is unsupported on it. Results follow
  * the usual ownership: the caller frees them with the cbm_store_*_free
