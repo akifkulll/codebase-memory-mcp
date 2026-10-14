@@ -627,17 +627,6 @@ int cbm_store_get_architecture(cbm_store_t *s, const char *project, const char *
                                cbm_architecture_info_t *out);
 void cbm_store_architecture_free(cbm_architecture_info_t *out);
 
-/* ── ADR (Architecture Decision Record) ────────────────────────── */
-
-#define CBM_ADR_MAX_LENGTH 8000
-
-typedef struct {
-    const char *project;
-    const char *content;
-    const char *created_at;
-    const char *updated_at;
-} cbm_adr_t;
-
 /* Exact project_summaries row used by the shared user-local Zova
  * publisher. All returned strings are heap-owned by the export object. */
 typedef struct {
@@ -647,31 +636,9 @@ typedef struct {
     char *updated_at;
 } cbm_project_summary_export_t;
 
-int cbm_store_adr_store(cbm_store_t *s, const char *project, const char *content);
-int cbm_store_adr_get(cbm_store_t *s, const char *project, cbm_adr_t *out);
-int cbm_store_adr_delete(cbm_store_t *s, const char *project);
 int cbm_store_project_summary_export(cbm_store_t *s, const char *project,
                                       cbm_project_summary_export_t *out);
 void cbm_store_project_summary_export_free(cbm_project_summary_export_t *row);
-int cbm_store_adr_update_sections(cbm_store_t *s, const char *project, const char **keys,
-                                  const char **values, int count, cbm_adr_t *out);
-void cbm_store_adr_free(cbm_adr_t *adr);
-
-/* ADR section parsing/rendering (pure functions, no store needed) */
-
-enum { PROPS_MAX = 16 };
-
-typedef struct {
-    char *keys[PROPS_MAX];
-    char *values[PROPS_MAX];
-    int count;
-} cbm_adr_sections_t;
-
-cbm_adr_sections_t cbm_adr_parse_sections(const char *content);
-char *cbm_adr_render(const cbm_adr_sections_t *sections);
-int cbm_adr_validate_content(const char *content, char *errbuf, int errbuf_size);
-int cbm_adr_validate_section_keys(const char **keys, int count, char *errbuf, int errbuf_size);
-void cbm_adr_sections_free(cbm_adr_sections_t *s);
 
 /* ── Search helpers (exposed for testing) ───────────────────────── */
 

@@ -116,9 +116,6 @@ struct cbm_pipeline {
     cbm_pipeline_route_t last_route;
     cbm_pipeline_zova_publish_stats_t zova_publish_stats;
 
-    /* ADR (project_summaries) captured before a full-reindex DB delete, so it
-     * can be restored after the rebuild. NULL when no ADR existed. Issue #516. */
-    char *saved_adr;
     cbm_project_summary_export_t saved_summary;
     bool saved_summary_valid;
 };
@@ -229,9 +226,6 @@ void cbm_pipeline_free(cbm_pipeline_t *p) {
     p->file_errors_count = 0;
     p->file_errors_cap = 0;
     free(p->branch_qn);
-    free(p->saved_adr); /* freed here too: error paths can exit before the
-                         * restore in dump_and_persist_hashes runs. Issue #516. */
-    p->saved_adr = NULL;
     cbm_store_project_summary_export_free(&p->saved_summary);
     p->saved_summary_valid = false;
     cbm_git_context_free(&p->git_ctx);
@@ -1043,21 +1037,12 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
         cbm_store_close(check_store);
     }
     cbm_log_info("pipeline.route", "path", "reindex", "action", "deleting old db");
-    /* Capture any ADR before deleting the DB so the full-reindex rebuild can
-     * restore it (project_summaries is otherwise lost). Issue #516. */
+    /* Keep the project summary across the full-reindex DB delete. */
     {
-        cbm_store_t *adr_store = cbm_store_open_path(db_path);
-        if (adr_store) {
-            cbm_pipeline_capture_project_summary(p, adr_store);
-            cbm_adr_t existing;
-            if (cbm_store_adr_get(adr_store, p->project_name, &existing) == CBM_STORE_OK) {
-                if (existing.content) {
-                    free(p->saved_adr);
-                    p->saved_adr = strdup(existing.content);
-                }
-                cbm_store_adr_free(&existing);
-            }
-            cbm_store_close(adr_store);
+        cbm_store_t *summary_store = cbm_store_open_path(db_path);
+        if (summary_store) {
+            cbm_pipeline_capture_project_summary(p, summary_store);
+            cbm_store_close(summary_store);
         }
     }
     cbm_unlink(db_path);
@@ -1304,8 +1289,6 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
             cbm_log_error("pipeline.err", "phase", "zova_single_file");
             return publish_rc;
         }
-        free(p->saved_adr);
-        p->saved_adr = NULL;
         return 0;
     }
     int rc = cbm_gbuf_dump_to_sqlite(p->gbuf, db_path);
@@ -1323,16 +1306,6 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
         CBM_PROF_START(t_delhash);
         cbm_store_delete_file_hashes(hash_store, p->project_name);
         CBM_PROF_END("persist", "2_delete_file_hashes", t_delhash);
-
-        /* Restore the ADR captured before the dump. Surface a failed restore
-         * rather than silently dropping the ADR (the original #516 symptom). */
-        CBM_PROF_START(t_adr);
-        if (p->saved_adr) {
-            if (cbm_store_adr_store(hash_store, p->project_name, p->saved_adr) != CBM_STORE_OK) {
-                cbm_log_error("pipeline.err", "phase", "adr_restore", "project", p->project_name);
-            }
-        }
-        CBM_PROF_END("persist", "3_adr_restore", t_adr);
 
         /* Batch the per-file hash upserts into ONE transaction. The per-file
          * cbm_store_upsert_file_hash path autocommits, i.e. file_count fsyncs
@@ -1393,8 +1366,6 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
         cbm_store_close(hash_store);
         cbm_log_info("pass.timing", "pass", "persist_hashes", "files", itoa_buf(file_count));
     }
-    free(p->saved_adr);
-    p->saved_adr = NULL;
 
     rc = cbm_gbuf_finalize_zova_sidecar(p->gbuf, db_path);
     if (rc != 0) {
