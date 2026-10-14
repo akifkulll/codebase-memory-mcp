@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../internal/cbm/sqlite_writer.h"
+#include "../../internal/cbm/dump_types.h"
 
 #ifndef CBM_WITH_ZOVA
 #define CBM_WITH_ZOVA 0
@@ -16,26 +16,6 @@
 #if CBM_WITH_ZOVA
 typedef struct zova_database zova_database;
 #endif
-
-typedef enum {
-    CBM_ZOVA_MODE_OFF = 0,
-    CBM_ZOVA_MODE_CONTAINER = 1,
-    CBM_ZOVA_MODE_I8_VECTORS = 2,
-    CBM_ZOVA_MODE_GRAPH_MIRROR = 3,
-    CBM_ZOVA_MODE_GRAPH_READ = 4,
-    CBM_ZOVA_MODE_AUTHORITY = 5,
-} cbm_zova_mode_t;
-
-typedef struct {
-    int64_t node_id;
-    char *name;
-    char *qualified_name;
-    char *file_path;
-    char *label;
-    int8_t *vector;
-    int vector_len;
-    double first_score;
-} cbm_zova_node_candidate_t;
 
 typedef struct {
     char *vector_id;
@@ -93,24 +73,6 @@ typedef struct {
     bool fallback;
 } cbm_zova_graph_metrics_t;
 
-typedef struct {
-    double direct_graph_write_ms;
-    double sqlite_row_mirror_ms;
-    uint64_t direct_node_count;
-    uint64_t direct_edge_count;
-    uint64_t mirror_node_count;
-    uint64_t mirror_edge_count;
-} cbm_zova_graph_ingestion_metrics_t;
-
-typedef struct {
-    bool used_full_search;
-    double open_ms;
-    double candidate_count_ms;
-    double candidate_id_collection_ms;
-    double vector_search_ms;
-    double hydration_ms;
-} cbm_zova_vector_prefetch_metrics_t;
-
 /* Non-destructive capability report for the SQL surface CBM needs before
  * moving metadata/FTS into a user-local cbm.zova file. The probe never
  * creates or mutates persistent tables; transaction testing uses a temporary
@@ -125,9 +87,6 @@ typedef struct {
     bool cbm_scalar_functions;
 } cbm_zova_sql_capabilities_t;
 
-#define CBM_ZOVA_NODE_COLLECTION "cbm_node_vectors_i8"
-#define CBM_ZOVA_TOKEN_COLLECTION "cbm_token_vectors_i8"
-#define CBM_ZOVA_CODE_GRAPH "cbm_code_graph"
 #define CBM_ZOVA_WORKSPACE_ID_MAX 80
 #define CBM_ZOVA_MODEL_FINGERPRINT "nomic_embed_code_v1"
 #define CBM_ZOVA_DIGEST_HEX_SIZE 65
@@ -152,19 +111,6 @@ typedef enum {
 } cbm_zova_repack_phase_t;
 
 bool cbm_zova_build_enabled(void);
-cbm_zova_mode_t cbm_zova_mode_from_env(void);
-const char *cbm_zova_mode_name(cbm_zova_mode_t mode);
-/* Graph reads default to Zova when CBM_ZOVA_MODE is unset. Explicit modes
- * retain their existing behavior; in particular, CBM_ZOVA_MODE=off disables
- * every Zova route. */
-bool cbm_zova_graph_read_is_enabled(void);
-/* Vector reads/writes default to Zova when the mode is unset. Explicit
- * `off` remains the complete SQLite rollback switch. */
-bool cbm_zova_vector_read_is_enabled(void);
-/* The shared single-file authority is the default. Explicit `authority`
- * selects the same route; diagnostic modes retain their compatibility
- * behavior and `off` selects pure SQLite. */
-bool cbm_zova_single_file_enabled(void);
 /* Raw, read-only compatibility check used before calling the pinned Zova SDK.
  * A v5/v7 file is valid source material but must be atomically repacked. A
  * format 9-11 file with the current CBM schema needs a Zova format migration. */
@@ -179,7 +125,6 @@ int cbm_zova_workspace_id_for_root(const char *root_path, char *out_workspace_id
 int cbm_zova_workspace_token_id_v1(const char *workspace_id, const char *token,
                                    char *out, size_t out_size);
 
-int cbm_zova_sidecar_path(const char *db_path, char *out, size_t out_sz);
 int cbm_zova_workspace_registry_path(char *out, size_t out_size);
 int cbm_zova_workspace_graph_name(const char *workspace_id, char *out, size_t out_size);
 int cbm_zova_workspace_node_vector_collection_name(const char *workspace_id,
@@ -205,27 +150,6 @@ int cbm_zova_workspace_generation_finish_at(const char *registry_path, const cha
                                              int64_t generation, bool ready);
 int cbm_zova_workspace_active_generation_at(const char *registry_path, const char *workspace_id,
                                              int64_t *out_generation);
-int cbm_zova_workspace_next_generation_at(const char *registry_path, const char *workspace_id,
-                                           int64_t *out_generation);
-/* Reads the source generation copied into a published sidecar. A missing
- * generation table means the sidecar predates crash-safe publication. */
-int cbm_zova_sidecar_generation_get(const char *zova_path, int64_t *out_generation);
-int cbm_zova_after_sqlite_dump(const char *db_path);
-int cbm_zova_after_sqlite_dump_with_i8_vectors(const char *db_path,
-                                                const CBMDumpVector *node_vectors,
-                                                int node_vector_count,
-                                                const CBMDumpTokenVec *token_vectors,
-                                                int token_vector_count, int vector_dim);
-int cbm_zova_after_sqlite_dump_workspace_with_i8_vectors(
-    const char *db_path, const char *root_path, const char *project,
-    const CBMDumpVector *node_vectors, int node_vector_count,
-    const CBMDumpTokenVec *token_vectors, int token_vector_count, int vector_dim);
-int cbm_zova_after_sqlite_dump_workspace_direct(
-    const char *db_path, const char *root_path, const char *project,
-    const CBMDumpNode *nodes, int node_count, const CBMDumpEdge *edges, int edge_count,
-    const CBMDumpVector *node_vectors, int node_vector_count,
-    const CBMDumpTokenVec *token_vectors, int token_vector_count, int vector_dim);
-int cbm_zova_validate_container(const char *zova_path);
 int cbm_zova_probe_sql_capabilities(const char *zova_path,
                                     cbm_zova_sql_capabilities_t *out_capabilities);
 /* Bootstrap the versioned SQL schema for the eventual user-local cbm.zova
@@ -446,75 +370,24 @@ int cbm_zova_user_database_publish_workspace_at_generation(
     int64_t requested_generation, cbm_zova_workspace_generation_result_t *out_result);
 int cbm_zova_user_database_delete_workspace(const char *zova_path,
                                             const char *workspace_id);
-/* Staging-only importer for one finalized workspace. It writes rich node/edge
- * metadata and canonical FTS rows into the user-local file;
- * normal indexing remains on the project .db plus sidecar until parity gates
- * promote this boundary. */
+/* Import one finalized workspace: rich node/edge metadata and canonical FTS
+ * rows into the user-local file. */
 int cbm_zova_user_database_import_workspace(
     const char *zova_path, const char *root_path, const char *project, int64_t generation,
     const CBMDumpNode *nodes, int node_count, const CBMDumpEdge *edges, int edge_count);
-int cbm_zova_mirror_i8_vectors(const char *zova_path, int vector_dim);
-int cbm_zova_write_i8_vectors_direct(const char *zova_path,
-                                     const CBMDumpVector *node_vectors, int node_vector_count,
-                                     const CBMDumpTokenVec *token_vectors, int token_vector_count,
-                                     int vector_dim);
-/* Future shared-file path: one raw-i8 node collection per workspace/model/dimension. */
-int cbm_zova_write_workspace_node_i8_vectors_direct(
-    const char *zova_path, const char *workspace_id, const char *model_fingerprint,
-    const CBMDumpVector *node_vectors, int node_vector_count, int vector_dim);
-int cbm_zova_delete_workspace_node_i8_vectors(const char *zova_path, const char *workspace_id,
-                                               const char *model_fingerprint, int vector_dim);
-int cbm_zova_write_workspace_token_i8_vectors_direct(
-    const char *zova_path, const char *workspace_id, const char *model_fingerprint,
-    const CBMDumpTokenVec *token_vectors, int token_vector_count, int vector_dim);
-int cbm_zova_delete_workspace_token_i8_vectors(const char *zova_path, const char *workspace_id,
-                                                const char *model_fingerprint, int vector_dim);
-int cbm_zova_mirror_graph(const char *zova_path);
-/* Experimental workspace-scoped topology mirror. The existing SQLite project
- * rows remain authoritative; this only writes a scoped Zova graph for parity. */
-int cbm_zova_mirror_workspace_graph(const char *zova_path, const char *workspace_id,
-                                    const char *project);
-/* Write one workspace's native topology from CBM's finalized dump arrays.
- * This path never scans SQLite nodes or edges. */
-int cbm_zova_write_workspace_graph_direct(const char *zova_path, const char *workspace_id,
-                                          const char *project, const CBMDumpNode *nodes,
-                                          int node_count, const CBMDumpEdge *edges,
-                                          int edge_count);
 /* Remove one workspace's scoped native topology only. */
 int cbm_zova_delete_workspace_graph(const char *zova_path, const char *workspace_id);
-/* Benchmark only workspace graph materialization. Each destination is first
- * converted from db_path outside the timers; caller owns cleanup of both. */
-int cbm_zova_benchmark_workspace_graph_ingestion(
-    const char *db_path, const char *direct_zova_path, const char *mirror_zova_path,
-    const char *workspace_id, const char *project, const CBMDumpNode *nodes, int node_count,
-    const CBMDumpEdge *edges, int edge_count, cbm_zova_graph_ingestion_metrics_t *out_metrics);
-bool cbm_zova_should_use_full_vector_search(int candidate_count, int collection_count);
 
 #if CBM_WITH_ZOVA
 int cbm_zova_register_sql_functions(zova_database *db);
 #endif
 
-int cbm_zova_vector_prefetch_nodes(const char *zova_path, const char *project,
-                                   const int8_t *query, int vector_dim, int limit,
-                                   cbm_zova_node_candidate_t **out, int *out_count);
-int cbm_zova_vector_prefetch_nodes_ex(const char *zova_path, const char *project,
-                                      const int8_t *query, int vector_dim, int limit,
-                                      cbm_zova_node_candidate_t **out, int *out_count,
-                                      cbm_zova_vector_prefetch_metrics_t *metrics);
 cbm_zova_vector_session_t *cbm_zova_vector_session_open(const char *zova_path);
 void cbm_zova_vector_session_close(cbm_zova_vector_session_t *session);
 int cbm_zova_vector_session_generation(const cbm_zova_vector_session_t *session,
                                        int64_t *out_generation);
 int cbm_zova_vector_session_has_workspace(const cbm_zova_vector_session_t *session,
                                           const char *workspace_id, bool *out_present);
-int cbm_zova_vector_session_prefetch_nodes_ex(
-    cbm_zova_vector_session_t *session, const char *project, const int8_t *query, int vector_dim,
-    int limit, bool include_vector, cbm_zova_node_candidate_t **out, int *out_count,
-    cbm_zova_vector_prefetch_metrics_t *metrics);
-int cbm_zova_vector_session_prefetch_multi_i8_ex(
-    cbm_zova_vector_session_t *session, const char *project, const int8_t *query_values,
-    int query_count, int vector_dim, int prefilter_limit, int limit,
-    cbm_zova_node_candidate_t **out, int *out_count, cbm_zova_vector_prefetch_metrics_t *metrics);
 int cbm_zova_vector_session_search_collection_i8(
     cbm_zova_vector_session_t *session, const char *collection, const int8_t *query_values,
     int query_count, int vector_dim, int prefilter_limit, int limit,
@@ -524,7 +397,6 @@ int cbm_zova_vector_session_get_workspace_token_i8(
     const char *model_fingerprint, int vector_dim, const char *token,
     int8_t *out_values, size_t out_len, bool *out_found);
 void cbm_zova_vector_hits_free(cbm_zova_vector_hit_t *items, int count);
-void cbm_zova_node_candidates_free(cbm_zova_node_candidate_t *items, int count);
 
 cbm_zova_graph_session_t *cbm_zova_graph_session_open(const char *zova_path);
 void cbm_zova_graph_session_close(cbm_zova_graph_session_t *session);
@@ -547,6 +419,5 @@ int cbm_zova_graph_session_adjacency_prepare_count(
 void cbm_zova_graph_adjacency_free(cbm_zova_graph_adjacency_t *items, int count);
 void cbm_zova_graph_visits_free(cbm_zova_graph_visit_t *visits, int count);
 
-int cbm_zova_graph_neighbor_count(const char *zova_path, const char *node_id, int *out_count);
 
 #endif /* CBM_ZOVA_H */

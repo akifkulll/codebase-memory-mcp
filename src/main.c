@@ -433,7 +433,7 @@ static int run_cli(int argc, char **argv) {
         cbm_progress_sink_init(stderr);
     }
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     if (!srv) {
         (void)fprintf(stderr, "error: failed to create server\n");
         if (progress) {
@@ -623,8 +623,7 @@ static char **cbm_win_utf8_argv(int *out_argc) {
 static void migrate_zova_format_at_startup(void) {
     char path[CBM_SZ_1K];
     cbm_zova_operation_report_t report = {0};
-    if (!cbm_zova_single_file_enabled() ||
-        cbm_zova_user_database_path(path, sizeof(path)) != 0 || !cbm_file_exists(path) ||
+    if (cbm_zova_user_database_path(path, sizeof(path)) != 0 || !cbm_file_exists(path) ||
         cbm_zova_database_format_status(path) != CBM_ZOVA_DATABASE_MIGRATION_REQUIRED) {
         return;
     }
@@ -717,7 +716,7 @@ int main(int argc, char **argv) {
     }
 
     /* Create MCP server */
-    g_server = cbm_mcp_server_new(NULL);
+    g_server = cbm_mcp_server_new();
     if (!g_server) {
         cbm_log_error("server.err", "msg", "failed to create server");
         cbm_config_close(runtime_config);

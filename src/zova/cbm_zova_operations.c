@@ -1836,7 +1836,6 @@ cbm_zova_operation_code_t cbm_zova_workspace_recover(
     if (cbm_zova_workspace_id_for_root(repo_path, expected_workspace,
                                        sizeof(expected_workspace)) != 0 ||
         strcmp(expected_workspace, workspace_id) != 0 ||
-        cbm_zova_route_from_env() != CBM_ZOVA_ROUTE_FULL_AUTHORITY ||
         cbm_zova_user_database_path(user_path, sizeof(user_path)) != 0 ||
         strcmp(user_path, path) != 0) {
         operations_report(out, CBM_ZOVA_OPERATION_INVALID, "recover_workspace",

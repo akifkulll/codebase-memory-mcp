@@ -1600,11 +1600,8 @@ TEST(zova_operations_workspace_recover_runs_full_source_rebuild_and_retries) {
     ASSERT_EQ(fclose(source), 0);
 
     const char *saved_cache = getenv("CBM_CACHE_DIR");
-    const char *saved_flag = getenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    char *saved_flag_copy = saved_flag ? strdup(saved_flag) : NULL;
     cbm_setenv("CBM_CACHE_DIR", base, 1);
-    cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", "1", 1);
     cbm_zova_workspace_generation_result_t seeded = {0};
     ASSERT_EQ(operations_publish_rich_fixture_named(
                   path, repo_path, "tiny-recover", "{\"summary\":\"before\"}", &seeded), 0);
@@ -1631,9 +1628,6 @@ TEST(zova_operations_workspace_recover_runs_full_source_rebuild_and_retries) {
 
     if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
     else cbm_unsetenv("CBM_CACHE_DIR");
-    if (saved_flag_copy) cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", saved_flag_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
-    free(saved_flag_copy);
     free(saved_cache_copy);
     cbm_unsetenv("CBM_ZOVA_TEST_FAIL_PHASE");
     char sidecar[OPERATIONS_PATH_MAX + 32];
@@ -1713,11 +1707,8 @@ TEST(zova_operations_workspace_recover_quarantines_whole_file_without_replacemen
     ASSERT_EQ(cbm_zova_workspace_id_for_root(repo_path, workspace_id, sizeof(workspace_id)), 0);
 
     const char *saved_cache = getenv("CBM_CACHE_DIR");
-    const char *saved_flag = getenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    char *saved_flag_copy = saved_flag ? strdup(saved_flag) : NULL;
     cbm_setenv("CBM_CACHE_DIR", base, 1);
-    cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", "1", 1);
     cbm_zova_operation_report_t report = {0};
     ASSERT_EQ(cbm_zova_workspace_recover(path, workspace_id, repo_path, &report),
               CBM_ZOVA_OPERATION_WHOLE_FILE_RECOVERY_REQUIRED);
@@ -1730,9 +1721,6 @@ TEST(zova_operations_workspace_recover_quarantines_whole_file_without_replacemen
 
     if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
     else cbm_unsetenv("CBM_CACHE_DIR");
-    if (saved_flag_copy) cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", saved_flag_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
-    free(saved_flag_copy);
     free(saved_cache_copy);
     cbm_unlink(quarantine);
     char lock[OPERATIONS_PATH_MAX + 32];
@@ -3183,7 +3171,7 @@ TEST(zova_operations_three_queued_publishers_keep_readers_generation_consistent)
     ASSERT_EQ(seeded_a.generation, 1);
     ASSERT_EQ(seeded_b.generation, 1);
 
-    cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *server = cbm_mcp_server_new();
     ASSERT_NOT_NULL(server);
     _Atomic int entry_release[3], publisher_release, publisher_held, entry_count;
     for (int i = 0; i < 3; ++i) atomic_init(&entry_release[i], 0);

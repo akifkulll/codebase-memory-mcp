@@ -2,8 +2,6 @@
  * test_dump_verify.c — Post-dump plausibility gate (#334).
  *
  * Pure-function matrix mirrors sast-ai-app checkSilentDegradation cases.
- * I/O-level coverage that drives the gate against a real on-disk SQLite store
- * lives in test_dump_verify_io.c (store-linked, excluded from test-foundation).
  */
 #include "../src/foundation/compat.h"
 #include "../src/foundation/dump_verify.h"

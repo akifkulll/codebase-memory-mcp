@@ -11,7 +11,7 @@
  */
 #include "foundation/constants.h"
 
-enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24, INCR_WAL_BUF = 1040 };
+enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24 };
 #include "pipeline/pipeline.h"
 #include <stdio.h>
 #include <time.h>
@@ -19,7 +19,6 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24, INCR_WAL_BUF = 1
 #include "store/store.h"
 #include "zova/cbm_zova.h"
 #include "zova/cbm_zova_repository.h"
-#include "zova/cbm_zova_route.h"
 #include "graph_buffer/graph_buffer.h"
 #include "discover/discover.h"
 #include "foundation/log.h"
@@ -705,75 +704,6 @@ static void incr_free_edge_capture(cbm_edge_capture_t *cap) {
     cap->cap = 0;
 }
 
-/* ── Persist file hashes ─────────────────────────────────────────── */
-
-/* Persist file hash rows for the current discovery and any mode-skipped
- * files preserved from the previous DB.
- *
- * Partial-failure policy: an `upsert` failure on any single row is logged
- * as a warning and the loop continues. We deliberately do NOT abort the
- * whole reindex on a single bad row — partial preservation is better than
- * total loss, and a transient failure on one file should not invalidate
- * the entire incremental update. The trade-off is that a silently-failed
- * row produces the same downstream effect as if the file were never
- * indexed at all (forced re-parse on the next run for current-files,
- * potential orphaned-node revival for mode_skipped). The warning surface
- * is the only signal that something went wrong. */
-static void persist_hashes(cbm_store_t *store, const char *project, cbm_file_info_t *files,
-                           int file_count, const cbm_file_hash_t *mode_skipped,
-                           int mode_skipped_count) {
-    int current_failed = 0;
-    int ms_failed = 0;
-
-    /* Current discovery: re-stat to capture any mtime/size that changed
-     * during the run, and write fresh hash rows for visited files. */
-    for (int i = 0; i < file_count; i++) {
-        struct stat st;
-        if (stat(files[i].path, &st) != 0) {
-            continue;
-        }
-        int rc = cbm_store_upsert_file_hash(store, project, files[i].rel_path, "",
-                                            stat_mtime_ns(&st), st.st_size);
-        if (rc != CBM_STORE_OK) {
-            cbm_log_warn("incremental.persist_hash_failed", "scope", "current", "rel_path",
-                         files[i].rel_path, "rc", itoa_buf(rc));
-            current_failed++;
-        }
-    }
-
-    /* Mode-skipped (preserved): re-upsert hash rows from the previous DB
-     * so the next reindex can still classify these files correctly. Without
-     * this, an orphaned-node bug emerges where:
-     *   - full mode indexes everything
-     *   - fast mode runs and drops mode-skipped hash rows
-     *   - file is then deleted on disk
-     *   - next reindex's stored hashes don't include the file → noop or
-     *     can't detect the deletion → graph nodes for the deleted file
-     *     remain forever (or until a destructive rebuild).
-     *
-     * A failure here is more serious than a current-files failure because
-     * it can revive the orphaned-node bug for that specific file. Logged
-     * with scope=mode_skipped so the warning is searchable. */
-    if (mode_skipped) {
-        for (int i = 0; i < mode_skipped_count; i++) {
-            int rc =
-                cbm_store_upsert_file_hash(store, project, mode_skipped[i].rel_path,
-                                           mode_skipped[i].sha256 ? mode_skipped[i].sha256 : "",
-                                           mode_skipped[i].mtime_ns, mode_skipped[i].size);
-            if (rc != CBM_STORE_OK) {
-                cbm_log_warn("incremental.persist_hash_failed", "scope", "mode_skipped", "rel_path",
-                             mode_skipped[i].rel_path, "rc", itoa_buf(rc));
-                ms_failed++;
-            }
-        }
-    }
-
-    if (current_failed > 0 || ms_failed > 0) {
-        cbm_log_warn("incremental.persist_summary", "current_failed", itoa_buf(current_failed),
-                     "mode_skipped_failed", itoa_buf(ms_failed));
-    }
-}
-
 /* ── Registry seed visitor ────────────────────────────────────────── */
 
 /* Labels the full-index definition pass seeds into the registry
@@ -869,8 +799,7 @@ static void run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *change
 /* Run post-extraction passes (tests, decorator tags, configlink). */
 static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_files, int ci,
                            const char *project,
-                           const cbm_incremental_derived_state_t *before,
-                           bool can_reuse_semantic_vectors) {
+                           const cbm_incremental_derived_state_t *before) {
     struct timespec t;
 
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
@@ -936,7 +865,7 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
             cbm_log_info("incremental.derived_gate", "component", "similarity", "decision", "reuse");
         }
 
-        bool semantic_unchanged = can_reuse_semantic_vectors && input_unchanged &&
+        bool semantic_unchanged = input_unchanged &&
             derived_digest_equal(&before->semantic, &after.semantic) &&
             cbm_gbuf_reuse_zova_semantic_vectors(ctx->gbuf) == 0;
         if (!semantic_unchanged) {
@@ -951,73 +880,20 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
         }
     }
 }
-/* Delete old DB and dump merged graph + hashes to disk.
- * Mode-skipped hash rows are preserved across the rebuild so subsequent
- * reindexes can correctly distinguish "never indexed" from "indexed but
- * not visited this pass". */
-static int dump_and_persist(cbm_pipeline_t *pipeline, cbm_gbuf_t *gbuf, const char *db_path,
-                            const char *project,
-                            cbm_file_info_t *files, int file_count,
-                            const cbm_file_hash_t *mode_skipped, int mode_skipped_count,
-                            const char *repo_path,
-                            cbm_zova_workspace_snapshot_t *before) {
-    struct timespec t;
-    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
-
-    if (cbm_zova_route_for_project(project) == CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        if (cbm_gbuf_prepare_zova_dump_delta(gbuf) != 0) {
-            cbm_log_error("incremental.err", "phase", "zova_prepare");
-            return CBM_NOT_FOUND;
-        }
-        if (cbm_pipeline_publish_zova_user_database_delta(
-                pipeline, gbuf, files, file_count, mode_skipped, mode_skipped_count,
-                before) != 0) {
-            cbm_log_error("incremental.err", "phase", "zova_single_file");
-            return CBM_NOT_FOUND;
-        }
-        return 0;
-    }
-
-    cbm_unlink(db_path);
-    char wal[INCR_WAL_BUF];
-    char shm[INCR_WAL_BUF];
-    snprintf(wal, sizeof(wal), "%s-wal", db_path);
-    snprintf(shm, sizeof(shm), "%s-shm", db_path);
-    cbm_unlink(wal);
-    cbm_unlink(shm);
-
-    int dump_rc = cbm_gbuf_dump_to_sqlite(gbuf, db_path);
-    cbm_log_info("incremental.dump", "rc", itoa_buf(dump_rc), "elapsed_ms",
-                 itoa_buf((int)elapsed_ms(t)));
-
-    cbm_store_t *hash_store = cbm_store_open_path(db_path);
-    if (hash_store) {
-        persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count);
-
-        /* FTS5 rebuild after incremental dump.  The btree dump path bypasses
-         * any triggers that could have kept nodes_fts synchronized, so we
-         * rebuild from the nodes table here.  See the full-dump path in
-         * pipeline.c for the matching logic. */
-        cbm_store_exec(hash_store, "INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all');");
-        if (cbm_store_exec(hash_store,
-                           "INSERT INTO nodes_fts(rowid, name, qualified_name, label, file_path) "
-                           "SELECT id, cbm_camel_split(name), qualified_name, label, file_path "
-                           "FROM nodes;") != CBM_STORE_OK) {
-            cbm_store_exec(hash_store,
-                           "INSERT INTO nodes_fts(rowid, name, qualified_name, label, file_path) "
-                           "SELECT id, name, qualified_name, label, file_path FROM nodes;");
-        }
-
-        cbm_store_close(hash_store);
-    }
-
-    if (cbm_gbuf_finalize_zova_sidecar(gbuf, db_path) != 0) {
-        cbm_log_error("incremental.err", "phase", "zova_sidecar", "path", db_path);
+/* Publish the merged graph and hashes to cbm.zova as a delta generation.
+ * Mode-skipped hash rows are preserved so subsequent reindexes can correctly
+ * distinguish "never indexed" from "indexed but not visited this pass". */
+static int dump_and_persist(cbm_pipeline_t *pipeline, cbm_gbuf_t *gbuf, cbm_file_info_t *files,
+                            int file_count, const cbm_file_hash_t *mode_skipped,
+                            int mode_skipped_count, cbm_zova_workspace_snapshot_t *before) {
+    if (cbm_gbuf_prepare_zova_dump_delta(gbuf) != 0) {
+        cbm_log_error("incremental.err", "phase", "zova_prepare");
         return CBM_NOT_FOUND;
     }
-    if (cbm_pipeline_publish_zova_user_database(pipeline, gbuf, files, file_count,
-                                                mode_skipped, mode_skipped_count) != 0) {
-        cbm_log_error("incremental.err", "phase", "zova_single_file", "path", db_path);
+    if (cbm_pipeline_publish_zova_user_database_delta(pipeline, gbuf, files, file_count,
+                                                      mode_skipped, mode_skipped_count,
+                                                      before) != 0) {
+        cbm_log_error("incremental.err", "phase", "zova_single_file");
         return CBM_NOT_FOUND;
     }
     return 0;
@@ -1054,31 +930,19 @@ static int copy_zova_snapshot_hashes(const char *project,
     return 0;
 }
 
-static int run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info_t *files,
-                           int file_count, cbm_zova_workspace_snapshot_t *snapshot,
-                           cbm_gbuf_t *preloaded_graph) {
+static int run_incremental(cbm_pipeline_t *p, cbm_file_info_t *files, int file_count,
+                           cbm_zova_workspace_snapshot_t *snapshot, cbm_gbuf_t *existing) {
     struct timespec t0;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
 
     const char *project = cbm_pipeline_project_name(p);
 
-    cbm_store_t *store = NULL;
     cbm_file_hash_t *stored = NULL;
     int stored_count = 0;
-    if (snapshot) {
-        if (copy_zova_snapshot_hashes(project, snapshot, &stored, &stored_count) != 0) {
-            cbm_log_error("incremental.err", "msg", "load_zova_hashes_failed");
-            cbm_gbuf_free(preloaded_graph);
-            return CBM_NOT_FOUND;
-        }
-    } else {
-        store = cbm_store_open_path(db_path);
-        if (!store) {
-            cbm_log_error("incremental.err", "msg", "open_db_failed", "path", db_path);
-            return CBM_NOT_FOUND;
-        }
-        cbm_pipeline_capture_project_summary(p, store);
-        cbm_store_get_file_hashes(store, project, &stored, &stored_count);
+    if (copy_zova_snapshot_hashes(project, snapshot, &stored, &stored_count) != 0) {
+        cbm_log_error("incremental.err", "msg", "load_zova_hashes_failed");
+        cbm_gbuf_free(existing);
+        return CBM_NOT_FOUND;
     }
 
     /* Classify files */
@@ -1100,19 +964,17 @@ static int run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info
                  itoa_buf(n_unchanged), "deleted", itoa_buf(deleted_count), "mode_skipped",
                  itoa_buf(mode_skipped_count));
 
-    /* Fast path: nothing changed → skip. The on-disk DB is left untouched,
-     * which means existing hash rows (including for any mode-skipped files
-     * that were already preserved by an earlier run) remain intact. */
+    /* Fast path: nothing changed → skip. The committed generation is left
+     * untouched, which means existing hash rows (including for any
+     * mode-skipped files that were already preserved by an earlier run)
+     * remain intact. */
     if (n_changed == 0 && deleted_count == 0) {
         cbm_log_info("incremental.noop", "reason", "no_changes");
         free(is_changed);
         free(deleted);
         free_mode_skipped(mode_skipped, mode_skipped_count);
         cbm_store_free_file_hashes(stored, stored_count);
-        if (store) {
-            cbm_store_close(store);
-        }
-        cbm_gbuf_free(preloaded_graph);
+        cbm_gbuf_free(existing);
         return 0;
     }
 
@@ -1131,43 +993,15 @@ static int run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info
 
     cbm_log_info("incremental.reparse", "files", itoa_buf(ci));
 
+    /* Step 1: the existing graph was exported from the committed generation */
+    cbm_log_info("incremental.load_zova", "nodes", itoa_buf(cbm_gbuf_node_count(existing)),
+                 "edges", itoa_buf(cbm_gbuf_edge_count(existing)));
+
     struct timespec t;
-
-    /* Step 1: Load existing graph into RAM */
-    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
-    cbm_gbuf_t *existing = preloaded_graph
-                               ? preloaded_graph
-                               : cbm_gbuf_new(project, cbm_pipeline_repo_path(p));
-    int load_rc = preloaded_graph ? 0 : cbm_gbuf_load_from_db(existing, db_path, project);
-    cbm_log_info(snapshot ? "incremental.load_zova" : "incremental.load_db", "rc",
-                 itoa_buf(load_rc), "nodes",
-                 itoa_buf(cbm_gbuf_node_count(existing)), "edges",
-                 itoa_buf(cbm_gbuf_edge_count(existing)), "elapsed_ms",
-                 itoa_buf((int)elapsed_ms(t)));
-
-    if (load_rc != 0) {
-        cbm_log_error("incremental.err", "msg", "load_db_failed");
-        cbm_gbuf_free(existing);
-        free(changed_files);
-        for (int i = 0; i < deleted_count; i++) {
-            free(deleted[i]);
-        }
-        free(deleted);
-        free_mode_skipped(mode_skipped, mode_skipped_count);
-        if (store) {
-            cbm_store_close(store);
-        }
-        return CBM_NOT_FOUND;
-    }
-
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
     cbm_incremental_derived_state_t derived_before = derived_state(existing);
     cbm_log_info("incremental.derived_digest", "phase", "baseline", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(t)));
-
-    if (store) {
-        cbm_store_close(store);
-    }
 
     /* Snapshot inbound cross-file edges into changed files BEFORE purging, so
      * the cascade delete doesn't permanently drop edges whose source lives in
@@ -1275,22 +1109,22 @@ static int run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info
                  itoa_buf(edge_cap.count), "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
     incr_free_edge_capture(&edge_cap);
 
-    run_postpasses(&ctx, changed_files, ci, project, &derived_before, snapshot != NULL);
+    run_postpasses(&ctx, changed_files, ci, project, &derived_before);
 
     free(changed_files);
     cbm_registry_free(registry);
     cbm_path_alias_collection_free(path_aliases);
 
-    /* Step 7: Dump to disk (preserves mode-skipped hash rows so the next
-     * reindex can correctly classify those files instead of seeing them
-     * as never-existed). */
+    /* Step 7: Publish (preserves mode-skipped hash rows so the next reindex
+     * can correctly classify those files instead of seeing them as
+     * never-existed). */
     /* Record committed counts before dump_and_persist (whose dump frees the
      * gbuf node index, zeroing the count) so the #334 plausibility gate also
      * covers incremental reindexes, not just full ones. */
     cbm_pipeline_set_committed_counts(p, cbm_gbuf_node_count(existing),
                                       cbm_gbuf_edge_count(existing));
-    int persist_rc = dump_and_persist(p, existing, db_path, project, files, file_count, mode_skipped,
-                                      mode_skipped_count, cbm_pipeline_repo_path(p), snapshot);
+    int persist_rc = dump_and_persist(p, existing, files, file_count, mode_skipped,
+                                      mode_skipped_count, snapshot);
     free_mode_skipped(mode_skipped, mode_skipped_count);
     cbm_gbuf_free(existing);
     if (persist_rc != 0) {
@@ -1301,11 +1135,6 @@ static int run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info
     return 0;
 }
 
-int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info_t *files,
-                                 int file_count) {
-    return run_incremental(p, db_path, files, file_count, NULL, NULL);
-}
-
 int cbm_pipeline_run_incremental_zova(cbm_pipeline_t *p, const char *zova_path,
                                       cbm_file_info_t *files, int file_count,
                                       cbm_zova_workspace_snapshot_t *snapshot,
@@ -1313,5 +1142,5 @@ int cbm_pipeline_run_incremental_zova(cbm_pipeline_t *p, const char *zova_path,
     if (!snapshot || !preloaded_graph) {
         return CBM_NOT_FOUND;
     }
-    return run_incremental(p, zova_path, files, file_count, snapshot, preloaded_graph);
+    return run_incremental(p, files, file_count, snapshot, preloaded_graph);
 }

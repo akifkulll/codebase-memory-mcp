@@ -361,7 +361,7 @@ int cbm_cmd_hook_augment(void) {
     }
 #endif
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     if (!srv) {
         yyjson_doc_free(doc);
         free(input);

@@ -23,11 +23,9 @@
 #define FQN_MAX_PATH_SEGS 254
 #define FQN_MAX_DIR_SEGS 255
 
-/* Max bytes for a derived project name. The name becomes a filename component
- * ("<cache>/<name>.db" and sidecars ".db-wal"/".db.corrupt"), so it must stay
- * under the filesystem's 255-byte component limit. 200 leaves headroom for the
- * longest sidecar suffix. #571 hex-encodes each non-ASCII byte to 2 chars, so a
- * deep CJK path can triple past 255 and make the DB file un-openable (#624). */
+/* Max bytes for a derived project name. Names were once filename components,
+ * so they stay under the 255-byte component limit. #571 hex-encodes each
+ * non-ASCII byte to 2 chars, so a deep CJK path can triple past 255 (#624). */
 #define FQN_MAX_NAME_LEN 200
 
 /* ── Internal helpers ─────────────────────────────────────────────── */

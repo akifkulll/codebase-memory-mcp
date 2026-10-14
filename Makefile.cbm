@@ -164,7 +164,6 @@ ZSTD_SRCS = $(CBM_DIR)/zstd_store.c
 PREPROCESSOR_SRC = $(CBM_DIR)/preprocessor.cpp
 
 # SQLite writer
-SQLITE_WRITER_SRC = $(CBM_DIR)/sqlite_writer.c
 
 # Store module (new)
 STORE_SRCS = src/store/store.c
@@ -302,7 +301,7 @@ YYJSON_SRC = vendored/yyjson/yyjson.c
 # All production sources
 PROD_SRCS = $(FOUNDATION_SRCS) $(STORE_SRCS) $(ZOVA_SRCS) $(CYPHER_SRCS) $(MCP_SRCS) $(DISCOVER_SRCS) $(GRAPH_BUFFER_SRCS) $(PIPELINE_SRCS) $(SIMHASH_SRCS) $(SEMANTIC_SRCS) $(TRACES_SRCS) $(WATCHER_SRCS) $(GIT_SRCS) $(CLI_SRCS) $(YYJSON_SRC)
 EXISTING_C_SRCS = $(EXTRACTION_SRCS) $(LSP_SRCS) $(TS_RUNTIME_SRC) \
-                  $(GRAMMAR_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC)
+                  $(GRAMMAR_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS)
 
 # ── Test sources ─────────────────────────────────────────────────
 
@@ -331,11 +330,7 @@ TEST_STORE_SRCS = \
     tests/test_store_nodes.c \
     tests/test_store_edges.c \
     tests/test_store_search.c \
-    tests/test_store_arch.c \
-    tests/test_store_bulk.c \
-    tests/test_store_pragmas.c \
-    tests/test_store_checkpoint.c \
-    tests/test_dump_verify_io.c
+    tests/test_store_arch.c
 
 TEST_CYPHER_SRCS = \
     tests/test_cypher.c
@@ -359,7 +354,6 @@ TEST_WATCHER_SRCS = tests/test_watcher.c
 TEST_LZ4_SRCS = tests/test_lz4.c
 TEST_ZSTD_SRCS = tests/test_zstd.c
 
-TEST_SQLITE_WRITER_SRCS = tests/test_sqlite_writer.c
 
 TEST_GO_LSP_SRCS = tests/test_go_lsp.c
 
@@ -409,7 +403,7 @@ TEST_SIMHASH_SRCS = tests/test_simhash.c
 
 TEST_STACK_OVERFLOW_SRCS = tests/test_stack_overflow.c
 
-TEST_ZOVA_SRCS = tests/test_zova.c tests/test_zova_real_repo.c tests/test_zova_graph_real_repo.c
+TEST_ZOVA_SRCS = tests/test_zova.c
 TEST_ZOVA_C_SQL_FUNCTIONS_SRCS = tests/test_zova_c_sql_functions.c
 TEST_ZOVA_BRIDGE_SRCS = tests/test_zova_bridge.c tests/test_zova_plugin.c
 
@@ -471,7 +465,7 @@ TEST_REPRO_SRCS = \
     tests/repro/repro_lsp_java_cs.c \
     tests/repro/repro_lsp_kt_php_rust.c
 
-ALL_TEST_SRCS =$(TEST_FOUNDATION_SRCS) $(TEST_EXTRACTION_SRCS) $(TEST_STORE_SRCS) $(TEST_CYPHER_SRCS) $(TEST_MCP_SRCS) $(TEST_DISCOVER_SRCS) $(TEST_GRAPH_BUFFER_SRCS) $(TEST_PIPELINE_SRCS) $(TEST_WATCHER_SRCS) $(TEST_LZ4_SRCS) $(TEST_ZSTD_SRCS) $(TEST_SQLITE_WRITER_SRCS) $(TEST_GO_LSP_SRCS) $(TEST_C_LSP_SRCS) $(TEST_PHP_LSP_SRCS) $(TEST_CS_LSP_SRCS) $(TEST_CS_LSP_BENCH_SRCS) $(TEST_SCOPE_SRCS) $(TEST_TYPE_REP_SRCS) $(TEST_PY_LSP_SRCS) $(TEST_PY_LSP_BENCH_SRCS) $(TEST_PY_LSP_STRESS_SRCS) $(TEST_PY_LSP_SCALE_SRCS) $(TEST_TS_LSP_SRCS) $(TEST_JAVA_LSP_SRCS) $(TEST_KOTLIN_LSP_SRCS) $(TEST_RUST_LSP_SRCS) $(TEST_TRACES_SRCS) $(TEST_CLI_SRCS) $(TEST_MEM_SRCS) $(TEST_SECURITY_SRCS) $(TEST_YAML_SRCS) $(TEST_SEMANTIC_SRCS) $(TEST_AST_PROFILE_SRCS) $(TEST_SLAB_ALLOC_SRCS) $(TEST_SIMHASH_SRCS) $(TEST_STACK_OVERFLOW_SRCS) $(TEST_ZOVA_SRCS) $(TEST_ZOVA_C_SQL_FUNCTIONS_SRCS) $(TEST_ZOVA_BRIDGE_SRCS) $(TEST_INTEGRATION_SRCS)
+ALL_TEST_SRCS =$(TEST_FOUNDATION_SRCS) $(TEST_EXTRACTION_SRCS) $(TEST_STORE_SRCS) $(TEST_CYPHER_SRCS) $(TEST_MCP_SRCS) $(TEST_DISCOVER_SRCS) $(TEST_GRAPH_BUFFER_SRCS) $(TEST_PIPELINE_SRCS) $(TEST_WATCHER_SRCS) $(TEST_LZ4_SRCS) $(TEST_ZSTD_SRCS) $(TEST_GO_LSP_SRCS) $(TEST_C_LSP_SRCS) $(TEST_PHP_LSP_SRCS) $(TEST_CS_LSP_SRCS) $(TEST_CS_LSP_BENCH_SRCS) $(TEST_SCOPE_SRCS) $(TEST_TYPE_REP_SRCS) $(TEST_PY_LSP_SRCS) $(TEST_PY_LSP_BENCH_SRCS) $(TEST_PY_LSP_STRESS_SRCS) $(TEST_PY_LSP_SCALE_SRCS) $(TEST_TS_LSP_SRCS) $(TEST_JAVA_LSP_SRCS) $(TEST_KOTLIN_LSP_SRCS) $(TEST_RUST_LSP_SRCS) $(TEST_TRACES_SRCS) $(TEST_CLI_SRCS) $(TEST_MEM_SRCS) $(TEST_SECURITY_SRCS) $(TEST_YAML_SRCS) $(TEST_SEMANTIC_SRCS) $(TEST_AST_PROFILE_SRCS) $(TEST_SLAB_ALLOC_SRCS) $(TEST_SIMHASH_SRCS) $(TEST_STACK_OVERFLOW_SRCS) $(TEST_ZOVA_SRCS) $(TEST_ZOVA_C_SQL_FUNCTIONS_SRCS) $(TEST_ZOVA_BRIDGE_SRCS) $(TEST_INTEGRATION_SRCS)
 
 
 # ── Build directories ────────────────────────────────────────────
@@ -526,7 +520,7 @@ PP_OBJ_TEST = $(BUILD_DIR)/preprocessor.o
 
 # ── Targets ──────────────────────────────────────────────────────
 
-.PHONY: test test-cli test-mcp test-repro test-foundation test-tsan cbm check-zova test-zova-link test-zova-container test-zova-i8 test-zova-vector-parity test-zova-benchmark-smoke test-zova-c-sql-functions test-zova-bridge test-zova-graph-mirror zova-test-runner clean-c lint lint-tidy lint-cppcheck lint-format security
+.PHONY: test test-cli test-mcp test-repro test-foundation test-tsan cbm check-zova test-zova test-zova-c-sql-functions test-zova-bridge zova-test-runner clean-c lint lint-tidy lint-cppcheck lint-format security
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -681,10 +675,10 @@ $(UNIXCODER_OBJ): $(UNIXCODER_BLOB_SRC) vendored/nomic/code_vectors.bin | $(BUIL
 
 OBJS_VENDORED_TEST = $(MIMALLOC_OBJ_TEST) $(SQLITE3_OBJ_TEST) $(TRE_OBJ_TEST) $(GRAMMAR_OBJS_TEST) $(TS_RUNTIME_OBJ_TEST) $(LSP_OBJ_TEST) $(PP_OBJ_TEST) $(LZ4_OBJ_TEST) $(ZSTD_OBJ_TEST) $(UNIXCODER_OBJ)
 
-$(BUILD_DIR)/test-runner: $(ALL_TEST_SRCS) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_TEST) $(CBM_CLI_ZIG_LIB) $(CBM_ZOVA_BRIDGE_LIB) $(ZOVA_CHECK_TARGET) | $(BUILD_DIR)
+$(BUILD_DIR)/test-runner: $(ALL_TEST_SRCS) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(OBJS_VENDORED_TEST) $(CBM_CLI_ZIG_LIB) $(CBM_ZOVA_BRIDGE_LIB) $(ZOVA_CHECK_TARGET) | $(BUILD_DIR)
 	$(CC) $(CFLAGS_TEST) -Itests -Itests/repro -o $@ \
 		$(ALL_TEST_SRCS) $(PROD_SRCS) \
-		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
+		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) \
 		$(OBJS_VENDORED_TEST) \
 		$(CBM_ZOVA_BRIDGE_LIB) \
 		$(ZOVA_LINK_LIBS) \
@@ -703,20 +697,8 @@ test-mcp:
 zova-test-runner:
 	$(MAKE) -f Makefile.cbm CBM_WITH_ZOVA=1 BUILD_DIR=$(ZOVA_TEST_BUILD_DIR) $(ZOVA_TEST_BUILD_DIR)/test-runner
 
-test-zova-link:
-	$(ZIG) build test-zova-link -Dwith-zova=true -Dzova-root=$(ZOVA_ROOT) -Dtarget-macos-version=$(MACOSX_DEPLOYMENT_TARGET)
-
-test-zova-container:
-	$(ZIG) build test-zova-container -Dwith-zova=true -Dzova-root=$(ZOVA_ROOT) -Dtarget-macos-version=$(MACOSX_DEPLOYMENT_TARGET)
-
-test-zova-i8:
-	$(ZIG) build test-zova-i8 -Dwith-zova=true -Dzova-root=$(ZOVA_ROOT) -Dtarget-macos-version=$(MACOSX_DEPLOYMENT_TARGET)
-
-test-zova-vector-parity:
-	$(ZIG) build test-zova-vector-parity -Dwith-zova=true -Dzova-root=$(ZOVA_ROOT) -Dtarget-macos-version=$(MACOSX_DEPLOYMENT_TARGET)
-
-test-zova-benchmark-smoke:
-	$(ZIG) build test-zova-benchmark-smoke -Dwith-zova=true -Dzova-root=$(ZOVA_ROOT) -Dtarget-macos-version=$(MACOSX_DEPLOYMENT_TARGET)
+test-zova:
+	$(ZIG) build test-zova -Dwith-zova=true -Dzova-root=$(ZOVA_ROOT) -Dtarget-macos-version=$(MACOSX_DEPLOYMENT_TARGET)
 
 test-zova-c-sql-functions:
 	$(ZIG) build test-zova-c-sql-functions -Dwith-zova=true -Dzova-root=$(ZOVA_ROOT) -Dtarget-macos-version=$(MACOSX_DEPLOYMENT_TARGET)
@@ -724,17 +706,14 @@ test-zova-c-sql-functions:
 test-zova-bridge:
 	$(ZIG) build test-zova-bridge -Dwith-zova=true -Dzova-root=$(ZOVA_ROOT) -Dtarget-macos-version=$(MACOSX_DEPLOYMENT_TARGET)
 
-test-zova-graph-mirror:
-	$(ZIG) build test-zova-graph-mirror -Dwith-zova=true -Dzova-root=$(ZOVA_ROOT) -Dtarget-macos-version=$(MACOSX_DEPLOYMENT_TARGET)
-
 # ── Cumulative bug-reproduction runner (RED by design, non-gating) ──
 # Mirrors test-runner's link line but uses repro_main.c (own main + counters)
 # and TEST_REPRO_SRCS instead of ALL_TEST_SRCS. Exits non-zero while any bug is
 # still reproduced (the expected state); bug-repro.yml surfaces it as a board.
-$(BUILD_DIR)/test-repro-runner: $(TEST_REPRO_SRCS) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_TEST) $(CBM_CLI_ZIG_LIB) $(CBM_ZOVA_BRIDGE_LIB) $(ZOVA_CHECK_TARGET) | $(BUILD_DIR)
+$(BUILD_DIR)/test-repro-runner: $(TEST_REPRO_SRCS) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(OBJS_VENDORED_TEST) $(CBM_CLI_ZIG_LIB) $(CBM_ZOVA_BRIDGE_LIB) $(ZOVA_CHECK_TARGET) | $(BUILD_DIR)
 	$(CC) $(CFLAGS_TEST) -Itests -o $@ \
 		$(TEST_REPRO_SRCS) $(PROD_SRCS) \
-		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
+		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) \
 		$(OBJS_VENDORED_TEST) \
 		$(CBM_ZOVA_BRIDGE_LIB) \
 		$(ZOVA_LINK_LIBS) \
@@ -785,10 +764,10 @@ OBJS_VENDORED_PROD = $(MIMALLOC_OBJ_PROD) $(SQLITE3_OBJ_PROD) $(TRE_OBJ_PROD) $(
 
 MAIN_SRC = src/main.c
 
-$(BUILD_DIR)/codebase-memory-mcp: $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_PROD) $(CBM_CLI_ZIG_LIB) $(CBM_ZOVA_BRIDGE_LIB) $(ZOVA_CHECK_TARGET) | $(BUILD_DIR)
+$(BUILD_DIR)/codebase-memory-mcp: $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(OBJS_VENDORED_PROD) $(CBM_CLI_ZIG_LIB) $(CBM_ZOVA_BRIDGE_LIB) $(ZOVA_CHECK_TARGET) | $(BUILD_DIR)
 	$(CC) $(CFLAGS_PROD) -o $@ \
 		$(MAIN_SRC) $(PROD_SRCS) \
-		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
+		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) \
 		$(OBJS_VENDORED_PROD) \
 		$(CBM_ZOVA_BRIDGE_LIB) \
 		$(ZOVA_LINK_LIBS) \
@@ -818,7 +797,7 @@ SYSROOT_FLAG = $(if $(SYSROOT),-isysroot $(SYSROOT),)
 LINT_SRCS = $(FOUNDATION_SRCS) $(STORE_SRCS) $(CYPHER_SRCS) $(MCP_SRCS) \
             $(DISCOVER_SRCS) $(GRAPH_BUFFER_SRCS) $(PIPELINE_SRCS) $(SIMHASH_SRCS) $(SEMANTIC_SRCS) \
             $(TRACES_SRCS) $(WATCHER_SRCS) $(CLI_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) \
-            $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(MAIN_SRC)
+            $(ZSTD_SRCS) $(MAIN_SRC)
 LINT_HDRS = $(wildcard src/**/*.h src/*.h $(CBM_DIR)/*.h)
 LINT_TEST_SRCS = $(ALL_TEST_SRCS)
 
@@ -842,7 +821,6 @@ lint-cppcheck:
 		--suppress=nullPointerOutOfMemory \
 		--suppress=nullPointerArithmeticOutOfMemory \
 		--suppress=ctunullpointerOutOfMemory \
-		--suppress='nullPointer:internal/cbm/sqlite_writer.c' \
 		-Isrc -Ivendored -Ivendored/sqlite3 \
 		-I$(CBM_DIR) -I$(TS_INCLUDE) \
 		$(LINT_SRCS)

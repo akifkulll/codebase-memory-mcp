@@ -228,14 +228,11 @@ TEST(watcher_poll_nonexistent_path) {
  * ══════════════════════════════════════════════════════════════════ */
 
 /* Shared fixture for the stale-root pruning tests: a temp project root, a
- * temp CBM_CACHE_DIR seeded with db/-wal/-shm files for "stale-project",
- * and saved copies of the env vars the tests override. */
+ * temp CBM_CACHE_DIR whose cbm.zova holds a "stale-project" workspace, and
+ * saved copies of the env vars the tests override. */
 typedef struct {
     char rootdir[256];
     char cachedir[256];
-    char db_path[512];
-    char wal_path[512];
-    char shm_path[512];
     char saved_cache_dir[1024];
     bool had_cache_dir;
     char saved_grace[64];
@@ -261,12 +258,21 @@ static bool prune_fixture_setup(prune_fixture_t *f, const char *grace_s) {
     cbm_setenv("CBM_CACHE_DIR", f->cachedir, 1);
     cbm_setenv("CBM_WATCHER_PRUNE_GRACE_S", grace_s, 1);
 
-    snprintf(f->db_path, sizeof(f->db_path), "%s/stale-project.db", f->cachedir);
-    snprintf(f->wal_path, sizeof(f->wal_path), "%s/stale-project.db-wal", f->cachedir);
-    snprintf(f->shm_path, sizeof(f->shm_path), "%s/stale-project.db-shm", f->cachedir);
-    th_write_file(f->db_path, "db\n");
-    th_write_file(f->wal_path, "wal\n");
-    th_write_file(f->shm_path, "shm\n");
+    cbm_store_t *fixture = cbm_store_open_memory();
+    bool ok = fixture && cbm_store_upsert_project(fixture, "stale-project", f->rootdir) ==
+                             CBM_STORE_OK &&
+              th_publish_store_project(fixture, "stale-project") == 0;
+    cbm_store_close(fixture);
+    return ok;
+}
+
+/* True while cbm.zova still holds the "stale-project" workspace. */
+static bool prune_project_indexed(void) {
+    cbm_store_t *store = th_open_project_store("stale-project");
+    if (!store) {
+        return false;
+    }
+    cbm_store_close(store);
     return true;
 }
 
@@ -304,60 +310,22 @@ TEST(watcher_prunes_sustained_missing_root) {
 
     th_rmtree(f.rootdir);
 
-    /* Misses #1 and #2: below the streak threshold — keep project + DB. */
+    /* Misses #1 and #2: below the streak threshold — keep the watch and the workspace. */
     cbm_watcher_touch(w, "stale-project");
     cbm_watcher_poll_once(w);
     ASSERT_EQ(cbm_watcher_watch_count(w), 1);
-    ASSERT_EQ(access(f.db_path, F_OK), 0);
+    ASSERT_TRUE(prune_project_indexed());
     cbm_watcher_touch(w, "stale-project");
     cbm_watcher_poll_once(w);
     ASSERT_EQ(cbm_watcher_watch_count(w), 1);
-    ASSERT_EQ(access(f.db_path, F_OK), 0);
+    ASSERT_TRUE(prune_project_indexed());
 
     /* Miss #3 with the grace window already satisfied: prune the watch
-     * entry and the cached DB files. */
+     * entry and the project's cbm.zova workspace. */
     cbm_watcher_touch(w, "stale-project");
     cbm_watcher_poll_once(w);
     ASSERT_EQ(cbm_watcher_watch_count(w), 0);
-    ASSERT_NEQ(access(f.db_path, F_OK), 0);
-    ASSERT_NEQ(access(f.wal_path, F_OK), 0);
-    ASSERT_NEQ(access(f.shm_path, F_OK), 0);
-
-    cbm_watcher_free(w);
-    cbm_store_close(store);
-    prune_fixture_teardown(&f);
-    PASS();
-}
-
-/* On the Zova route the pruned project's workspace in cbm.zova goes too. */
-TEST(watcher_prune_deletes_zova_workspace) {
-    prune_fixture_t f;
-    if (!prune_fixture_setup(&f, "0")) {
-        FAIL("prune fixture setup failed");
-    }
-    if (cbm_zova_route_for_project("stale-project") != CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        prune_fixture_teardown(&f);
-        PASS();
-    }
-    cbm_store_t *fixture = cbm_store_open_memory();
-    ASSERT_EQ(cbm_store_upsert_project(fixture, "stale-project", f.rootdir), CBM_STORE_OK);
-    ASSERT_EQ(th_publish_store_project(fixture, "stale-project"), 0);
-    cbm_store_close(fixture);
-    cbm_store_t *indexed = th_open_project_store("stale-project");
-    ASSERT_NOT_NULL(indexed);
-    cbm_store_close(indexed);
-
-    cbm_store_t *store = cbm_store_open_memory();
-    cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
-    cbm_watcher_watch(w, "stale-project", f.rootdir);
-    cbm_watcher_poll_once(w);
-    th_rmtree(f.rootdir);
-    for (int i = 0; i < 3; i++) {
-        cbm_watcher_touch(w, "stale-project");
-        cbm_watcher_poll_once(w);
-    }
-    ASSERT_EQ(cbm_watcher_watch_count(w), 0);
-    ASSERT_NULL(th_open_project_store("stale-project"));
+    ASSERT_FALSE(prune_project_indexed());
 
     cbm_watcher_free(w);
     cbm_store_close(store);
@@ -387,9 +355,7 @@ TEST(watcher_grace_window_blocks_prune) {
         cbm_watcher_poll_once(w);
     }
     ASSERT_EQ(cbm_watcher_watch_count(w), 1);
-    ASSERT_EQ(access(f.db_path, F_OK), 0);
-    ASSERT_EQ(access(f.wal_path, F_OK), 0);
-    ASSERT_EQ(access(f.shm_path, F_OK), 0);
+    ASSERT_TRUE(prune_project_indexed());
 
     cbm_watcher_free(w);
     cbm_store_close(store);
@@ -452,13 +418,13 @@ TEST(watcher_root_restore_resets_prune_streak) {
     cbm_watcher_touch(w, "stale-project");
     cbm_watcher_poll_once(w);
     ASSERT_EQ(cbm_watcher_watch_count(w), 1);
-    ASSERT_EQ(access(f.db_path, F_OK), 0);
+    ASSERT_TRUE(prune_project_indexed());
 
     /* Miss #3 of the new streak → prune. */
     cbm_watcher_touch(w, "stale-project");
     cbm_watcher_poll_once(w);
     ASSERT_EQ(cbm_watcher_watch_count(w), 0);
-    ASSERT_NEQ(access(f.db_path, F_OK), 0);
+    ASSERT_FALSE(prune_project_indexed());
 
     cbm_watcher_free(w);
     cbm_store_close(store);
@@ -2133,7 +2099,6 @@ SUITE(watcher) {
     RUN_TEST(watcher_poll_no_projects);
     RUN_TEST(watcher_poll_nonexistent_path);
     RUN_TEST(watcher_prunes_sustained_missing_root);
-    RUN_TEST(watcher_prune_deletes_zova_workspace);
     RUN_TEST(watcher_grace_window_blocks_prune);
     RUN_TEST(watcher_root_missing_errno_classification);
     RUN_TEST(watcher_root_restore_resets_prune_streak);

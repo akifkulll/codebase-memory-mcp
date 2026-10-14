@@ -246,7 +246,7 @@ static int incremental_setup(void) {
         return -1;
     cbm_mkdir(cache_dir);
 
-    g_srv = cbm_mcp_server_new(NULL);
+    g_srv = cbm_mcp_server_new();
     if (!g_srv)
         return -1;
 

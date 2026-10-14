@@ -7285,7 +7285,7 @@ TEST(pipeline_complexity_leaf_and_non_function_graphs_do_not_sort_null) {
 
 /* Regression for #334: the plausibility gate compares committed (extracted)
  * node count against persisted rows. committed_nodes must be captured BEFORE
- * cbm_gbuf_dump_to_sqlite frees the gbuf node index — otherwise it reads 0 and
+ * the cbm.zova dump frees the gbuf node index — otherwise it reads 0 and
  * the gate is silently inert. Drives the real pipeline (not a synthetic count)
  * and asserts committed_nodes is populated and matches what was persisted. */
 TEST(pipeline_committed_counts_match_persisted) {

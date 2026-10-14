@@ -24,7 +24,6 @@
 /* ── Test fixture: temp project with Python + Go files ─────────── */
 
 static char g_tmpdir[256];
-static char g_dbpath[512];
 static cbm_mcp_server_t *g_srv = NULL;
 static char *g_project = NULL;
 
@@ -105,27 +104,16 @@ static int integration_setup(void) {
     if (!g_project)
         return -1;
 
-    /* Build db path for direct store queries (pipeline writes here) */
-    const char *home = getenv("HOME");
-    if (!home)
-        home = "/tmp";
-    snprintf(g_dbpath, sizeof(g_dbpath), "%s/.cache/codebase-memory-mcp/%s.db", home, g_project);
-
-    /* Ensure cache dir exists */
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/codebase-memory-mcp", home);
-    cbm_mkdir(cache_dir);
-
-    /* Remove stale db from previous test runs */
-    unlink(g_dbpath);
+    /* Remove a stale workspace from previous test runs */
+    th_remove_project_workspace(g_project);
 
     /* Create MCP server, then index through it (production flow):
      *   1. Server starts with in-memory store
      *   2. index_repository closes in-memory store
-     *   3. Pipeline runs → dumps to ~/.cache/.../<project>.db
-     *   4. Server reopens from that db
+     *   3. Pipeline runs → publishes the project to <cache>/cbm.zova
+     *   4. Server reads the project from cbm.zova
      * This exercises the exact same path as real usage. */
-    g_srv = cbm_mcp_server_new(NULL);
+    g_srv = cbm_mcp_server_new();
     if (!g_srv)
         return -1;
 
@@ -147,19 +135,12 @@ static void integration_teardown(void) {
         cbm_mcp_server_free(g_srv);
         g_srv = NULL;
     }
+    th_remove_project_workspace(g_project);
     free(g_project);
     g_project = NULL;
 
     /* Clean up temp project */
     th_rmtree(g_tmpdir);
-
-    /* Clean up cache db */
-    unlink(g_dbpath);
-    char wal[520], shm[520];
-    snprintf(wal, sizeof(wal), "%s-wal", g_dbpath);
-    snprintf(shm, sizeof(shm), "%s-shm", g_dbpath);
-    unlink(wal);
-    unlink(shm);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -405,11 +386,8 @@ TEST(integ_mcp_delete_project) {
     ASSERT_NOT_NULL(strstr(resp, "deleted"));
     free(resp);
 
-    /* Note: querying after delete on Linux re-opens the unlinked .db inode
-     * (unlink defers removal until all fds close). SQLite's WAL mode connection
-     * on an unlinked file leaks internal allocations that sqlite3_close cannot
-     * reclaim. Guard behavior for deleted/missing projects is tested separately
-     * in tests/smoke_guard.sh using non-existent project names. */
+    /* The project's workspace is gone from cbm.zova. */
+    ASSERT_NULL(th_open_project_store(g_project));
     PASS();
 }
 
@@ -553,7 +531,7 @@ TEST(index_reports_excluded_subtrees_issue411) {
     fputs("export function dep() { return 2; }\n", f);
     fclose(f);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
     char args[600];
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", tmp);

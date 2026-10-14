@@ -29,7 +29,7 @@ enum {
 #include "graph_buffer/graph_buffer.h"
 #include <yyjson/yyjson.h> // url_path extraction must match json_extract semantics
 #include "store/store.h"
-#include "sqlite_writer.h"
+#include "dump_types.h"
 #include "foundation/hash_table.h"
 #include "foundation/compat.h"
 #include "foundation/log.h"
@@ -110,7 +110,7 @@ struct cbm_gbuf {
     CBMHashTable *intern_pool;
 
     /* Vector storage for semantic embeddings (filled by pass_semantic_edges,
-     * consumed by cbm_write_db during dump). */
+     * consumed by the cbm.zova publish during dump). */
     CBMDumpVector *dump_vectors;
     int dump_vector_count;
     int dump_vector_cap;
@@ -1052,101 +1052,6 @@ int cbm_gbuf_delete_empty_folders_under(cbm_gbuf_t *gb, const char *const *affec
     return gbuf_delete_empty_folders_impl(gb, affected_paths, affected_count, true);
 }
 
-int cbm_gbuf_load_from_db(cbm_gbuf_t *gb, const char *db_path, const char *project) {
-    if (!gb || !db_path || !project) {
-        return CBM_NOT_FOUND;
-    }
-
-    cbm_store_t *store = cbm_store_open_path(db_path);
-    if (!store) {
-        return CBM_NOT_FOUND;
-    }
-
-    sqlite3 *db = cbm_store_get_db(store);
-    if (!db) {
-        cbm_store_close(store);
-        return CBM_NOT_FOUND;
-    }
-
-    /* First pass: find max node ID for mapping array */
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db, "SELECT MAX(id) FROM nodes WHERE project = ?", CBM_NOT_FOUND, &stmt,
-                           NULL) != SQLITE_OK) {
-        cbm_store_close(store);
-        return CBM_NOT_FOUND;
-    }
-    sqlite3_bind_text(stmt, SKIP_ONE, project, CBM_NOT_FOUND, SQLITE_STATIC);
-    int64_t max_old_id = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        max_old_id = sqlite3_column_int64(stmt, 0);
-    }
-    sqlite3_finalize(stmt);
-
-    int64_t *old_to_new = calloc((size_t)(max_old_id + SKIP_ONE), sizeof(int64_t));
-    if (!old_to_new) {
-        cbm_store_close(store);
-        return CBM_NOT_FOUND;
-    }
-
-    /* Load all nodes */
-    if (sqlite3_prepare_v2(
-            db,
-            "SELECT id, label, name, qualified_name, file_path, start_line, end_line, properties "
-            "FROM nodes WHERE project = ? ORDER BY id",
-            CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
-        free(old_to_new);
-        cbm_store_close(store);
-        return CBM_NOT_FOUND;
-    }
-    sqlite3_bind_text(stmt, SKIP_ONE, project, CBM_NOT_FOUND, SQLITE_STATIC);
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        int64_t old_id = sqlite3_column_int64(stmt, 0);
-        const char *label = (const char *)sqlite3_column_text(stmt, SKIP_ONE);
-        const char *name = (const char *)sqlite3_column_text(stmt, GB_COL_2);
-        const char *qn = (const char *)sqlite3_column_text(stmt, GB_COL_3);
-        const char *fp = (const char *)sqlite3_column_text(stmt, GB_COL_4);
-        int sl = sqlite3_column_int(stmt, GB_COL_5);
-        int el = sqlite3_column_int(stmt, GB_COL_6);
-        const char *props = (const char *)sqlite3_column_text(stmt, GB_COL_7);
-
-        int64_t new_id = cbm_gbuf_upsert_node(gb, label, name, qn, fp, sl, el, props);
-        if (new_id > 0 && old_id <= max_old_id) {
-            old_to_new[old_id] = new_id;
-        }
-    }
-    sqlite3_finalize(stmt);
-
-    /* Load all edges, remap IDs */
-    if (sqlite3_prepare_v2(db,
-                           "SELECT source_id, target_id, type, properties "
-                           "FROM edges WHERE project = ?",
-                           CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
-        free(old_to_new);
-        cbm_store_close(store);
-        return CBM_NOT_FOUND;
-    }
-    sqlite3_bind_text(stmt, SKIP_ONE, project, CBM_NOT_FOUND, SQLITE_STATIC);
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        int64_t old_src = sqlite3_column_int64(stmt, 0);
-        int64_t old_tgt = sqlite3_column_int64(stmt, SKIP_ONE);
-        const char *type = (const char *)sqlite3_column_text(stmt, GB_COL_2);
-        const char *props = (const char *)sqlite3_column_text(stmt, GB_COL_3);
-
-        int64_t new_src = (old_src <= max_old_id) ? old_to_new[old_src] : 0;
-        int64_t new_tgt = (old_tgt <= max_old_id) ? old_to_new[old_tgt] : 0;
-        if (new_src > 0 && new_tgt > 0) {
-            cbm_gbuf_insert_edge(gb, new_src, new_tgt, type, props);
-        }
-    }
-    sqlite3_finalize(stmt);
-
-    free(old_to_new);
-    cbm_store_close(store);
-    return 0;
-}
-
 void cbm_gbuf_foreach_node(const cbm_gbuf_t *gb, cbm_gbuf_node_visitor_fn fn, void *userdata) {
     if (!gb || !fn) {
         return;
@@ -1801,7 +1706,7 @@ static void generate_iso_timestamp(char *buf, size_t buf_size) {
     }
 }
 
-/* Release lookup indexes then remap+sort+dedup vectors for the B-tree writer. */
+/* Remap+sort+dedup vectors to the final node ids. */
 static void release_and_remap_vectors(cbm_gbuf_t *gb, const int64_t *temp_to_final,
                                       int64_t max_temp_id) {
     CBM_PROF_START(t_vec_remap);
@@ -1809,7 +1714,8 @@ static void release_and_remap_vectors(cbm_gbuf_t *gb, const int64_t *temp_to_fin
     CBM_PROF_END_N("dump", "5_vector_remap_sort", t_vec_remap, gb->dump_vector_count);
 }
 
-int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
+/* Build the final node, edge and vector arrays published to cbm.zova. */
+static int gbuf_build_dump(cbm_gbuf_t *gb) {
     if (!gb) {
         return CBM_NOT_FOUND;
     }
@@ -1843,71 +1749,17 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
 
     generate_iso_timestamp(gb->indexed_at, sizeof(gb->indexed_at));
 
-    /* Stream node rows to the DB in partitions. Under memory pressure, free each
-     * partition's heavy properties_json once persisted — the heavy column is
-     * write-once and never read again, so this bounds the dump/finalize peak.
-     * The DB output is identical whether or not freeing engages, so non-pressure
-     * runs (and tests) leave the gbuf intact (the budget>0 guard keeps an
-     * uninitialized budget from ever triggering the free). */
-    cbm_db_writer_t *w = path ? cbm_writer_open(path) : NULL;
-    if (path && !w) {
-        free(src_nodes);
-        free(dump_nodes);
-        free(temp_to_final);
-        return CBM_NOT_FOUND;
-    }
-
-    CBM_PROF_START(t_append);
-    enum { DUMP_PARTITION_NODES = 1 << 16 };
-    bool free_heavy = false;
     int rc = 0;
-    for (int off = 0; off < node_idx; off += DUMP_PARTITION_NODES) {
-        int chunk = node_idx - off;
-        if (chunk > DUMP_PARTITION_NODES) {
-            chunk = DUMP_PARTITION_NODES;
-        }
-        rc = w ? cbm_writer_append_nodes(w, &dump_nodes[off], chunk) : 0;
-        if (rc != 0) {
-            break;
-        }
-        free_heavy = free_heavy || (cbm_mem_budget() > 0 && cbm_mem_over_budget());
-        if (free_heavy && src_nodes) {
-            for (int j = off; j < off + chunk; j++) {
-                free(src_nodes[j]->properties_json);
-                src_nodes[j]->properties_json = NULL;
-                dump_nodes[j].properties = NULL;
-            }
-            cbm_mem_collect();
-        }
-    }
-    CBM_PROF_END_N("dump", "2b_stream_append_nodes", t_append, node_idx);
-
     int edge_idx = 0;
     char **url_paths = NULL;
     char **local_names = NULL;
-    CBMDumpEdge *dump_edges = NULL;
-    if (rc == 0) {
-        CBM_PROF_START(t_build_edges);
-        dump_edges =
-            build_dump_edges(gb, temp_to_final, max_temp_id, &edge_idx, &url_paths, &local_names);
-        CBM_PROF_END_N("dump", "3_build_dump_edges", t_build_edges, edge_idx);
-        release_and_remap_vectors(gb, temp_to_final, max_temp_id);
-    }
+    CBM_PROF_START(t_build_edges);
+    CBMDumpEdge *dump_edges =
+        build_dump_edges(gb, temp_to_final, max_temp_id, &edge_idx, &url_paths, &local_names);
+    CBM_PROF_END_N("dump", "3_build_dump_edges", t_build_edges, edge_idx);
+    release_and_remap_vectors(gb, temp_to_final, max_temp_id);
 
-    /* Finalize: nodes-table interior + edges/vectors/metadata/indexes/sqlite_master.
-     * Frees w and closes the file; handles a prior append error cleanly. */
-    CBM_PROF_START(t_finalize);
-    int frc = w ? cbm_writer_finalize(w, gb->project, gb->root_path, gb->indexed_at, dump_nodes,
-                                      node_idx, dump_edges, edge_idx, gb->dump_vectors,
-                                      gb->dump_vector_count, gb->dump_token_vecs,
-                                      gb->dump_token_vec_count)
-                : 0;
-    CBM_PROF_END_N("dump", "6_write_db_finalize", t_finalize, node_idx + edge_idx);
-    if (rc == 0) {
-        rc = frc;
-    }
-
-    if (rc == 0 && retain_dump_edge_strings(dump_edges, edge_idx) != 0) {
+    if (retain_dump_edge_strings(dump_edges, edge_idx) != 0) {
         rc = CBM_NOT_FOUND;
     }
 
@@ -1929,7 +1781,7 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
 }
 
 int cbm_gbuf_prepare_zova_dump(cbm_gbuf_t *gb) {
-    int rc = cbm_gbuf_dump_to_sqlite(gb, NULL);
+    int rc = gbuf_build_dump(gb);
     if (rc != 0) return rc;
     char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
     cbm_zova_workspace_generation_input_t input = {
@@ -1958,25 +1810,7 @@ int cbm_gbuf_prepare_zova_dump(cbm_gbuf_t *gb) {
 }
 
 int cbm_gbuf_prepare_zova_dump_delta(cbm_gbuf_t *gb) {
-    return cbm_gbuf_dump_to_sqlite(gb, NULL);
-}
-
-int cbm_gbuf_finalize_zova_sidecar(const cbm_gbuf_t *gb, const char *path) {
-    if (!gb || !path) {
-        return CBM_NOT_FOUND;
-    }
-    int rc;
-    if (gb->zova_dump_nodes || gb->zova_dump_node_count == 0) {
-        rc = cbm_zova_after_sqlite_dump_workspace_direct(
-            path, gb->root_path, gb->project, gb->zova_dump_nodes, gb->zova_dump_node_count,
-            gb->zova_dump_edges, gb->zova_dump_edge_count, gb->dump_vectors,
-            gb->dump_vector_count, gb->dump_token_vecs, gb->dump_token_vec_count, CBM_SEM_DIM);
-    } else {
-        rc = cbm_zova_after_sqlite_dump_workspace_with_i8_vectors(
-            path, gb->root_path, gb->project, gb->dump_vectors, gb->dump_vector_count,
-            gb->dump_token_vecs, gb->dump_token_vec_count, CBM_SEM_DIM);
-    }
-    return rc;
+    return gbuf_build_dump(gb);
 }
 
 int cbm_gbuf_publish_zova_user_database(

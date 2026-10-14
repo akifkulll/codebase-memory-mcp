@@ -91,8 +91,8 @@ char *cbm_mcp_get_arguments(const char *params_json);
 
 typedef struct cbm_mcp_server cbm_mcp_server_t;
 
-/* Create an MCP server. store_path is the SQLite database directory. */
-cbm_mcp_server_t *cbm_mcp_server_new(const char *store_path);
+/* Create an MCP server. Projects are read from the cache's cbm.zova. */
+cbm_mcp_server_t *cbm_mcp_server_new(void);
 
 /* Free an MCP server. */
 void cbm_mcp_server_free(cbm_mcp_server_t *srv);

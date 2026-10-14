@@ -39,7 +39,6 @@
 
 typedef struct {
     char tmpdir[256];
-    char dbpath[512];
     char *project;
     cbm_mcp_server_t *srv;
 } LangProj;
@@ -72,21 +71,8 @@ static cbm_store_t *lang_open_indexed(LangProj *lp) {
     if (!lp->project) {
         return NULL;
     }
-    char cache_dir[512];
-    const char *configured_cache = getenv("CBM_CACHE_DIR");
-    if (configured_cache && configured_cache[0]) {
-        snprintf(cache_dir, sizeof(cache_dir), "%s", configured_cache);
-    } else {
-        const char *home = getenv("HOME");
-        if (!home) {
-            home = "/tmp";
-        }
-        snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/codebase-memory-mcp", home);
-    }
-    cbm_mkdir(cache_dir);
-    snprintf(lp->dbpath, sizeof(lp->dbpath), "%s/%s.db", cache_dir, lp->project);
-    unlink(lp->dbpath);
-    lp->srv = cbm_mcp_server_new(NULL);
+    th_remove_project_workspace(lp->project);
+    lp->srv = cbm_mcp_server_new();
     if (!lp->srv) {
         return NULL;
     }
@@ -149,16 +135,10 @@ static void lang_cleanup(LangProj *lp, cbm_store_t *store) {
         cbm_mcp_server_free(lp->srv);
         lp->srv = NULL;
     }
+    th_remove_project_workspace(lp->project);
     free(lp->project);
     lp->project = NULL;
     th_rmtree(lp->tmpdir);
-    unlink(lp->dbpath);
-    char wal[600];
-    char shm[600];
-    snprintf(wal, sizeof(wal), "%s-wal", lp->dbpath);
-    unlink(wal);
-    snprintf(shm, sizeof(shm), "%s-shm", lp->dbpath);
-    unlink(shm);
 }
 
 /* Count nodes of `label` with >=1 outbound edge. Returns -1 on query error. */

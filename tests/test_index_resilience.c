@@ -85,16 +85,8 @@ static cbm_store_t *ri_index_capture(RProj *lp, char **out_resp) {
     if (!lp->project) {
         return NULL;
     }
-    const char *home = getenv("HOME");
-    if (!home) {
-        home = "/tmp";
-    }
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/codebase-memory-mcp", home);
-    cbm_mkdir(cache_dir);
-    snprintf(lp->dbpath, sizeof(lp->dbpath), "%s/%s.db", cache_dir, lp->project);
-    unlink(lp->dbpath);
-    lp->srv = cbm_mcp_server_new(NULL);
+    th_remove_project_workspace(lp->project);
+    lp->srv = cbm_mcp_server_new();
     if (!lp->srv) {
         return NULL;
     }

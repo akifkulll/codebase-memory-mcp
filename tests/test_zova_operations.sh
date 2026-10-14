@@ -43,7 +43,7 @@ HOME_ROOT="$TMP/home"
 mkdir -p "$REPO" "$CACHE" "$RUN_ROOT" "$HOME_ROOT"
 printf '%s\n' 'int helper(void) { return 1; } int main(void) { return helper(); }' >"$REPO/main.c"
 
-HOME="$HOME_ROOT" CBM_CACHE_DIR="$CACHE" CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL=1 \
+HOME="$HOME_ROOT" CBM_CACHE_DIR="$CACHE" \
   CBM_INDEX_SUPERVISOR=0 "$BINARY" cli index_repository --repo-path "$REPO" --mode full \
   >"$TMP/index.json" 2>"$TMP/index.err" || {
     cat "$TMP/index.err" >&2

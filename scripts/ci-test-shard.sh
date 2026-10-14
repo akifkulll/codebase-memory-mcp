@@ -25,8 +25,8 @@ languages=(
 )
 core=(
   arena hash_table dyn_array str_intern log str_util platform subprocess dump_verify ac
-  store_nodes store_edges store_search store_bulk store_pragmas store_checkpoint
-  dump_verify_io lz4 zstd sqlite_writer system_info slab_alloc mem yaml semantic
+  store_nodes store_edges store_search
+  lz4 zstd system_info slab_alloc mem yaml semantic
   ast_profile simhash stack_overflow store_arch
 )
 

@@ -112,7 +112,7 @@ TEST(repro_issue520_detect_changes_includes_new_untracked_file) {
     }
 
     /* --- index the repo via the MCP production flow ----------------- */
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     if (!srv) {
         th_rmtree(tmpdir);
         FAIL("cbm_mcp_server_new returned NULL");

@@ -49,7 +49,6 @@
 
 typedef struct {
     char tmpdir[256];
-    char dbpath[512];
     char *project;
     cbm_mcp_server_t *srv;
 } R521Proj;
@@ -90,15 +89,9 @@ static cbm_store_t *r521_index_files(R521Proj *lp, const R521File *files, int nf
     lp->project = cbm_project_name_from_path(lp->tmpdir);
     if (!lp->project) return NULL;
 
-    const char *home = getenv("HOME");
-    if (!home) home = "/tmp";
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/codebase-memory-mcp", home);
-    cbm_mkdir(cache_dir);
-    snprintf(lp->dbpath, sizeof(lp->dbpath), "%s/%s.db", cache_dir, lp->project);
-    unlink(lp->dbpath);
+    th_remove_project_workspace(lp->project);
 
-    lp->srv = cbm_mcp_server_new(NULL);
+    lp->srv = cbm_mcp_server_new();
     if (!lp->srv) return NULL;
 
     char args[700];
@@ -106,19 +99,15 @@ static cbm_store_t *r521_index_files(R521Proj *lp, const R521File *files, int nf
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     if (resp) free(resp);
 
-    return cbm_store_open_path(lp->dbpath);
+    return th_open_project_store(lp->project);
 }
 
 static void r521_cleanup(R521Proj *lp, cbm_store_t *store) {
     if (store) cbm_store_close(store);
     if (lp->srv) { cbm_mcp_server_free(lp->srv); lp->srv = NULL; }
+    th_remove_project_workspace(lp->project);
     free(lp->project); lp->project = NULL;
     th_rmtree(lp->tmpdir);
-    unlink(lp->dbpath);
-    char wal[600], shm[600];
-    snprintf(wal, sizeof(wal), "%s-wal", lp->dbpath);
-    snprintf(shm, sizeof(shm), "%s-shm", lp->dbpath);
-    unlink(wal); unlink(shm);
 }
 
 /* Count Route nodes in the indexed project. Returns -1 on error. */

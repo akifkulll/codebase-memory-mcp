@@ -3292,11 +3292,8 @@ TEST(cli_zova_ops_strict_parser_dispatch_and_exit_mapping) {
     snprintf(repo_link, sizeof(repo_link), "%s", repo);
 #endif
     const char *saved_cache = getenv("CBM_CACHE_DIR");
-    const char *saved_flag = getenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    char *saved_flag_copy = saved_flag ? strdup(saved_flag) : NULL;
     ASSERT_EQ(setenv("CBM_CACHE_DIR", cache, 1), 0);
-    ASSERT_EQ(unsetenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL"), 0);
     char workspace[] = "w1_00000000000000000000000000000000";
 
     char *status[] = {"status", "--json"};
@@ -3356,17 +3353,12 @@ TEST(cli_zova_ops_strict_parser_dispatch_and_exit_mapping) {
     ASSERT_EQ(cbm_cmd_zova_ops(6, duplicate_input), 2);
     ASSERT_EQ(cbm_cmd_zova_ops(3, wrong_flag_for_action), 2);
 
-    ASSERT_EQ(setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", "1", 1), 0);
     char *mismatch[] = {"delete-workspace", "--workspace-id", workspace,
                         "--confirm-workspace", "w1_11111111111111111111111111111111", "--json"};
     ASSERT_EQ(cbm_cmd_zova_ops(6, mismatch), 1);
 
     if (saved_cache_copy) ASSERT_EQ(setenv("CBM_CACHE_DIR", saved_cache_copy, 1), 0);
     else ASSERT_EQ(unsetenv("CBM_CACHE_DIR"), 0);
-    if (saved_flag_copy)
-        ASSERT_EQ(setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", saved_flag_copy, 1), 0);
-    else ASSERT_EQ(unsetenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL"), 0);
-    free(saved_flag_copy);
     free(saved_cache_copy);
 #ifndef _WIN32
     remove(repo_link);

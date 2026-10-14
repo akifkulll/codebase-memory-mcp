@@ -347,28 +347,13 @@ static const char *itoa_buf(int v) {
     return buf;
 }
 
-static void delete_cached_project_db(const char *project_name) {
+static void delete_cached_project(const char *project_name) {
     if (!cbm_validate_project_name(project_name)) {
         return;
     }
 
-    const char *cache_dir = cbm_resolve_cache_dir();
-    if (!cache_dir) {
-        return;
-    }
-
     char path[CBM_SZ_1K];
-    char wal[CBM_SZ_1K];
-    char shm[CBM_SZ_1K];
-    snprintf(path, sizeof(path), "%s/%s.db", cache_dir, project_name);
-    snprintf(wal, sizeof(wal), "%s-wal", path);
-    snprintf(shm, sizeof(shm), "%s-shm", path);
-    (void)cbm_unlink(path);
-    (void)cbm_unlink(wal);
-    (void)cbm_unlink(shm);
-
-    if (cbm_zova_route_for_project(project_name) != CBM_ZOVA_ROUTE_FULL_AUTHORITY ||
-        cbm_zova_user_database_path(path, sizeof(path)) != 0) {
+    if (cbm_zova_user_database_path(path, sizeof(path)) != 0) {
         return;
     }
     cbm_zova_repository_t *repo = cbm_zova_repository_open(path, project_name);
@@ -600,7 +585,7 @@ static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
     cbm_mutex_unlock(&w->projects_lock);
 
     if (removed) {
-        delete_cached_project_db(project_name);
+        delete_cached_project(project_name);
         cbm_log_info("watcher.root_pruned", "project", project_name);
     }
 }

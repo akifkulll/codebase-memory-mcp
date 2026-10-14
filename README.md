@@ -25,7 +25,7 @@ The current development version uses **CBM schema 7** with a pinned **Zova forma
 - **Incremental-first performance** — unchanged records are not republished; native delta APIs update only the affected graph, metadata, FTS, and vector records.
 - **Exact compatibility checks** — benchmarked Zova results are required to match the pure-SQLite CBM result set exactly, with no unexpected fallback.
 
-The shared Zova full-authority route is the default for indexing and queries. The original per-project SQLite route is retained only as an explicit compatibility and benchmark mode selected with `CBM_ZOVA_MODE=off`.
+All indexing and queries use the shared Zova database. Older per-project `.db` indexes are not read or migrated; re-index those repositories.
 
 ### Latest Zova-native results
 
@@ -594,9 +594,8 @@ Project config overrides global for conflicting extensions. An entry whose langu
 
 All indexed projects persist as isolated workspaces in the shared
 `${CBM_CACHE_DIR:-$HOME/.cache/codebase-memory-mcp}/cbm.zova` database. The
-database uses WAL mode and survives agent and machine restarts. Pure-SQLite
-per-project `.db` files are used only when the explicit compatibility mode
-`CBM_ZOVA_MODE=off` is selected.
+database uses WAL mode and survives agent and machine restarts. Per-project
+`.db` files from older versions are ignored; re-index those repositories.
 
 ## Troubleshooting
 

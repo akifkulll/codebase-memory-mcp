@@ -72,18 +72,13 @@ pub fn build(b: *std.Build) void {
         "-DCBM_TEST_RUNNER_PIPELINE=1",
     );
 
-    _ = addRunSuiteStep(b, "test", "Run the full C test runner", test_runner, null, null);
-    _ = addRunSuiteStep(b, "test-cli", "Run focused CLI tests", test_runner, "cli", null);
-    _ = addRunSuiteStep(b, "test-mcp", "Run focused MCP tests", test_runner, "mcp", null);
+    _ = addRunSuiteStep(b, "test", "Run the full C test runner", test_runner, null);
+    _ = addRunSuiteStep(b, "test-cli", "Run focused CLI tests", test_runner, "cli");
+    _ = addRunSuiteStep(b, "test-mcp", "Run focused MCP tests", test_runner, "mcp");
 
-    addZovaSuiteStep(b, cfg, test_runner, "test-zova-link", "off", "zova");
-    addZovaSuiteStep(b, cfg, test_runner, "test-zova-container", "container", "zova");
-    addZovaSuiteStep(b, cfg, test_runner, "test-zova-i8", "i8_vectors", "zova");
-    addZovaSuiteStep(b, cfg, test_runner, "test-zova-vector-parity", "i8_vectors", "zova");
-    addZovaSuiteStep(b, cfg, test_runner, "test-zova-benchmark-smoke", "i8_vectors", "zova");
-    addZovaSuiteStep(b, cfg, test_runner, "test-zova-c-sql-functions", "container", "zova_c_sql_functions");
-    addZovaSuiteStep(b, cfg, test_runner, "test-zova-bridge", "container", "zova_bridge");
-    addZovaSuiteStep(b, cfg, test_runner, "test-zova-graph-mirror", "graph_mirror", "zova");
+    addZovaSuiteStep(b, cfg, test_runner, "test-zova", "zova");
+    addZovaSuiteStep(b, cfg, test_runner, "test-zova-c-sql-functions", "zova_c_sql_functions");
+    addZovaSuiteStep(b, cfg, test_runner, "test-zova-bridge", "zova_bridge");
 
     const test_install_safety =
         b.step("test-install-safety", "Verify installer replacement and idempotency safeguards");
@@ -418,11 +413,9 @@ fn addRunSuiteStep(
     desc: []const u8,
     runner: *std.Build.Step.Compile,
     suite: ?[]const u8,
-    zova_mode: ?[]const u8,
 ) *std.Build.Step {
     const run = b.addRunArtifact(runner);
     if (suite) |s| run.addArg(s);
-    if (zova_mode) |mode| run.setEnvironmentVariable("CBM_ZOVA_MODE", mode);
     const step = b.step(name, desc);
     step.dependOn(&run.step);
     return step;
@@ -433,7 +426,6 @@ fn addZovaSuiteStep(
     cfg: Config,
     runner: *std.Build.Step.Compile,
     name: []const u8,
-    mode: []const u8,
     suite: []const u8,
 ) void {
     const step = b.step(name, "Run focused Zova test suite");
@@ -444,7 +436,6 @@ fn addZovaSuiteStep(
     }
     const run = b.addRunArtifact(runner);
     run.addArg(suite);
-    run.setEnvironmentVariable("CBM_ZOVA_MODE", mode);
     step.dependOn(&run.step);
 }
 
@@ -559,7 +550,6 @@ const native_sources = [_][]const u8{
     "internal/cbm/ac.c",
     "internal/cbm/lz4_store.c",
     "internal/cbm/zstd_store.c",
-    "internal/cbm/sqlite_writer.c",
 };
 
 const zova_test_sources = [_][]const u8{
@@ -568,8 +558,6 @@ const zova_test_sources = [_][]const u8{
     "tests/test_zova_c_sql_functions.c",
     "tests/test_zova_bridge.c",
     "tests/test_zova_plugin.c",
-    "tests/test_zova_real_repo.c",
-    "tests/test_zova_graph_real_repo.c",
     "tests/test_incremental.c",
 };
 
@@ -614,10 +602,6 @@ const all_test_sources = [_][]const u8{
     "tests/test_store_edges.c",
     "tests/test_store_search.c",
     "tests/test_store_arch.c",
-    "tests/test_store_bulk.c",
-    "tests/test_store_pragmas.c",
-    "tests/test_store_checkpoint.c",
-    "tests/test_dump_verify_io.c",
     "tests/test_cypher.c",
     "tests/test_mcp.c",
     "tests/test_language.c",
@@ -639,7 +623,6 @@ const all_test_sources = [_][]const u8{
     "tests/test_watcher.c",
     "tests/test_lz4.c",
     "tests/test_zstd.c",
-    "tests/test_sqlite_writer.c",
     "tests/test_go_lsp.c",
     "tests/test_c_lsp.c",
     "tests/test_php_lsp.c",
@@ -671,8 +654,6 @@ const all_test_sources = [_][]const u8{
     "tests/test_zova_c_sql_functions.c",
     "tests/test_zova_bridge.c",
     "tests/test_zova_plugin.c",
-    "tests/test_zova_real_repo.c",
-    "tests/test_zova_graph_real_repo.c",
     "tests/test_integration.c",
     "tests/test_incremental.c",
     "tests/test_lang_contract.c",

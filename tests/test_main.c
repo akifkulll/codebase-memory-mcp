@@ -61,7 +61,7 @@ static int tf_maybe_run_index_worker(int argc, char **argv) {
 
     cbm_mem_init(0.5);
     cbm_index_set_worker_role(true, response_out); /* worker role → index in-process */
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     if (!srv) {
         return 1;
     }
@@ -186,7 +186,6 @@ extern void suite_path_alias(void);
 extern void suite_watcher(void);
 extern void suite_lz4(void);
 extern void suite_zstd(void);
-extern void suite_sqlite_writer(void);
 extern void suite_go_lsp(void);
 extern void suite_c_lsp(void);
 extern void suite_php_lsp(void);
@@ -204,9 +203,6 @@ extern void suite_java_lsp_coverage(void);
 extern void suite_kotlin_lsp(void);
 extern void suite_rust_lsp(void);
 extern void suite_store_arch(void);
-extern void suite_store_bulk(void);
-extern void suite_store_pragmas(void);
-extern void suite_store_checkpoint(void);
 extern void suite_traces(void);
 extern void suite_configlink(void);
 extern void suite_infrascan(void);
@@ -242,15 +238,12 @@ extern void suite_slab_alloc(void);
 extern void suite_simhash(void);
 extern void suite_stack_overflow(void);
 extern void suite_dump_verify(void);
-extern void suite_dump_verify_io(void);
 extern void suite_zova(void);
 extern void suite_zova_normalization_benchmark(void);
 extern void suite_zova_operations(void);
 extern void suite_zova_c_sql_functions(void);
 extern void suite_zova_bridge(void);
 extern void suite_zova_plugin(void);
-extern void suite_zova_real_repo(void);
-extern void suite_zova_graph_real_repo(void);
 
 /* Free the main thread's thread-local node-type bitset cache before exit so
  * LeakSanitizer (Linux x64) doesn't report it. Worker threads free their own
@@ -289,8 +282,6 @@ int main(int argc, char **argv) {
     RUN_SELECTED_SUITE(zova_c_sql_functions);
     RUN_SELECTED_SUITE(zova_bridge);
     RUN_SELECTED_SUITE(zova_plugin);
-    RUN_EXPLICIT_SUITE(zova_real_repo);
-    RUN_EXPLICIT_SUITE(zova_graph_real_repo);
     RUN_SELECTED_SUITE(zova_incremental_native);
 #elif defined(CBM_TEST_RUNNER_MCP)
     RUN_SELECTED_SUITE(mcp);
@@ -332,10 +323,6 @@ int main(int argc, char **argv) {
     RUN_SELECTED_SUITE(store_nodes);
     RUN_SELECTED_SUITE(store_edges);
     RUN_SELECTED_SUITE(store_search);
-    RUN_SELECTED_SUITE(store_bulk);
-    RUN_SELECTED_SUITE(store_pragmas);
-    RUN_SELECTED_SUITE(store_checkpoint);
-    RUN_SELECTED_SUITE(dump_verify_io);
 
     /* Cypher (M6) */
     RUN_SELECTED_SUITE(cypher);
@@ -369,7 +356,6 @@ int main(int argc, char **argv) {
     /* LZ4 + zstd + SQLite writer */
     RUN_SELECTED_SUITE(lz4);
     RUN_SELECTED_SUITE(zstd);
-    RUN_SELECTED_SUITE(sqlite_writer);
 
     /* LSP resolvers */
     RUN_SELECTED_SUITE(scope);
@@ -437,8 +423,6 @@ int main(int argc, char **argv) {
     RUN_SELECTED_SUITE(zova_c_sql_functions);
     RUN_SELECTED_SUITE(zova_bridge);
     RUN_SELECTED_SUITE(zova_plugin);
-    RUN_EXPLICIT_SUITE(zova_real_repo);
-    RUN_EXPLICIT_SUITE(zova_graph_real_repo);
 
     /* Integration (end-to-end) */
     RUN_SELECTED_SUITE(integration);

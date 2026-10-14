@@ -201,8 +201,6 @@ typedef struct {
 /* Open an in-memory database (for testing). */
 cbm_store_t *cbm_store_open_memory(void);
 
-/* Open a file-backed database at the given path. Creates if needed. */
-cbm_store_t *cbm_store_open_path(const char *db_path);
 /* Read-only compatibility view over one workspace in the shared cbm.zova. */
 cbm_store_t *cbm_store_open_zova_workspace_query(const char *db_path,
                                                  const char *workspace_id);
@@ -217,38 +215,6 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path);
 /* On-disk path of a file-backed store, or NULL for an in-memory (:memory:)
  * store. The returned pointer is owned by the store. */
 const char *cbm_store_db_path(const cbm_store_t *s);
-
-/* Check database integrity. Returns true if the DB passes basic sanity checks
- * (projects table has correct types, no corruption indicators).
- * Returns false if corruption is detected — caller should delete and re-index. */
-bool cbm_store_check_integrity(cbm_store_t *s);
-
-/* Outcome of a quarantine-grade integrity check. Used to decide whether a DB
- * that failed the cheap open-time check should be quarantined (renamed to
- * .corrupt and rebuilt) or left alone. See cbm_store_check_integrity_verdict. */
-typedef enum {
-    CBM_INTEGRITY_OK = 0,        /* DB is healthy */
-    CBM_INTEGRITY_CORRUPT = 1,   /* DB is structurally damaged — safe to quarantine */
-    CBM_INTEGRITY_TRANSIENT = 2, /* SQL/busy/IO error — NOT corruption, do NOT quarantine */
-} cbm_integrity_verdict_t;
-
-/* Full integrity verdict for the quarantine decision path (upstream #1206/#1037).
- *
- * The plain cbm_store_check_integrity() returns a single bool and cannot
- * distinguish "the projects table is malformed" (real corruption) from
- * "sqlite3_prepare_v2 returned SQLITE_BUSY because another instance held the
- * writer lock" (a transient lock contention). Quarantining on the latter is
- * what makes concurrent instances destroy each other's healthy DBs.
- *
- * This function runs the shallow check plus PRAGMA quick_check and classifies
- * the failure mode so the caller can quarantine ONLY on confirmed corruption.
- * A quick_check statement error other than SQLITE_CORRUPT/NOTADB is not
- * corruption evidence and yields CBM_INTEGRITY_OK. quick_check is O(db size);
- * call once per store open, never per query. */
-cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s);
-
-/* Open database for a named project in the default cache dir. */
-cbm_store_t *cbm_store_open(const char *project);
 
 /* Close the store and free all resources. NULL-safe. */
 void cbm_store_close(cbm_store_t *s);
@@ -285,11 +251,6 @@ int cbm_store_drop_indexes(cbm_store_t *s);
 /* Recreate user indexes after bulk inserts. */
 int cbm_store_create_indexes(cbm_store_t *s);
 
-/* ── WAL / Checkpoint ───────────────────────────────────────────── */
-
-/* Force WAL checkpoint + PRAGMA optimize. */
-int cbm_store_checkpoint(cbm_store_t *s);
-
 /* Resolve the mmap_size pragma value applied to on-disk stores from the
  * CBM_SQLITE_MMAP_SIZE environment variable. Defaults to 67108864 (64 MB)
  * when the variable is unset, malformed, or partially numeric. Negative
@@ -298,11 +259,6 @@ int cbm_store_checkpoint(cbm_store_t *s);
  * processes truncate the DB file under live mappings). Exposed for
  * testability. */
 int64_t cbm_store_resolve_mmap_size(void);
-
-/* ── Dump / Restore ─────────────────────────────────────────────── */
-
-/* Dump in-memory database to a file. */
-int cbm_store_dump_to_file(cbm_store_t *s, const char *dest_path);
 
 /* ── Project CRUD ───────────────────────────────────────────────── */
 
@@ -440,18 +396,6 @@ void cbm_store_search_free(cbm_search_output_t *out);
 
 int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const char **edge_types,
                   int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out);
-
-/* Experimental graph-read sidecar route. Returns NOT_FOUND when the sidecar is
- * unavailable or cannot be used, so callers can atomically use SQLite instead. */
-int cbm_store_zova_walk_calls(cbm_store_t *s, const char *project, const cbm_node_t *start,
-                              const char *direction, int max_depth, int max_results,
-                              cbm_zova_graph_visit_t **out_visits, int *out_count,
-                              cbm_zova_graph_metrics_t *out_metrics);
-/* Most recent experimental graph-read attempt on this store. */
-void cbm_store_zova_graph_last_metrics(const cbm_store_t *s, cbm_zova_graph_metrics_t *out_metrics);
-/* Store MCP's aggregate metrics for a complete experimental trace request. */
-void cbm_store_zova_graph_set_request_metrics(cbm_store_t *s,
-                                              const cbm_zova_graph_metrics_t *metrics);
 
 /* Free a traverse result's allocated memory. */
 void cbm_store_traverse_free(cbm_traverse_result_t *out);

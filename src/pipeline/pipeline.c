@@ -12,7 +12,7 @@
  */
 #include "foundation/constants.h"
 
-enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6, PL_WAL_BUF = 1040 };
+enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6 };
 #define PL_NSEC_PER_SEC 1000000000LL
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
@@ -348,20 +348,6 @@ void cbm_pipeline_set_committed_counts(cbm_pipeline_t *p, int nodes, int edges) 
         p->committed_nodes = nodes;
         p->committed_edges = edges;
     }
-}
-
-/* Resolve the DB path for this pipeline. Caller must free(). */
-static char *resolve_db_path(const cbm_pipeline_t *p) {
-    char *path = malloc(CBM_SZ_1K);
-    if (!path) {
-        return NULL;
-    }
-    if (p->db_path) {
-        snprintf(path, 1024, "%s", p->db_path);
-    } else {
-        snprintf(path, 1024, "%s/%s.db", cbm_resolve_cache_dir(), p->project_name);
-    }
-    return path;
 }
 
 static int check_cancel(const cbm_pipeline_t *p) {
@@ -957,102 +943,52 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
 
 enum { PIPELINE_INCREMENTAL_FATAL = -2 };
 
-/* Try incremental pipeline or delete old DB for reindex.
- * Returns >= 0 if incremental was used (the return code), or -1 to proceed with full. */
-static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *files, int file_count) {
-    if (cbm_zova_route_for_project(p->project_name) == CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        char zova_path[CBM_SZ_1K];
-        if (cbm_zova_user_database_path(zova_path, sizeof(zova_path)) == 0) {
-            cbm_zova_repository_t *repo = cbm_zova_repository_open(zova_path, p->project_name);
-            if (repo) {
-                cbm_project_summary_export_t summary = {0};
-                const char *workspace_id = cbm_zova_repository_workspace_id(repo);
-                if (cbm_zova_repository_project_summary(repo, workspace_id, &summary) ==
-                    CBM_STORE_OK) {
-                    cbm_store_project_summary_export_free(&p->saved_summary);
-                    p->saved_summary = summary;
-                    p->saved_summary_valid = true;
-                }
-                cbm_zova_workspace_snapshot_t snapshot = {0};
-                cbm_gbuf_t *preloaded = cbm_gbuf_new(p->project_name, p->repo_path);
-                if (preloaded && cbm_zova_repository_export_incremental_snapshot_to_graph(
-                        zova_path, workspace_id, &snapshot, preloaded) == 0) {
-                    int hash_count = snapshot.file_hash_count;
-                    if (hash_count > 0 && file_count <= hash_count + (hash_count / PAIR_LEN)) {
-                        cbm_log_info("pipeline.route", "path", "incremental", "stored_hashes",
-                                     itoa_buf(hash_count), "authority", "zova");
-                        /* The exported snapshot owns all of its data. Release the
-                         * read transaction before publishing the next generation,
-                         * otherwise it pins the old WAL and prevents checkpointing. */
-                        cbm_zova_repository_close(repo);
-                        p->last_route = CBM_PIPELINE_ROUTE_INCREMENTAL;
-                        int rc = cbm_pipeline_run_incremental_zova(p, zova_path, files, file_count,
-                                                                   &snapshot, preloaded);
-                        preloaded = NULL;
-                        cbm_zova_workspace_snapshot_free(&snapshot);
-                        return rc == 0 ? 0 : PIPELINE_INCREMENTAL_FATAL;
-                    }
-                    if (hash_count > 0) {
-                        cbm_log_info("pipeline.route", "path", "mode_change_reindex",
-                                     "stored_hashes", itoa_buf(hash_count), "discovered",
-                                     itoa_buf(file_count), "authority", "zova");
-                    }
-                    cbm_zova_workspace_snapshot_free(&snapshot);
-                }
-                cbm_gbuf_free(preloaded);
-                cbm_zova_repository_close(repo);
+/* Try the incremental pipeline against the project's committed cbm.zova
+ * workspace. Returns >= 0 if incremental was used (the return code), or -1 to
+ * proceed with full. */
+static int try_incremental(cbm_pipeline_t *p, cbm_file_info_t *files, int file_count) {
+    char zova_path[CBM_SZ_1K];
+    if (cbm_zova_user_database_path(zova_path, sizeof(zova_path)) == 0) {
+        cbm_zova_repository_t *repo = cbm_zova_repository_open(zova_path, p->project_name);
+        if (repo) {
+            cbm_project_summary_export_t summary = {0};
+            const char *workspace_id = cbm_zova_repository_workspace_id(repo);
+            if (cbm_zova_repository_project_summary(repo, workspace_id, &summary) ==
+                CBM_STORE_OK) {
+                cbm_store_project_summary_export_free(&p->saved_summary);
+                p->saved_summary = summary;
+                p->saved_summary_valid = true;
             }
-        }
-        return CBM_NOT_FOUND;
-    }
-    char *db_path = resolve_db_path(p);
-    if (!db_path) {
-        return CBM_NOT_FOUND;
-    }
-    struct stat db_st;
-    if (stat(db_path, &db_st) != 0) {
-        free(db_path);
-        return CBM_NOT_FOUND;
-    }
-    cbm_store_t *check_store = cbm_store_open_path(db_path);
-    if (check_store && cbm_store_check_integrity(check_store)) {
-        cbm_file_hash_t *hashes = NULL;
-        int hash_count = 0;
-        cbm_store_get_file_hashes(check_store, p->project_name, &hashes, &hash_count);
-        cbm_store_free_file_hashes(hashes, hash_count);
-        cbm_store_close(check_store);
-        if (hash_count > 0 && file_count <= hash_count + (hash_count / PAIR_LEN)) {
-            cbm_log_info("pipeline.route", "path", "incremental", "stored_hashes",
-                         itoa_buf(hash_count));
-            p->last_route = CBM_PIPELINE_ROUTE_INCREMENTAL;
-            int rc = cbm_pipeline_run_incremental(p, db_path, files, file_count);
-            free(db_path);
-            return rc;
-        }
-        if (hash_count > 0) {
-            cbm_log_info("pipeline.route", "path", "mode_change_reindex", "stored_hashes",
-                         itoa_buf(hash_count), "discovered", itoa_buf(file_count));
-        }
-    } else if (check_store) {
-        cbm_store_close(check_store);
-    }
-    cbm_log_info("pipeline.route", "path", "reindex", "action", "deleting old db");
-    /* Keep the project summary across the full-reindex DB delete. */
-    {
-        cbm_store_t *summary_store = cbm_store_open_path(db_path);
-        if (summary_store) {
-            cbm_pipeline_capture_project_summary(p, summary_store);
-            cbm_store_close(summary_store);
+            cbm_zova_workspace_snapshot_t snapshot = {0};
+            cbm_gbuf_t *preloaded = cbm_gbuf_new(p->project_name, p->repo_path);
+            if (preloaded && cbm_zova_repository_export_incremental_snapshot_to_graph(
+                    zova_path, workspace_id, &snapshot, preloaded) == 0) {
+                int hash_count = snapshot.file_hash_count;
+                if (hash_count > 0 && file_count <= hash_count + (hash_count / PAIR_LEN)) {
+                    cbm_log_info("pipeline.route", "path", "incremental", "stored_hashes",
+                                 itoa_buf(hash_count), "authority", "zova");
+                    /* The exported snapshot owns all of its data. Release the
+                     * read transaction before publishing the next generation,
+                     * otherwise it pins the old WAL and prevents checkpointing. */
+                    cbm_zova_repository_close(repo);
+                    p->last_route = CBM_PIPELINE_ROUTE_INCREMENTAL;
+                    int rc = cbm_pipeline_run_incremental_zova(p, zova_path, files, file_count,
+                                                               &snapshot, preloaded);
+                    preloaded = NULL;
+                    cbm_zova_workspace_snapshot_free(&snapshot);
+                    return rc == 0 ? 0 : PIPELINE_INCREMENTAL_FATAL;
+                }
+                if (hash_count > 0) {
+                    cbm_log_info("pipeline.route", "path", "mode_change_reindex",
+                                 "stored_hashes", itoa_buf(hash_count), "discovered",
+                                 itoa_buf(file_count), "authority", "zova");
+                }
+                cbm_zova_workspace_snapshot_free(&snapshot);
+            }
+            cbm_gbuf_free(preloaded);
+            cbm_zova_repository_close(repo);
         }
     }
-    cbm_unlink(db_path);
-    char wal[PL_WAL_BUF];
-    char shm[PL_WAL_BUF];
-    snprintf(wal, sizeof(wal), "%s-wal", db_path);
-    snprintf(shm, sizeof(shm), "%s-shm", db_path);
-    cbm_unlink(wal);
-    cbm_unlink(shm);
-    free(db_path);
     return CBM_NOT_FOUND;
 }
 
@@ -1078,7 +1014,6 @@ static int pipeline_publish_zova_user_database(
     }
     p->zova_publish_ms = 0.0;
     memset(&p->zova_publish_stats, 0, sizeof(p->zova_publish_stats));
-    if (!cbm_zova_single_file_enabled()) return 0;
     struct timespec route_started = {0};
     cbm_clock_gettime(CLOCK_MONOTONIC, &route_started);
     int capacity = file_count + mode_skipped_count;
@@ -1239,145 +1174,33 @@ int cbm_pipeline_publish_zova_user_database_delta(
                                                mode_skipped_count,before);
 }
 
-void cbm_pipeline_capture_project_summary(cbm_pipeline_t *p, cbm_store_t *store) {
-    if (!p || !store) return;
-    cbm_store_project_summary_export_free(&p->saved_summary);
-    p->saved_summary_valid = false;
-    cbm_project_summary_export_t exported = {0};
-    if (cbm_store_project_summary_export(store, p->project_name, &exported) == CBM_STORE_OK) {
-        p->saved_summary = exported;
-        p->saved_summary_valid = true;
-    }
-}
-
-/* Dump graph to SQLite and persist file hashes for incremental indexing. */
+/* Publish the graph and file hashes to the shared cbm.zova. */
 static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *files, int file_count,
                                    struct timespec *t) {
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
-    char db_path[CBM_SZ_1K];
-    if (p->db_path) {
-        snprintf(db_path, sizeof(db_path), "%s", p->db_path);
-    } else {
-        const char *cdir = cbm_resolve_cache_dir();
-        if (!cdir) {
-            cdir = cbm_tmpdir();
+    char zova_dir[CBM_SZ_1K];
+    if (cbm_zova_user_database_path(zova_dir, sizeof(zova_dir)) == 0) {
+        char *last_slash = strrchr(zova_dir, '/');
+        if (last_slash) {
+            *last_slash = '\0';
+            cbm_mkdir_p(zova_dir, CBM_DIR_PERMS);
         }
-        snprintf(db_path, sizeof(db_path), "%s/%s.db", cdir, p->project_name);
     }
-    char db_dir[CBM_SZ_1K];
-    snprintf(db_dir, sizeof(db_dir), "%s", db_path);
-    char *last_slash = strrchr(db_dir, '/');
-    if (last_slash) {
-        *last_slash = '\0';
-        cbm_mkdir_p(db_dir, CBM_DIR_PERMS);
-    }
-    /* Capture committed counts BEFORE the dump. cbm_gbuf_dump_to_sqlite calls
-     * release_gbuf_indexes(), which frees node_by_qn (graph_buffer.c), after
-     * which cbm_gbuf_node_count() returns 0. Reading these post-dump left
-     * committed_nodes at 0, so the #334 plausibility gate never fired. */
+    /* Capture committed counts before preparing the dump, which releases the
+     * graph buffer indexes (graph_buffer.c), after which cbm_gbuf_node_count()
+     * returns 0 and the #334 plausibility gate would never fire. */
     p->committed_nodes = cbm_gbuf_node_count(p->gbuf);
     p->committed_edges = cbm_gbuf_edge_count(p->gbuf);
-    if (cbm_zova_route_for_project(p->project_name) == CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        int prepare_rc = cbm_gbuf_prepare_zova_dump(p->gbuf);
-        if (prepare_rc != 0) {
-            cbm_log_error("pipeline.err", "phase", "zova_prepare");
-            return prepare_rc;
-        }
-        int publish_rc = cbm_pipeline_publish_zova_user_database(
-            p, p->gbuf, files, file_count, NULL, 0);
-        if (publish_rc != 0) {
-            cbm_log_error("pipeline.err", "phase", "zova_single_file");
-            return publish_rc;
-        }
-        return 0;
+    int prepare_rc = cbm_gbuf_prepare_zova_dump(p->gbuf);
+    if (prepare_rc != 0) {
+        cbm_log_error("pipeline.err", "phase", "zova_prepare");
+        return prepare_rc;
     }
-    int rc = cbm_gbuf_dump_to_sqlite(p->gbuf, db_path);
-    if (rc != 0) {
-        cbm_log_error("pipeline.err", "phase", "dump");
-        return rc;
+    int publish_rc = cbm_pipeline_publish_zova_user_database(p, p->gbuf, files, file_count, NULL, 0);
+    if (publish_rc != 0) {
+        cbm_log_error("pipeline.err", "phase", "zova_single_file");
+        return publish_rc;
     }
-    cbm_log_info("pass.timing", "pass", "dump", "elapsed_ms", itoa_buf((int)elapsed_ms(*t)));
-    /* Persist-tail spans (phase "persist"): attribute the ~60s that lands here
-     * AFTER cbm_gbuf_dump_to_sqlite returns. Active only under CBM_PROFILE. */
-    CBM_PROF_START(t_reopen);
-    cbm_store_t *hash_store = cbm_store_open_path(db_path);
-    CBM_PROF_END("persist", "1_reopen", t_reopen);
-    if (hash_store) {
-        CBM_PROF_START(t_delhash);
-        cbm_store_delete_file_hashes(hash_store, p->project_name);
-        CBM_PROF_END("persist", "2_delete_file_hashes", t_delhash);
-
-        /* Batch the per-file hash upserts into ONE transaction. The per-file
-         * cbm_store_upsert_file_hash path autocommits, i.e. file_count fsyncs
-         * (~89k on the kernel); cbm_store_upsert_file_hash_batch wraps the same
-         * cached INSERT ... ON CONFLICT upsert in a single begin/commit. Same
-         * (project, rel_path, sha256="", mtime_ns, size) tuples, same replace
-         * semantics — only the transaction boundary changes. */
-        CBM_PROF_START(t_fh);
-        cbm_file_hash_t *fhashes = (cbm_file_hash_t *)malloc(
-            (size_t)(file_count > 0 ? file_count : 1) * sizeof(cbm_file_hash_t));
-        if (fhashes) {
-            int fh_n = 0;
-            for (int i = 0; i < file_count; i++) {
-                struct stat fst;
-                if (stat(files[i].path, &fst) == 0) {
-                    fhashes[fh_n].project = p->project_name;
-                    fhashes[fh_n].rel_path = files[i].rel_path;
-                    fhashes[fh_n].sha256 = "";
-                    fhashes[fh_n].mtime_ns = stat_mtime_ns(&fst);
-                    fhashes[fh_n].size = fst.st_size;
-                    fh_n++;
-                }
-            }
-            if (cbm_store_upsert_file_hash_batch(hash_store, fhashes, fh_n) != CBM_STORE_OK) {
-                cbm_log_error("pipeline.err", "phase", "persist_file_hashes", "project",
-                              p->project_name);
-            }
-            free(fhashes);
-        } else {
-            /* OOM fallback: the original per-file path (identical result, slower). */
-            for (int i = 0; i < file_count; i++) {
-                struct stat fst;
-                if (stat(files[i].path, &fst) == 0) {
-                    cbm_store_upsert_file_hash(hash_store, p->project_name, files[i].rel_path, "",
-                                               stat_mtime_ns(&fst), fst.st_size);
-                }
-            }
-        }
-        CBM_PROF_END_N("persist", "4_file_hashes", t_fh, file_count);
-
-        /* FTS5 backfill: populate nodes_fts with camelCase-split names.
-         * Contentless FTS5 requires the special 'delete-all' command instead of
-         * DELETE FROM to wipe prior rows (there's no underlying content table).
-         * Falls back to plain names if cbm_camel_split is unavailable (which
-         * shouldn't happen because we always register it, but we stay defensive). */
-        CBM_PROF_START(t_fts);
-        cbm_store_exec(hash_store, "INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all');");
-        if (cbm_store_exec(hash_store,
-                           "INSERT INTO nodes_fts(rowid, name, qualified_name, label, file_path) "
-                           "SELECT id, cbm_camel_split(name), qualified_name, label, file_path "
-                           "FROM nodes;") != CBM_STORE_OK) {
-            cbm_store_exec(hash_store,
-                           "INSERT INTO nodes_fts(rowid, name, qualified_name, label, file_path) "
-                           "SELECT id, name, qualified_name, label, file_path FROM nodes;");
-        }
-        CBM_PROF_END("persist", "5_fts_backfill", t_fts);
-
-        cbm_store_close(hash_store);
-        cbm_log_info("pass.timing", "pass", "persist_hashes", "files", itoa_buf(file_count));
-    }
-
-    rc = cbm_gbuf_finalize_zova_sidecar(p->gbuf, db_path);
-    if (rc != 0) {
-        cbm_log_error("pipeline.err", "phase", "zova_sidecar", "path", db_path);
-        return rc;
-    }
-    rc = cbm_pipeline_publish_zova_user_database(p, p->gbuf, files, file_count, NULL, 0);
-    if (rc != 0) {
-        cbm_log_error("pipeline.err", "phase", "zova_single_file", "path", db_path);
-        return rc;
-    }
-
     return 0;
 }
 
@@ -1549,7 +1372,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     }
 
     /* Check for existing DB → try incremental or delete for reindex */
-    rc = try_incremental_or_delete_db(p, files, file_count);
+    rc = try_incremental(p, files, file_count);
     if (rc == PIPELINE_INCREMENTAL_FATAL) {
         cbm_discover_free(files, file_count);
         return CBM_NOT_FOUND;

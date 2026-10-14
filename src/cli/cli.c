@@ -13,6 +13,8 @@
 #include "mcp/mcp.h" // cbm_mcp_tool_input_schema — CLI flag parser + per-tool --help
 #include "zova/cbm_zova.h"
 #include "zova/cbm_zova_operations.h"
+#include "zova/cbm_zova_repository.h"
+#include "zova/cbm_zova_route.h"
 
 /* CLI buffer size constants. */
 enum {
@@ -48,7 +50,6 @@ enum {
     SQL_PARAM_1 = 1,   /* sqlite3_bind parameter index 1 */
     SQL_PARAM_2 = 2,
     SEMVER_PARTS = 3, /* major.minor.patch */
-    DB_EXT_LEN = 3,   /* strlen(".db") */
     MIN_ARGC_CMD = 3,
     /* minimum argc for subcommand with arg */ /* sqlite3_bind parameter index 2 */ /* 10 MB cap
                                                                                        factor */
@@ -2650,59 +2651,45 @@ static const char *get_cache_dir(const char *home_dir) {
     return buf;
 }
 
-int cbm_list_indexes(const char *home_dir) {
-    const char *cache_dir = get_cache_dir(home_dir);
-    if (!cache_dir) {
+/* List the projects in the cache's cbm.zova. With print set, writes one line
+ * per project. Returns the project count, 0 when there is no cbm.zova. */
+static int list_zova_projects(const char *home_dir, bool print) {
+    char path[CLI_BUF_1K];
+    if (!get_cache_dir(home_dir) || cbm_zova_user_database_path(path, sizeof(path)) != 0 ||
+        !cbm_file_exists(path)) {
         return 0;
     }
-
-    cbm_dir_t *d = cbm_opendir(cache_dir);
-    if (!d) {
+    cbm_zova_catalog_t *catalog = cbm_zova_catalog_open(path);
+    cbm_zova_catalog_scope_t listed = {0};
+    if (!catalog || cbm_zova_catalog_list(catalog, &listed) != CBM_STORE_OK) {
+        cbm_zova_catalog_close(catalog);
         return 0;
     }
-
-    int count = 0;
-    cbm_dirent_t *ent;
-    while ((ent = cbm_readdir(d)) != NULL) {
-        size_t len = strlen(ent->name);
-        if (len > DB_EXT_LEN && strcmp(ent->name + len - DB_EXT_LEN, ".db") == 0) {
-            printf("  %s/%s\n", cache_dir, ent->name);
-            count++;
-        }
+    for (int i = 0; print && i < listed.count; i++) {
+        printf("  %s (%s)\n", listed.projects[i].selector, listed.projects[i].root_path);
     }
-    cbm_closedir(d);
+    int count = listed.count;
+    cbm_zova_catalog_scope_free(&listed);
+    cbm_zova_catalog_close(catalog);
     return count;
 }
 
+int cbm_list_indexes(const char *home_dir) {
+    return list_zova_projects(home_dir, true);
+}
+
 int cbm_remove_indexes(const char *home_dir) {
-    const char *cache_dir = get_cache_dir(home_dir);
-    if (!cache_dir) {
+    int count = list_zova_projects(home_dir, false);
+    char path[CLI_BUF_1K];
+    if (!get_cache_dir(home_dir) || cbm_zova_user_database_path(path, sizeof(path)) != 0) {
         return 0;
     }
-
-    cbm_dir_t *d = cbm_opendir(cache_dir);
-    if (!d) {
-        return 0;
-    }
-
-    int count = 0;
-    cbm_dirent_t *ent;
-    while ((ent = cbm_readdir(d)) != NULL) {
-        size_t len = strlen(ent->name);
-        if (len > DB_EXT_LEN && strcmp(ent->name + len - DB_EXT_LEN, ".db") == 0) {
-            char path[CLI_BUF_1K];
-            snprintf(path, sizeof(path), "%s/%s", cache_dir, ent->name);
-            /* Also remove .db.tmp if present */
-            char tmp_path[CLI_FIELD_1040];
-            snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
-            cbm_unlink(tmp_path);
-            if (cbm_unlink(path) == 0) {
-                count++;
-            }
-        }
-    }
-    cbm_closedir(d);
-    return count;
+    char side[CLI_FIELD_1040];
+    snprintf(side, sizeof(side), "%s-wal", path);
+    cbm_unlink(side);
+    snprintf(side, sizeof(side), "%s-shm", path);
+    cbm_unlink(side);
+    return cbm_unlink(path) == 0 ? count : 0;
 }
 
 /* ── Config store (persistent key-value in _config.db) ─────────── */
@@ -2876,14 +2863,8 @@ int cbm_cmd_zova_ops(int argc, char **argv) {
     cbm_zova_operation_code_t code = CBM_ZOVA_OPERATION_INVALID;
     cbm_zova_health_class_t health = CBM_ZOVA_HEALTH_OK;
     bool is_health = strcmp(action, "health") == 0;
-    bool read_only = strcmp(action, "status") == 0 || is_health;
     if (cbm_zova_workspace_registry_path(database_path, sizeof(database_path)) != 0) {
         snprintf(report.reason, sizeof(report.reason), "%s", "database_path_failed");
-    } else if (!read_only && !cbm_zova_single_file_enabled()) {
-        code = CBM_ZOVA_OPERATION_INCOMPATIBLE;
-        report.code = code;
-        snprintf(report.operation, sizeof(report.operation), "%s", action);
-        snprintf(report.reason, sizeof(report.reason), "%s", "zova_disabled");
     } else if (strcmp(action, "status") == 0) {
         code = cbm_zova_database_status(database_path, &report);
     } else if (strcmp(action, "backup") == 0) {
@@ -3911,35 +3892,13 @@ static void cbm_install_agent_configs(const char *home, const char *binary_path,
     install_editor_agent_configs(&agents, home, binary_path, dry_run);
 }
 
-/* Count .db files in the cache directory. */
-static int count_db_indexes(const char *home) {
-    const char *cache_dir = get_cache_dir(home);
-    if (!cache_dir) {
-        return 0;
-    }
-    cbm_dir_t *d = cbm_opendir(cache_dir);
-    if (!d) {
-        return 0;
-    }
-    int count = 0;
-    cbm_dirent_t *ent;
-    while ((ent = cbm_readdir(d)) != NULL) {
-        size_t len = strlen(ent->name);
-        if (len > DB_EXT_LEN && strcmp(ent->name + len - DB_EXT_LEN, ".db") == 0) {
-            count++;
-        }
-    }
-    cbm_closedir(d);
-    return count;
-}
-
 /* Handle pre-existing indexes during (re)install (#607).
  *
  * Returns 1 to proceed with the install, 0 to abort (user declined the
  * destructive reset prompt).
  *
- * Default (reset=false): PRESERVE the indexed graph. We do NOT delete any
- * .db. We print an honest message telling the user the indexes are kept and
+ * Default (reset=false): PRESERVE the indexed graph. We do NOT delete
+ * cbm.zova. We print an honest message telling the user the indexes are kept and
  * that they should re-index after install to pick up this version's
  * extraction improvements. The old behaviour deleted every index here while
  * printing "must be rebuilt" and never rebuilt — silent, irrecoverable data
@@ -3951,12 +3910,12 @@ static int count_db_indexes(const char *home) {
  * prompt-and-delete behaviour, with honest "Delete" wording.
  *
  * Not static: linked into the bug-repro test runner so repro_issue607.c can
- * assert the default path preserves the DB. It is intentionally NOT declared
+ * assert the default path preserves cbm.zova. It is intentionally NOT declared
  * in cli.h (internal helper); the test carries an extern forward declaration.
  */
 int cbm_install_handle_existing_indexes(const char *home, bool reset, bool dry_run);
 int cbm_install_handle_existing_indexes(const char *home, bool reset, bool dry_run) {
-    int index_count = count_db_indexes(home);
+    int index_count = list_zova_projects(home, false);
     if (index_count <= 0) {
         return 1; /* nothing to handle, proceed */
     }
@@ -4710,7 +4669,7 @@ int cbm_cmd_uninstall(int argc, char **argv) {
     uninstall_editor_agents(&agents, home, dry_run);
 
     /* Step 2: Remove indexes */
-    int index_count = count_db_indexes(home);
+    int index_count = list_zova_projects(home, false);
     if (index_count > 0) {
         printf("\nFound %d index(es):\n", index_count);
         cbm_list_indexes(home);

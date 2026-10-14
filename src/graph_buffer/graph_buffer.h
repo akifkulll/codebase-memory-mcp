@@ -114,10 +114,6 @@ int cbm_gbuf_delete_empty_folders(cbm_gbuf_t *gb);
 int cbm_gbuf_delete_empty_folders_under(cbm_gbuf_t *gb, const char *const *affected_paths,
                                         int affected_count);
 
-/* Bulk-load all nodes and edges for a project from an existing SQLite DB
- * into this graph buffer. Returns 0 on success. */
-int cbm_gbuf_load_from_db(cbm_gbuf_t *gb, const char *db_path, const char *project);
-
 /* Iterate all live nodes (not deleted from QN index). */
 typedef void (*cbm_gbuf_node_visitor_fn)(const cbm_gbuf_node_t *node, void *userdata);
 void cbm_gbuf_foreach_node(const cbm_gbuf_t *gb, cbm_gbuf_node_visitor_fn fn, void *userdata);
@@ -161,7 +157,7 @@ int cbm_gbuf_delete_edges_by_source_type(cbm_gbuf_t *gb, int64_t source_id, cons
 
 /* Store an int8-quantized vector for a node. The vector data is copied.
  * Called by pass_semantic_edges after computing RI vectors.
- * Vectors are carried through to cbm_write_db during the dump phase. */
+ * Vectors are carried through to the cbm.zova publish during the dump phase. */
 int cbm_gbuf_store_vector(cbm_gbuf_t *gb, int64_t node_id, const uint8_t *vector, int vector_len);
 
 /* Store an enriched token vector for query-time lookup.
@@ -178,22 +174,14 @@ void cbm_gbuf_clear_semantic_vectors(cbm_gbuf_t *gb);
  * delta publication. Valid only when the graph buffer contains no vectors. */
 int cbm_gbuf_reuse_zova_semantic_vectors(cbm_gbuf_t *gb);
 
-/* ── Dump to SQLite ──────────────────────────────────────────────── */
+/* ── Dump for cbm.zova ───────────────────────────────────────────── */
 
-/* Dump the entire buffer to a SQLite file using the direct page writer.
- * Assigns sequential final IDs and remaps edge references.
- * Returns 0 on success, -1 on error. */
-int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path);
-/* Finalize stable node/edge/vector identities without creating a SQLite file. */
+/* Finalize stable node/edge/vector identities: assigns sequential final IDs
+ * and remaps edge references. Returns 0 on success. */
 int cbm_gbuf_prepare_zova_dump(cbm_gbuf_t *gb);
 /* Incremental publication retains the delta publication model and therefore
  * only finalizes dense dump arrays. */
 int cbm_gbuf_prepare_zova_dump_delta(cbm_gbuf_t *gb);
-
-/* Create the optional Zova sidecar after the SQLite dump has completed.
- * In i8-vector mode it writes typed collections from the finalized in-memory
- * vector arrays, while SQLite remains the paired writer. */
-int cbm_gbuf_finalize_zova_sidecar(const cbm_gbuf_t *gb, const char *path);
 
 /* Opt-in single-file publication using the finalized graph/vector arrays. The
  * caller owns the optional file-hash and summary inputs and the result is

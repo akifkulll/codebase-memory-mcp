@@ -7,7 +7,7 @@
  * ORIGINAL DESTROYING CODE PATH (pre-fix):
  *   src/cli/cli.c  cbm_cmd_install()  printed
  *     "Found %d existing index(es) that must be rebuilt:\n"
- *   then called cbm_remove_indexes(home) which unlinked every .db and NEVER
+ *   then called cbm_remove_indexes(home) which unlinked every index and NEVER
  *   rebuilt. The word "rebuilt" implied preservation; the action was deletion.
  *   The user's indexed graph was silently, irrecoverably destroyed.
  *
@@ -29,14 +29,14 @@
  * WHAT THIS TEST ASSERTS (retargeted to the new behaviour):
  *   1. preserves_index: after the DEFAULT path
  *        cbm_install_handle_existing_indexes(home, reset=false, dry_run=false)
- *      the index DB MUST still exist on disk.
+ *      cbm.zova MUST still exist on disk.
  *        - RED before the fix: the helper did not exist / install deleted the
  *          DB, so the file was gone and the ASSERT_TRUE fired.
  *        - GREEN after the fix: the default path never unlinks, the file
  *          remains, the assertion holds.
  *   2. reset_deletes: the explicit opt-in path
  *        cbm_install_handle_existing_indexes(home, reset=true, dry_run=false)
- *      MUST still delete the DB (proving the destroy primitive is reachable
+ *      MUST still delete cbm.zova (proving the destroy primitive is reachable
  *      only behind the explicit flag). The prompt auto-answers "yes" via
  *      CBM_ASSUME_YES so the test is non-interactive.
  *
@@ -47,6 +47,7 @@
 
 #include <foundation/compat.h>
 #include "test_framework.h"
+#include "test_helpers.h"
 
 #include <cli/cli.h>
 #include <store/store.h>
@@ -82,32 +83,28 @@ static int file_exists_607(const char *path) {
 
 #define REPRO607_PROJECT "cbm-repro607-test"
 
-/* Create a real index DB at <tmp_cache>/<REPRO607_PROJECT>.db with one
- * project row, mirroring the state of a user who ran index_repository once.
- * Writes the resulting path into db_path. Returns 1 on success, 0 on setup
- * failure. */
+/* Publish one project into <tmp_cache>/cbm.zova, mirroring the state of a
+ * user who ran index_repository once. CBM_CACHE_DIR must already point at
+ * tmp_cache. Writes the cbm.zova path into db_path. Returns 1 on success, 0
+ * on setup failure. */
 static int repro607_make_index(const char *tmp_cache, char *db_path, size_t db_path_sz) {
-    snprintf(db_path, db_path_sz, "%s/%s.db", tmp_cache, REPRO607_PROJECT);
+    snprintf(db_path, db_path_sz, "%s/cbm.zova", tmp_cache);
 
-    cbm_store_t *setup_store = cbm_store_open_path(db_path);
+    cbm_store_t *setup_store = cbm_store_open_memory();
     if (!setup_store) {
         return 0;
     }
-    int upsert_rc =
-        cbm_store_upsert_project(setup_store, REPRO607_PROJECT, "/home/user/my-project");
+    int rc = cbm_store_upsert_project(setup_store, REPRO607_PROJECT, "/home/user/my-project");
+    if (rc == CBM_STORE_OK) {
+        rc = th_publish_store_project(setup_store, REPRO607_PROJECT);
+    }
     cbm_store_close(setup_store);
-    return (upsert_rc == CBM_STORE_OK) ? 1 : 0;
+    return rc == 0 ? 1 : 0;
 }
 
-/* Best-effort cleanup of the temp cache dir + DB sidecar files. */
-static void repro607_cleanup(const char *tmp_cache, const char *db_path) {
-    unlink(db_path);
-    char wal[730], shm[730];
-    snprintf(wal, sizeof(wal), "%s-wal", db_path);
-    snprintf(shm, sizeof(shm), "%s-shm", db_path);
-    unlink(wal);
-    unlink(shm);
-    rmdir(tmp_cache);
+/* Best-effort cleanup of the temp cache dir. */
+static void repro607_cleanup(const char *tmp_cache) {
+    th_rmtree(tmp_cache);
 }
 
 /* ── Test 1: default (reset=false) PRESERVES the index ────────────────
@@ -117,8 +114,8 @@ static void repro607_cleanup(const char *tmp_cache, const char *db_path) {
  * ─────────────────────────────────────────────────────────────────── */
 TEST(repro_issue607_reinstall_preserves_index) {
     /* Redirect CBM_CACHE_DIR to a fresh temp dir so the real user cache is
-     * never touched and count_db_indexes()/cbm_list_indexes() see only the
-     * DB we create here. */
+     * never touched and cbm_list_indexes() sees only the project we
+     * publish here. */
     char tmp_cache[512];
     snprintf(tmp_cache, sizeof(tmp_cache), "/tmp/cbm_repro607_XXXXXX");
     if (!cbm_mkdtemp(tmp_cache)) {
@@ -141,7 +138,7 @@ TEST(repro_issue607_reinstall_preserves_index) {
 
     /* ── The fix under test: DEFAULT install index handling (reset=false) ──
      *
-     * Before the fix this path deleted every .db while printing "must be
+     * Before the fix this path deleted every index while printing "must be
      * rebuilt". The fix preserves them: the helper lists the indexes and
      * returns 1 (proceed) WITHOUT unlinking anything.
      *
@@ -159,7 +156,7 @@ TEST(repro_issue607_reinstall_preserves_index) {
      * install path. RED on the old code (deleted); GREEN after the fix. */
     int db_exists = file_exists_607(db_path);
 
-    repro607_cleanup(tmp_cache, db_path);
+    repro607_cleanup(tmp_cache);
 
 #if defined(_WIN32)
     _putenv("CBM_CACHE_DIR=");
@@ -214,7 +211,7 @@ TEST(repro_issue607_reset_indexes_deletes) {
     /* Restore interactive default so this state never leaks into other tests. */
     cbm_set_auto_answer_for_test(0 /* prompt */);
 
-    repro607_cleanup(tmp_cache, db_path);
+    repro607_cleanup(tmp_cache);
 
 #if defined(_WIN32)
     _putenv("CBM_CACHE_DIR=");

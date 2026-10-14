@@ -736,47 +736,6 @@ TEST(store_search_exclude_labels) {
     PASS();
 }
 
-/* ── Dump to file ──────────────────────────────────────────────── */
-
-TEST(store_dump_to_file) {
-    cbm_store_t *s = cbm_store_open_memory();
-    cbm_store_upsert_project(s, "test", "/tmp/test");
-
-    cbm_node_t n = {.project = "test",
-                    .label = "Function",
-                    .name = "Hello",
-                    .qualified_name = "test.main.Hello",
-                    .file_path = "main.go",
-                    .start_line = 1,
-                    .end_line = 5,
-                    .properties_json = "{\"sig\":\"func Hello()\"}"};
-    int64_t id = cbm_store_upsert_node(s, &n);
-    ASSERT_TRUE(id > 0);
-
-    /* Dump to temp file */
-    char *td = th_mktempdir("cbm_dump");
-    char path[256];
-    snprintf(path, sizeof(path), "%s/test.db", td);
-
-    int rc = cbm_store_dump_to_file(s, path);
-    ASSERT_EQ(rc, CBM_STORE_OK);
-    cbm_store_close(s);
-
-    /* Open dumped file and verify data */
-    cbm_store_t *disk = cbm_store_open_path(path);
-    ASSERT_NOT_NULL(disk);
-
-    cbm_node_t found = {0};
-    rc = cbm_store_find_node_by_qn(disk, "test", "test.main.Hello", &found);
-    ASSERT_EQ(rc, CBM_STORE_OK);
-    ASSERT_STR_EQ(found.name, "Hello");
-    cbm_node_free_fields(&found);
-
-    cbm_store_close(disk);
-    unlink(path);
-    PASS();
-}
-
 /* ── BFS with cross-service (HTTP_CALLS) edges ─────────────────── */
 
 TEST(store_bfs_cross_service) {
@@ -1547,7 +1506,6 @@ SUITE(store_search) {
     RUN_TEST(store_transaction_rollback);
     RUN_TEST(store_bulk_write_mode);
     RUN_TEST(store_schema_info);
-    RUN_TEST(store_dump_to_file);
     RUN_TEST(store_hop_to_risk);
     RUN_TEST(store_build_impact_summary);
     RUN_TEST(store_cross_service_detection);

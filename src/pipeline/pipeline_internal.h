@@ -146,7 +146,6 @@ int cbm_pipeline_publish_zova_user_database_delta(
     cbm_pipeline_t *p, cbm_gbuf_t *gbuf, const cbm_file_info_t *files, int file_count,
     const cbm_file_hash_t *mode_skipped, int mode_skipped_count,
     cbm_zova_workspace_snapshot_t *before);
-void cbm_pipeline_capture_project_summary(cbm_pipeline_t *p, cbm_store_t *store);
 
 /* Unified module resolver: relative → pkgmap → fqn_module fallback.
  * Handles bare specifiers via pkgmap lookup with prefix matching.
@@ -619,11 +618,9 @@ int cbm_scan_project_env_urls_excluded(const char *root_path, cbm_env_binding_t 
 
 /* ── Incremental pipeline (pipeline_incremental.c) ───────────────── */
 
-/* Run incremental re-index on an existing disk DB.
+/* Run incremental re-index against the committed cbm.zova generation.
  * Classifies files by mtime+size, deletes changed nodes, re-parses changed
- * files, merges into disk DB. Returns 0 on success. */
-int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info_t *files,
-                                 int file_count);
+ * files, publishes a delta generation. Returns 0 on success. */
 int cbm_pipeline_run_incremental_zova(cbm_pipeline_t *p, const char *zova_path,
                                       cbm_file_info_t *files, int file_count,
                                       cbm_zova_workspace_snapshot_t *snapshot,

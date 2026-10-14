@@ -8,7 +8,7 @@ RUNNER_DIR=${CBM_ZOVA_TEST_RUNNER_DIR:-"$ROOT/build/c"}
 runner_group_for_suite() {
   case "$1" in
     zova|zova_normalization_benchmark|zova_operations|\
-    zova_c_sql_functions|zova_bridge|zova_plugin|zova_real_repo|zova_graph_real_repo|\
+    zova_c_sql_functions|zova_bridge|zova_plugin|\
     zova_incremental_native)
       printf 'zova\n'
       ;;
@@ -23,20 +23,6 @@ runner_group_for_suite() {
       printf 'full\n'
       ;;
   esac
-}
-
-# Suites that read their indexed graph through the shared cbm.zova and so run
-# on the default store route. Every other suite still runs with the legacy
-# per-project store until its fixtures are converted.
-suite_reads_zova() {
-  case "$1" in
-    integration|index_resilience|pipeline|simhash|incremental|mcp|lang_contract|edge_imports|edge_structural|\
-    lsp_resolution_probe|node_creation_probe|edge_types_probe|convergence_probe|\
-    matrix_known_classes|matrix_new_constructs|grammar_probe_[a-g])
-      return 0
-      ;;
-  esac
-  return 1
 }
 
 runner_for_group() {
@@ -87,9 +73,5 @@ for suite in "$@"; do
   group=$(runner_group_for_suite "$suite")
   ensure_runner "$group"
   echo "TEST SUITE: $suite" >&2
-  if [[ -n "${CBM_ZOVA_MODE+x}" || "$group" == "zova" ]] || suite_reads_zova "$suite"; then
-    HOME="$TEST_HOME" CBM_CACHE_DIR="$TEST_CACHE" "$RUNNER" "$suite"
-  else
-    HOME="$TEST_HOME" CBM_CACHE_DIR="$TEST_CACHE" CBM_ZOVA_MODE=off "$RUNNER" "$suite"
-  fi
+  HOME="$TEST_HOME" CBM_CACHE_DIR="$TEST_CACHE" "$RUNNER" "$suite"
 done

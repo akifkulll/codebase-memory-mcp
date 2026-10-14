@@ -994,78 +994,6 @@ TEST(store_find_node_ids_by_qns) {
     PASS();
 }
 
-/* ── Integrity check tests ──────────────────────────────────────── */
-
-TEST(store_integrity_clean) {
-    /* A fresh store with correct data should pass integrity check */
-    cbm_store_t *s = cbm_store_open_memory();
-    ASSERT_NOT_NULL(s);
-    cbm_store_upsert_project(s, "test-proj", "/tmp/test");
-    ASSERT_TRUE(cbm_store_check_integrity(s));
-    cbm_store_close(s);
-    PASS();
-}
-
-TEST(store_integrity_empty) {
-    /* An empty store (no project rows) should pass — 0 rows is fine */
-    cbm_store_t *s = cbm_store_open_memory();
-    ASSERT_NOT_NULL(s);
-    ASSERT_TRUE(cbm_store_check_integrity(s));
-    cbm_store_close(s);
-    PASS();
-}
-
-TEST(store_integrity_corrupt_bad_path) {
-    /* Simulate corruption: root_path is a numeric string (not a real path).
-     * This matches the real corruption where node IDs ended up in root_path. */
-    cbm_store_t *s = cbm_store_open_memory();
-    ASSERT_NOT_NULL(s);
-    sqlite3 *db = cbm_store_get_db(s);
-    sqlite3_exec(db,
-                 "INSERT INTO projects (name, indexed_at, root_path) "
-                 "VALUES ('some-project', '2024-01-01', '826');",
-                 NULL, NULL, NULL);
-    ASSERT_FALSE(cbm_store_check_integrity(s));
-    cbm_store_close(s);
-    PASS();
-}
-
-TEST(store_integrity_windows_lowercase_drive_issue367) {
-    /* Windows drive letters may be lower- or upper-case; a lowercase drive
-     * path must NOT be treated as corrupt. Previously the check only accepted
-     * 'A'..'Z', so "c:/repo" was flagged and the DB auto-deleted (#227/#367). */
-    cbm_store_t *s = cbm_store_open_memory();
-    ASSERT_NOT_NULL(s);
-    cbm_store_upsert_project(s, "lc-drive", "c:/Users/dev/repo");
-    ASSERT_TRUE(cbm_store_check_integrity(s));
-    cbm_store_close(s);
-    PASS();
-}
-
-TEST(store_integrity_corrupt_too_many_rows) {
-    /* Simulate corruption: >5 rows in projects table */
-    cbm_store_t *s = cbm_store_open_memory();
-    ASSERT_NOT_NULL(s);
-    sqlite3 *db = cbm_store_get_db(s);
-    for (int i = 0; i < 10; i++) {
-        char sql[256];
-        snprintf(sql, sizeof(sql),
-                 "INSERT INTO projects (name, indexed_at, root_path) "
-                 "VALUES ('proj-%d', '2024-01-01', '/tmp/%d');",
-                 i, i);
-        sqlite3_exec(db, sql, NULL, NULL, NULL);
-    }
-    ASSERT_FALSE(cbm_store_check_integrity(s));
-    cbm_store_close(s);
-    PASS();
-}
-
-TEST(store_integrity_null_check) {
-    /* NULL store should return false (not crash) */
-    ASSERT_FALSE(cbm_store_check_integrity(NULL));
-    PASS();
-}
-
 /* ── Edge case: NULL / empty field handling ────────────────────── */
 
 TEST(store_node_null_project) {
@@ -1597,12 +1525,6 @@ SUITE(store_nodes) {
     RUN_TEST(store_open_memory);
     RUN_TEST(store_close_null);
     RUN_TEST(store_open_memory_twice);
-    RUN_TEST(store_integrity_clean);
-    RUN_TEST(store_integrity_empty);
-    RUN_TEST(store_integrity_corrupt_bad_path);
-    RUN_TEST(store_integrity_windows_lowercase_drive_issue367);
-    RUN_TEST(store_integrity_corrupt_too_many_rows);
-    RUN_TEST(store_integrity_null_check);
     RUN_TEST(store_project_crud);
     RUN_TEST(store_project_update);
     RUN_TEST(store_project_delete);

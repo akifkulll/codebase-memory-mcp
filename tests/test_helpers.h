@@ -218,6 +218,22 @@ static inline void th_remove_zova_user_database(void) {
     cbm_unlink(side);
 }
 
+/* Remove one project's workspace from the shared cbm.zova, if it is there. */
+static inline void th_remove_project_workspace(const char *project) {
+    char path[1024];
+    if (!project || cbm_zova_user_database_path(path, sizeof(path)) != 0) {
+        return;
+    }
+    cbm_zova_repository_t *repo = cbm_zova_repository_open(path, project);
+    if (!repo) {
+        return;
+    }
+    char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
+    snprintf(workspace_id, sizeof(workspace_id), "%s", cbm_zova_repository_workspace_id(repo));
+    cbm_zova_repository_close(repo);
+    (void)cbm_zova_user_database_delete_workspace(path, workspace_id);
+}
+
 static inline char *th_strdup_column(sqlite3_stmt *stmt, int column) {
     const char *text = (const char *)sqlite3_column_text(stmt, column);
     return strdup(text ? text : "");

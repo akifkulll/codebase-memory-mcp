@@ -1,0 +1,52 @@
+#ifndef CBM_DUMP_TYPES_H
+#define CBM_DUMP_TYPES_H
+
+// Flat node/edge/vector rows a finalized graph buffer hands to the cbm.zova
+// publisher. Strings are borrowed.
+
+#include <stdint.h>
+
+// --- Input structs (flat, borrowed strings) ---
+
+typedef struct {
+    int64_t id; // sequential ID (1..N), assigned by Go
+    const char *project;
+    const char *label;
+    const char *name;
+    const char *qualified_name;
+    const char *file_path;
+    int start_line;
+    int end_line;
+    const char *properties; // JSON string
+} CBMDumpNode;
+
+typedef struct {
+    int64_t id; // sequential ID (1..M), assigned by Go
+    const char *project;
+    int64_t source_id; // final sequential ID (1..N)
+    int64_t target_id; // final sequential ID (1..N)
+    const char *type;
+    const char *properties; // JSON string
+    const char *url_path;   // extracted from properties by Go (for idx_edges_url_path)
+    const char *local_name; // for IMPORTS edges: the unescaped
+                            // json_extract(properties,'$.local_name') value; ""/NULL
+                            // otherwise.
+} CBMDumpEdge;
+
+typedef struct {
+    int64_t node_id; // final sequential ID (matches nodes.id)
+    const char *project;
+    const uint8_t *vector; // int8-quantized vector blob
+    int vector_len;        // length in bytes (e.g. 256 for d=256)
+} CBMDumpVector;
+
+typedef struct {
+    int64_t id; // sequential ID (1..T)
+    const char *project;
+    const char *token;     // the token string
+    const uint8_t *vector; // int8-quantized enriched RI vector blob
+    int vector_len;        // length in bytes (e.g. 256 for d=256)
+    float idf;             // inverse document frequency weight
+} CBMDumpTokenVec;
+
+#endif // CBM_DUMP_TYPES_H

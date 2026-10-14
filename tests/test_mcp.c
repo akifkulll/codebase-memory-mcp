@@ -45,7 +45,7 @@ static void *index_queue_test_contender(void *arg) {
 }
 
 TEST(index_job_queue_is_fifo_and_blocks_second_contender) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
     index_queue_test_ctx_t ctx = {.srv = srv};
     atomic_init(&ctx.entered, 0);
@@ -620,7 +620,7 @@ TEST(mcp_get_bool_arg) {
  * ══════════════════════════════════════════════════════════════════ */
 
 TEST(server_handle_initialize) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
 
     char *resp =
@@ -637,7 +637,7 @@ TEST(server_handle_initialize) {
 }
 
 TEST(server_handle_initialized_notification) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     /* Notification has no id → no response */
     char *resp = cbm_mcp_server_handle(
@@ -649,7 +649,7 @@ TEST(server_handle_initialized_notification) {
 }
 
 TEST(server_handle_tools_list) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
@@ -664,7 +664,7 @@ TEST(server_handle_tools_list) {
 }
 
 TEST(server_handle_tools_list_paginates) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":200,\"method\":\"tools/list\"}");
@@ -695,7 +695,7 @@ TEST(server_handle_logs_request_without_params) {
     cbm_log_set_format(CBM_LOG_FORMAT_TEXT);
     cbm_log_set_sink_ex(mcp_capture_log, CBM_LOG_SINK_REPLACE);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":210,\"method\":\"tools/list\","
                                    "\"params\":{\"token\":\"secret\"}}");
@@ -716,7 +716,7 @@ TEST(server_handle_logs_request_without_params) {
 }
 
 TEST(server_handle_unknown_method) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"unknown/method\"}");
@@ -735,7 +735,7 @@ TEST(server_handle_unknown_method) {
 
 /* Helper: create a server with an in-memory store populated with test data */
 static cbm_mcp_server_t *setup_mcp_with_data(void) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL); /* NULL = in-memory */
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(); /* NULL = in-memory */
     return srv;
 }
 
@@ -811,7 +811,7 @@ TEST(tool_search_graph_basic) {
 static char *extract_text_content(const char *mcp_result);
 
 TEST(tool_search_graph_semantic_only_skips_structural_results_issue1295) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "semantic-only";
@@ -839,7 +839,7 @@ TEST(tool_search_graph_semantic_only_skips_structural_results_issue1295) {
 }
 
 TEST(tool_search_graph_empty_structural_search_keeps_envelope) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
     cbm_mcp_server_set_project(srv, "empty-structural");
     ASSERT_EQ(cbm_store_upsert_project(cbm_mcp_server_store(srv), "empty-structural",
@@ -958,7 +958,7 @@ TEST(tool_search_graph_searches_two_zova_projects_globally) {
     ASSERT_EQ(cbm_zova_user_database_publish_workspace(path, &client_input, &published), 0);
     ASSERT_EQ(cbm_zova_user_database_publish_workspace(path, &service_input, &published), 0);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
     char *response = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":133,\"method\":\"tools/call\","
@@ -1028,7 +1028,7 @@ TEST(tool_index_repository_reports_zova_committed_counts) {
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
     char args[1024];
     snprintf(args, sizeof(args),
@@ -1126,7 +1126,7 @@ TEST(tool_search_graph_includes_node_properties) {
 }
 
 TEST(tool_search_graph_query_honors_file_pattern_issue552) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -1242,7 +1242,7 @@ TEST(tool_index_status_includes_git_metadata) {
  * ══════════════════════════════════════════════════════════════════ */
 
 TEST(tool_trace_call_path_not_found) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\","
@@ -1259,7 +1259,7 @@ TEST(tool_trace_call_path_not_found) {
 }
 
 TEST(tool_trace_missing_function_name) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\","
@@ -1276,7 +1276,7 @@ TEST(tool_trace_missing_function_name) {
 /* Regression: two same-named definitions with equal rank must be reported
  * ambiguous, not silently traced (trace_path previously took nodes[0]). */
 TEST(tool_trace_call_path_ambiguous) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "amb-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -1325,7 +1325,7 @@ TEST(tool_trace_call_path_ambiguous) {
  * definition (callable, larger body) — NOT nodes[0]. The Module is inserted
  * first; if trace took nodes[0] the outbound trace would be empty. */
 TEST(tool_trace_call_path_prefers_definition) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "pref-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -1389,7 +1389,7 @@ TEST(tool_trace_call_path_prefers_definition) {
  * node-name field, never the qualified_name (preceded by '.'), so the boundary
  * check is exact. */
 TEST(tool_trace_call_path_depth_clamped) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "depth-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -1445,7 +1445,7 @@ TEST(tool_trace_call_path_depth_clamped) {
  * distinct symbols. RED before the pick_resolved_node real_def_count rule (response
  * merged callerA+callerB), GREEN after (response is ambiguous, no "callers"). */
 TEST(tool_trace_call_path_distinct_defs_not_over_unioned) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "ou-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -1517,7 +1517,7 @@ TEST(tool_trace_call_path_distinct_defs_not_over_unioned) {
  * (one real callable def + a fragment), so it must stay non-ambiguous and the
  * caller sets from both nodes must be unioned. */
 TEST(tool_trace_call_path_dts_stub_unions_with_impl) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "dts-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -1587,7 +1587,7 @@ TEST(tool_trace_call_path_dts_stub_unions_with_impl) {
  * per-root BFS results. The implementation is inserted first and reaches Zeta;
  * the stub is inserted second and reaches Alpha, so append-order is wrong. */
 TEST(tool_trace_call_path_same_name_union_orders_visits) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "ordered-union";
@@ -1659,7 +1659,7 @@ TEST(tool_trace_call_path_same_name_union_orders_visits) {
 }
 
 TEST(tool_delete_project_not_found) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\","
@@ -1674,7 +1674,7 @@ TEST(tool_delete_project_not_found) {
 }
 
 TEST(tool_get_architecture_empty) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\","
@@ -1697,7 +1697,7 @@ TEST(tool_get_architecture_empty) {
  * assert the resulting JSON surfaces an "entry_points" array containing
  * the tagged function — which is impossible without the wiring. */
 TEST(tool_get_architecture_emits_populated_sections) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
 
     cbm_store_t *st = cbm_mcp_server_store(srv);
@@ -1747,7 +1747,7 @@ TEST(tool_get_architecture_emits_populated_sections) {
  * mcp.c), so aspects=["overview"] silently degraded to just
  * {total_nodes,total_edges}. RED on unfixed code: no "entry_points" key. */
 TEST(tool_get_architecture_overview_compact_subset_pr560) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
 
     cbm_store_t *st = cbm_mcp_server_store(srv);
@@ -1817,7 +1817,7 @@ TEST(tool_get_architecture_overview_compact_subset_pr560) {
  * matched, so a typo like "bogus_aspect" produced a silent near-empty payload
  * with isError:false. RED on unfixed code: no isError, no "Unknown aspect". */
 TEST(tool_get_architecture_rejects_unknown_aspect_pr560) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
 
     cbm_store_t *st = cbm_mcp_server_store(srv);
@@ -1853,7 +1853,7 @@ TEST(tool_get_architecture_rejects_unknown_aspect_pr560) {
  * not found or not indexed" even though the project is indexed. Mirrors
  * tool_get_architecture_emits_populated_sections but with the alias key. */
 TEST(tool_get_architecture_accepts_project_name_alias_issue640) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
 
     cbm_store_t *st = cbm_mcp_server_store(srv);
@@ -1899,7 +1899,7 @@ TEST(tool_get_architecture_accepts_project_name_alias_issue640) {
 /* Reproduce-first for #640: the alias must apply across query handlers, not
  * just get_architecture. search_graph with `project_name` must resolve too. */
 TEST(tool_search_graph_accepts_project_name_alias_issue640) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
 
     cbm_store_t *st = cbm_mcp_server_store(srv);
@@ -1940,7 +1940,7 @@ TEST(tool_search_graph_accepts_project_name_alias_issue640) {
 
 /* Regression for #604: path scopes architecture totals and content. */
 TEST(tool_get_architecture_path_scoping) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
 
     cbm_store_t *st = cbm_mcp_server_store(srv);
@@ -2026,7 +2026,7 @@ TEST(tool_get_architecture_path_scoping) {
 }
 
 TEST(tool_query_graph_missing_query) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\","
@@ -2046,7 +2046,7 @@ TEST(tool_query_graph_missing_query) {
  * ══════════════════════════════════════════════════════════════════ */
 
 TEST(tool_index_repository_missing_path) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\","
@@ -2086,7 +2086,7 @@ TEST(tool_index_repository_accepts_path_alias) {
     fputs("def main():\n    return 'ok'\n", fp);
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
 
     char args[1024];
@@ -2109,7 +2109,7 @@ TEST(tool_index_repository_accepts_path_alias) {
 }
 
 TEST(tool_get_code_snippet_missing_qn) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"tools/call\","
@@ -2124,7 +2124,7 @@ TEST(tool_get_code_snippet_missing_qn) {
 }
 
 TEST(tool_get_code_snippet_not_found) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":32,\"method\":\"tools/call\","
@@ -2140,7 +2140,7 @@ TEST(tool_get_code_snippet_not_found) {
 }
 
 TEST(tool_search_code_missing_pattern) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":33,\"method\":\"tools/call\","
@@ -2155,7 +2155,7 @@ TEST(tool_search_code_missing_pattern) {
 }
 
 TEST(tool_search_code_no_project) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":34,\"method\":\"tools/call\","
@@ -2230,7 +2230,7 @@ TEST(search_code_scoped_path_with_spaces_issue687) {
     fprintf(fp, "package main\n\nfunc HandleRequest() error {\n\treturn nil\n}\n");
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -2307,7 +2307,7 @@ static cbm_mcp_server_t *setup_prefilter_server(char *tmp, size_t tmp_sz, char *
     fprintf(fp, "package vendored\n\nfunc HandleRequest() error {\n\treturn nil\n}\n");
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     if (!srv) {
         return NULL;
     }
@@ -2520,7 +2520,7 @@ TEST(search_code_ampersand_accepted_issue272) {
 }
 
 TEST(tool_detect_changes_no_project) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":35,\"method\":\"tools/call\","
@@ -2564,7 +2564,7 @@ TEST(tool_index_repository_dot_uses_absolute_project_key) {
     char *project = cbm_project_name_from_path(tmp_dir);
     ASSERT_NOT_NULL(project);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
 
     ASSERT_EQ(cbm_chdir(tmp_dir), 0);
@@ -2610,7 +2610,7 @@ TEST(tool_detect_changes_not_found_rich_error) {
     char *saved_copy = saved ? strdup(saved) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
 
     char *resp =
@@ -2656,7 +2656,7 @@ TEST(tool_detect_changes_reports_impacted_symbols) {
     ASSERT_EQ(th_publish_store_project(fixture, proj), 0);
     cbm_store_close(fixture);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
     char *resp = cbm_mcp_handle_tool(srv, "detect_changes", "{\"project\":\"detect-impact\"}");
     ASSERT_NOT_NULL(resp);
@@ -2670,7 +2670,7 @@ TEST(tool_detect_changes_reports_impacted_symbols) {
 }
 
 TEST(tool_ingest_traces_basic) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":37,\"method\":\"tools/call\","
@@ -2686,7 +2686,7 @@ TEST(tool_ingest_traces_basic) {
 }
 
 TEST(tool_ingest_traces_empty) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":38,\"method\":\"tools/call\","
@@ -2705,7 +2705,7 @@ TEST(tool_ingest_traces_empty) {
  * ══════════════════════════════════════════════════════════════════ */
 
 TEST(store_idle_eviction) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     cbm_mcp_server_set_project(srv, "test-evict");
 
     /* Trigger resolve_store via a tool call to set store_last_used */
@@ -2723,7 +2723,7 @@ TEST(store_idle_eviction) {
 }
 
 TEST(store_idle_no_eviction_within_timeout) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     cbm_mcp_server_set_project(srv, "test-evict");
 
     char *resp = cbm_mcp_handle_tool(srv, "get_graph_schema", "{\"project\":\"test-evict\"}");
@@ -2745,7 +2745,7 @@ TEST(store_idle_evict_protects_initial_store) {
 
     /* Evicting server whose store was never accessed via a named project
      * should NOT evict the initial in-memory store (store_last_used == 0). */
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_TRUE(cbm_mcp_server_has_cached_store(srv));
     cbm_mcp_server_evict_idle(srv, 0);
     ASSERT_TRUE(cbm_mcp_server_has_cached_store(srv));
@@ -2755,7 +2755,7 @@ TEST(store_idle_evict_protects_initial_store) {
 }
 
 TEST(store_idle_evict_access_resets_timer) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     cbm_mcp_server_set_project(srv, "test-evict");
 
     /* First access */
@@ -2869,7 +2869,7 @@ static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz) {
     th_remove_zova_user_database();
 
     /* Create server with in-memory store */
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     if (!srv)
         return NULL;
 
@@ -3583,7 +3583,7 @@ TEST(parse_file_uri_zero_size) {
  * ══════════════════════════════════════════════════════════════════ */
 
 TEST(server_handle_invalid_json) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     char *resp = cbm_mcp_server_handle(srv, "this is not json at all");
     ASSERT_NOT_NULL(resp);
@@ -3596,7 +3596,7 @@ TEST(server_handle_invalid_json) {
 }
 
 TEST(server_handle_empty_object) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     /* Valid JSON but no method field → parse error */
     char *resp = cbm_mcp_server_handle(srv, "{}");
@@ -3609,7 +3609,7 @@ TEST(server_handle_empty_object) {
 }
 
 TEST(server_handle_tools_call_missing_name) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
 
     /* tools/call with no tool name in params */
     char *resp =
@@ -3667,7 +3667,7 @@ TEST(mcp_server_run_rapid_messages) {
     FILE *out_fp = tmpfile();
     ASSERT_NOT_NULL(out_fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     ASSERT_NOT_NULL(srv);
 
     /* Install alarm to fail the test if cbm_mcp_server_run blocks */
@@ -3747,7 +3747,7 @@ TEST(tool_bad_project_name_no_overflow_issue235) {
 
     char *resp = NULL;
     if (published == 0) {
-        cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+        cbm_mcp_server_t *srv = cbm_mcp_server_new();
         resp = srv ? cbm_mcp_server_handle(
                          srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{"
                               "\"name\":\"get_graph_schema\",\"arguments\":{"
@@ -3798,7 +3798,7 @@ TEST(tool_bad_project_error_valid_json_issue235) {
 
     char *resp = NULL;
     if (published == 0) {
-        cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+        cbm_mcp_server_t *srv = cbm_mcp_server_new();
         resp = srv ? cbm_mcp_server_handle(
                          srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{"
                               "\"name\":\"get_graph_schema\",\"arguments\":{"
@@ -3860,7 +3860,7 @@ enum {
 static int idx845_index_inprocess_check(const char *repo_dir) {
     int spawns_before = cbm_index_supervisor_spawn_count();
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     if (!srv) {
         return IDX845_NO_RESULT;
     }
@@ -4033,7 +4033,7 @@ static int idx832_supervised_route_check(const char *repo_dir) {
     /* Store-level proof the worker child did real work: the Function node it wrote
      * must be queryable from a fresh server reading the DB the child produced. */
     char *project = cbm_project_name_from_path(repo_dir);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     if (!srv) {
         free(project);
         return IDX832_SERVER_FAIL;
@@ -4191,7 +4191,7 @@ static int idxpar_recovery_check(const char *repo_dir) {
 
     /* Store proof: an innocent's Function node exists. */
     char *project = cbm_project_name_from_path(repo_dir);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     int code = IDXPAR_OK;
     if (srv && project) {
         char q[512];
@@ -4362,7 +4362,7 @@ static int auto_watch_connect_watch_count(const char *auto_watch_value) {
             cbm_config_set(cfg, CBM_CONFIG_AUTO_WATCH, auto_watch_value);
         }
 
-        cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+        cbm_mcp_server_t *srv = cbm_mcp_server_new();
         if (srv) {
             cbm_mcp_server_set_watcher(srv, watcher);
             cbm_mcp_server_set_config(srv, cfg);
@@ -4489,7 +4489,7 @@ static int idx853_supervised_autowatch_check(const char *repo_dir, const char *c
     int spawns_before = cbm_index_supervisor_spawn_count();
     int code = IDX853_SETUP_FAIL;
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     if (srv) {
         cbm_mcp_server_set_watcher(srv, watcher);
         cbm_mcp_server_set_config(srv, cfg);
@@ -4634,7 +4634,7 @@ TEST(mcp_path_within_root_rejects_escape) {
  * --output=<path> writes the diff to an arbitrary file) rather than a ref. It
  * must be rejected up front, alongside the shell-metacharacter check. */
 TEST(detect_changes_rejects_option_like_base_branch) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":77,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"detect_changes\","
@@ -4657,7 +4657,7 @@ TEST(index_repository_honors_allowed_root) {
     }
     cbm_setenv("CBM_ALLOWED_ROOT", allowed, 1);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
     char args[1024];
     snprintf(args, sizeof(args),
              "{\"jsonrpc\":\"2.0\",\"id\":88,\"method\":\"tools/call\","

@@ -273,11 +273,11 @@ unsigned char *cbm_extract_binary_from_zip(const unsigned char *data, int data_l
 
 /* ── Index management ─────────────────────────────────────────── */
 
-/* List .db files in the cache directory (~/.cache/codebase-memory-mcp/).
- * Prints each file path to stdout. Returns count of .db files found. */
+/* List the projects indexed in the cache's cbm.zova, one per line on stdout.
+ * Returns the project count. */
 int cbm_list_indexes(const char *home_dir);
 
-/* Remove all .db files in the cache directory. Returns count removed. */
+/* Remove the cache's cbm.zova. Returns the number of projects it held. */
 int cbm_remove_indexes(const char *home_dir);
 
 /* ── Config store (persistent key-value, backed by _config.db) ── */

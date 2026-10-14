@@ -1,4 +1,5 @@
 #include "test_framework.h"
+#include "test_helpers.h"
 
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h"
@@ -19,33 +20,37 @@
 enum { TZB_PATH_MAX = 512 };
 
 typedef struct {
-    char db_path[TZB_PATH_MAX];
+    char cache_dir[TZB_PATH_MAX];
     char zova_path[TZB_PATH_MAX];
+    char saved_cache_dir[TZB_PATH_MAX];
+    int had_cache_dir;
 } bridge_fixture_t;
 
+/* Publish a "proj" workspace into a temp CBM_CACHE_DIR/cbm.zova. */
 static int bridge_fixture_create(bridge_fixture_t *fx) {
     memset(fx, 0, sizeof(*fx));
-    snprintf(fx->db_path, sizeof(fx->db_path), "%s/cbm_zova_bridge_%d_%p.db", cbm_tmpdir(),
-             (int)getpid(), (void *)fx);
-    ASSERT_EQ(cbm_zova_sidecar_path(fx->db_path, fx->zova_path, sizeof(fx->zova_path)), 0);
-    cbm_unlink(fx->db_path);
-    cbm_unlink(fx->zova_path);
-    cbm_store_t *store = cbm_store_open_path(fx->db_path);
+    snprintf(fx->cache_dir, sizeof(fx->cache_dir), "%s/cbm_zova_bridge_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(fx->cache_dir));
+    fx->had_cache_dir = cbm_safe_getenv("CBM_CACHE_DIR", fx->saved_cache_dir,
+                                        sizeof(fx->saved_cache_dir), NULL) != NULL;
+    cbm_setenv("CBM_CACHE_DIR", fx->cache_dir, 1);
+    ASSERT_EQ(cbm_zova_user_database_path(fx->zova_path, sizeof(fx->zova_path)), 0);
+
+    cbm_store_t *store = cbm_store_open_memory();
     ASSERT_NOT_NULL(store);
     ASSERT_EQ(cbm_store_upsert_project(store, "proj", "/tmp/proj"), CBM_STORE_OK);
+    ASSERT_EQ(th_publish_store_project(store, "proj"), 0);
     cbm_store_close(store);
-    cbm_setenv("CBM_ZOVA_MODE", "container", 1);
-    ASSERT_EQ(cbm_zova_after_sqlite_dump(fx->db_path), 0);
-    cbm_unsetenv("CBM_ZOVA_MODE");
     return 0;
 }
 
 static void bridge_fixture_cleanup(bridge_fixture_t *fx) {
-    cbm_unlink(fx->db_path);
-    cbm_unlink(fx->zova_path);
-    char tmp[TZB_PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "%s.tmp.zova", fx->zova_path);
-    cbm_unlink(tmp);
+    if (fx->had_cache_dir) {
+        cbm_setenv("CBM_CACHE_DIR", fx->saved_cache_dir, 1);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    th_rmtree(fx->cache_dir);
 }
 
 #if !CBM_WITH_ZOVA

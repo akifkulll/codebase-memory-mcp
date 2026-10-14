@@ -181,7 +181,6 @@
 
 typedef struct {
     char tmpdir[256];
-    char dbpath[512];
     char *project;
     cbm_mcp_server_t *srv;
 } CP_Proj;
@@ -200,14 +199,8 @@ static void cp_to_fwd_slashes(char *p) {
 static cbm_store_t *cp_open_indexed(CP_Proj *lp) {
     lp->project = cbm_project_name_from_path(lp->tmpdir);
     if (!lp->project) return NULL;
-    const char *home = getenv("HOME");
-    if (!home) home = "/tmp";
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/codebase-memory-mcp", home);
-    cbm_mkdir(cache_dir);
-    snprintf(lp->dbpath, sizeof(lp->dbpath), "%s/%s.db", cache_dir, lp->project);
-    unlink(lp->dbpath);
-    lp->srv = cbm_mcp_server_new(NULL);
+    th_remove_project_workspace(lp->project);
+    lp->srv = cbm_mcp_server_new();
     if (!lp->srv) return NULL;
     char args[700];
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
@@ -241,13 +234,9 @@ static cbm_store_t *cp_index_files(CP_Proj *lp, const CP_File *files, int nfiles
 static void cp_cleanup(CP_Proj *lp, cbm_store_t *store) {
     if (store) cbm_store_close(store);
     if (lp->srv) { cbm_mcp_server_free(lp->srv); lp->srv = NULL; }
+    th_remove_project_workspace(lp->project);
     free(lp->project); lp->project = NULL;
     th_rmtree(lp->tmpdir);
-    unlink(lp->dbpath);
-    char wal[600], shm[600];
-    snprintf(wal, sizeof(wal), "%s-wal", lp->dbpath);
-    snprintf(shm, sizeof(shm), "%s-shm", lp->dbpath);
-    unlink(wal); unlink(shm);
 }
 
 /* Count edges of `edge_type`; -1 on DB error. */
