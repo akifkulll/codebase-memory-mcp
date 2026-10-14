@@ -839,8 +839,6 @@ static void walk_dir_process_entry(cbm_dirent_t *entry, const walk_frame_t *fram
     }
 }
 
-enum { GI_OWNED_CAP = 64 };
-
 static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_discover_opts_t *opts,
                      const cbm_gitignore_t *gitignore, const cbm_gitignore_t *global_gi,
                      const cbm_gitignore_t *cbmignore, file_list_t *out) {
@@ -858,8 +856,9 @@ static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_dis
     }
     /* Collect all owned gitignores — freed at the end because child frames
      * on the stack hold borrowed pointers to them. */
-    cbm_gitignore_t *owned_gis[GI_OWNED_CAP];
+    cbm_gitignore_t **owned_gis = NULL;
     int owned_count = 0;
+    int owned_cap = 0;
 
     int initial_directory_length = snprintf(ws.frames[0].dir, CBM_SZ_4K, "%s", dir_path);
     int initial_prefix_length = snprintf(ws.frames[0].prefix, CBM_SZ_4K, "%s", rel_prefix);
@@ -876,19 +875,25 @@ static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_dis
 
         cbm_gitignore_t *loaded = try_load_nested_gitignore(&frame);
         if (loaded) {
+            if (owned_count == owned_cap) {
+                int new_cap = owned_cap ? owned_cap * 2 : 16;
+                cbm_gitignore_t **grown =
+                    discover_test_fail_hit("gi_owned_grow")
+                        ? NULL
+                        : realloc(owned_gis, (size_t)new_cap * sizeof(*grown));
+                if (!grown) {
+                    /* Walking on without these rules would index files they
+                     * exclude, so drop the subtree and flag the walk (#17). */
+                    cbm_gitignore_free(loaded);
+                    out->failed = true;
+                    continue;
+                }
+                owned_gis = grown;
+                owned_cap = new_cap;
+            }
+            owned_gis[owned_count++] = loaded;
             frame.local_gi = loaded;
             snprintf(frame.local_gi_prefix, sizeof(frame.local_gi_prefix), "%s", frame.prefix);
-            if (owned_count < GI_OWNED_CAP) {
-                owned_gis[owned_count++] = loaded;
-            } else {
-                /* Loaded nested gitignore cannot be tracked for ownership; it is
-                 * freed below only while still borrowed by queued frames — so
-                 * treat this as an incomplete walk rather than risk a leak/UAF
-                 * by continuing past the tracked-ownership bound (#17). */
-                cbm_gitignore_free(loaded);
-                frame.local_gi = NULL;
-                out->failed = true;
-            }
         }
 
         cbm_dir_t *d = cbm_opendir(frame.dir);
@@ -905,6 +910,7 @@ static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_dis
     for (int i = 0; i < owned_count; i++) {
         cbm_gitignore_free(owned_gis[i]);
     }
+    free(owned_gis);
     free(ws.frames);
 }
 

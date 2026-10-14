@@ -796,6 +796,81 @@ TEST(discover_wide_fanout_keeps_nested_gitignores) {
     PASS();
 }
 
+/* Every nested .gitignore applies, however many there are: past the old
+ * fixed ownership cap (64) the rules were freed and the walk went on, so the
+ * files they exclude were discovered. */
+TEST(discover_many_nested_gitignores_all_apply) {
+    char *base = th_mktempdir("cbm_disc_many_gi");
+    ASSERT(base != NULL);
+
+    enum { SUBDIRS = 80 };
+    char dir[4096];
+    for (int i = 0; i < SUBDIRS; i++) {
+        snprintf(dir, sizeof(dir), "%s/d%03d", base, i);
+        ASSERT(th_mkdir_p(dir) == 0);
+        ASSERT(th_write_file(TH_PATH(dir, ".gitignore"), "secret.go\n") == 0);
+        ASSERT(th_write_file(TH_PATH(dir, "keep.go"), "package d\n") == 0);
+        ASSERT(th_write_file(TH_PATH(dir, "secret.go"), "package d\n") == 0);
+    }
+
+    cbm_discover_opts_t opts = {0};
+    cbm_file_info_t *files = NULL;
+    int count = 0;
+    bool degraded = false;
+
+    int rc = cbm_discover_ex(base, &opts, &files, &count, NULL, NULL, &degraded);
+    ASSERT_EQ(rc, 0);
+    ASSERT_FALSE(degraded);
+    ASSERT_EQ(count, SUBDIRS);
+    for (int i = 0; i < count; i++) {
+        ASSERT_NULL(strstr(files[i].rel_path, "secret.go"));
+    }
+
+    cbm_discover_free(files, count);
+    th_cleanup(base);
+    PASS();
+}
+
+/* When a nested .gitignore cannot be tracked, its directory is dropped and
+ * the walk is flagged degraded; it is never walked without its rules. */
+TEST(discover_gitignore_grow_fault_drops_subtree) {
+    char *base = th_mktempdir("cbm_disc_oom_gi");
+    ASSERT(base != NULL);
+
+    enum { SUBDIRS = 3 };
+    char dir[4096];
+    for (int i = 0; i < SUBDIRS; i++) {
+        snprintf(dir, sizeof(dir), "%s/d%d", base, i);
+        ASSERT(th_mkdir_p(dir) == 0);
+        ASSERT(th_write_file(TH_PATH(dir, ".gitignore"), "secret.go\n") == 0);
+        ASSERT(th_write_file(TH_PATH(dir, "keep.go"), "package d\n") == 0);
+        ASSERT(th_write_file(TH_PATH(dir, "secret.go"), "package d\n") == 0);
+    }
+
+    cbm_setenv("CBM_DISCOVER_TEST_FAIL_PHASE", "gi_owned_grow", 1);
+    cbm_setenv("CBM_DISCOVER_TEST_FAIL_NTH", "1", 1);
+
+    cbm_discover_opts_t opts = {0};
+    cbm_file_info_t *files = NULL;
+    int count = 0;
+    bool degraded = false;
+
+    int rc = cbm_discover_ex(base, &opts, &files, &count, NULL, NULL, &degraded);
+    cbm_unsetenv("CBM_DISCOVER_TEST_FAIL_PHASE");
+    cbm_unsetenv("CBM_DISCOVER_TEST_FAIL_NTH");
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(degraded);
+    /* The first directory is dropped; the others keep only keep.go. */
+    ASSERT_EQ(count, SUBDIRS - 1);
+    for (int i = 0; i < count; i++) {
+        ASSERT_NULL(strstr(files[i].rel_path, "secret.go"));
+    }
+
+    cbm_discover_free(files, count);
+    th_cleanup(base);
+    PASS();
+}
+
 /* OOM paths keep the walk coherent: the file entry is ROLLED BACK (never a
  * NULL-path record downstream), the walk is flagged degraded, and whatever
  * was discovered before the fault is still returned intact. */
@@ -1754,6 +1829,8 @@ SUITE(discover) {
     RUN_TEST(discover_wide_fanout_keeps_nested_gitignores);
     RUN_TEST(discover_files_grow_fault_rolls_back_entry);
     RUN_TEST(discover_stack_grow_fault_preserves_allocation);
+    RUN_TEST(discover_many_nested_gitignores_all_apply);
+    RUN_TEST(discover_gitignore_grow_fault_drops_subtree);
     RUN_TEST(discover_excluded_grow_fault_degrades_walk);
     RUN_TEST(discover_stack_calloc_fault_flags_empty_result);
     RUN_TEST(discover_not_degraded_on_complete_walk);
