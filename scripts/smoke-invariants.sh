@@ -97,10 +97,15 @@ run_bounded() {
     if [ -n "$tobin" ]; then
         # -s KILL: force-kill at the deadline. The binary catches SIGTERM for a
         # graceful shutdown, so a busy-spin (e.g. a stuck external scanner) would
-        # survive plain `timeout`'s TERM and hang the runner forever. timeout still
-        # exits 124 on the deadline regardless of the signal used.
+        # survive plain `timeout`'s TERM and hang the runner forever. GNU timeout
+        # then exits 128+9 instead of 124, so a KILL exit at the deadline is
+        # reported as 124 like the fallback below.
+        local started=$SECONDS
         "$tobin" -s KILL "$secs" "$@" >"$of" 2>&1
         RB_RC=$?
+        if [ "$RB_RC" -eq 137 ] && [ $((SECONDS - started)) -ge "$secs" ]; then
+            RB_RC=124
+        fi
     else
         # Fallback (no timeout/gtimeout): background the command, bound the wait via
         # a done-fifo. Open the fifo read-WRITE (exec 9<>) so the open never blocks
@@ -287,6 +292,8 @@ GOEOF
     TEST_REPO_NATIVE="$(native_path "$TEST_REPO")"
     # Project name derivation mirrors cbm_project_name_from_path: every char not
     # in [A-Za-z0-9._-] → '-', collapse repeats, trim leading/trailing '-'/'.'.
+    # inv_index_cli replaces it with the name index_repository reports, which
+    # comes from the resolved path (macOS temp dirs resolve /var to /private/var).
     PROJ_NAME="$("$PY" - "$TEST_REPO_NATIVE" <<'PYEOF'
 import sys, re
 p = sys.argv[1]
@@ -319,6 +326,12 @@ import sys,re
 t=sys.stdin.read().replace("\\","").replace("\"","")
 m=re.findall(r"nodes\s*[:=]\s*(\d+)", t)
 print(max((int(x) for x in m), default=0))' 2>/dev/null)"
+    local reported
+    reported="$(printf '%s' "$CLI_OUT" | "$PY" -c '
+import sys,re
+m=re.search(r"\"project\"\s*:\s*\"([^\"]+)\"", sys.stdin.read().replace("\\",""))
+print(m.group(1) if m else "")' 2>/dev/null)"
+    [ -n "$reported" ] && PROJ_NAME="$reported"
     if [ "${nodes:-0}" -gt 0 ] 2>/dev/null; then
         pass "index-cli (nodes=$nodes, rc=$CLI_RC)"
     else
