@@ -65,16 +65,34 @@ static int operations_query_i64(zova_database *db, const char *sql, int64_t *out
     return rc;
 }
 
-static int operations_quick_check(zova_database *db) {
+/* Statuses that say the database could not be read right now (locked by another
+ * connection, out of memory or file descriptors), not that it is damaged. */
+static bool operations_status_is_transient(zova_status status) {
+    return status == ZOVA_BUSY || status == ZOVA_LOCKED || status == ZOVA_OUT_OF_MEMORY ||
+           status == ZOVA_CANT_OPEN;
+}
+
+/* PRAGMA quick_check. out_status (optional) receives the status of a failed
+ * prepare or step; it stays ZOVA_OK when the check ran and found damage. */
+static int operations_quick_check_status(zova_database *db, zova_status *out_status) {
+    if (out_status) *out_status = ZOVA_OK;
     zova_statement *statement = NULL;
-    if (zova_database_prepare(&(zova_database_prepare_request){
-            .db = db, .sql = "PRAGMA quick_check", .out_statement = &statement}) != ZOVA_OK ||
-        !statement) {
+    zova_status status = zova_database_prepare(&(zova_database_prepare_request){
+        .db = db, .sql = "PRAGMA quick_check", .out_statement = &statement});
+    if (status != ZOVA_OK || !statement) {
+        if (out_status) *out_status = status;
         return -1;
     }
     zova_step_result step = ZOVA_STEP_DONE;
+    status = zova_statement_step(&(zova_statement_step_request){
+        .statement = statement, .out_result = &step});
+    if (status != ZOVA_OK) {
+        if (out_status) *out_status = status;
+        (void)zova_statement_finalize(statement);
+        return -1;
+    }
     zova_text text = {0};
-    int rc = operations_step(statement, &step) == 0 && step == ZOVA_STEP_ROW &&
+    int rc = step == ZOVA_STEP_ROW &&
                      zova_statement_column_text(&(zova_statement_column_text_request){
                          .statement = statement, .index = 0, .out_text = &text}) == ZOVA_OK &&
                      text.data && text.len == 2 && memcmp(text.data, "ok", 2) == 0
@@ -83,6 +101,10 @@ static int operations_quick_check(zova_database *db) {
     zova_text_free(&text);
     (void)zova_statement_finalize(statement);
     return rc;
+}
+
+static int operations_quick_check(zova_database *db) {
+    return operations_quick_check_status(db, NULL);
 }
 
 static int operations_foreign_keys_ok(zova_database *db) {
@@ -1651,12 +1673,14 @@ cbm_zova_operation_code_t cbm_zova_database_health(
     *out_class = CBM_ZOVA_HEALTH_WHOLE_FILE_RECOVERY;
     zova_database *db = NULL;
     zova_message error = {0};
-    int opened = zova_database_open_with_options(&(zova_database_open_options_request){
-                     .path = path, .flags = ZOVA_OPEN_READ_ONLY, .busy_timeout_ms = 5000,
-                     .out_db = &db, .out_error_message = &error}) == ZOVA_OK && db;
+    zova_status open_status = zova_database_open_with_options(&(zova_database_open_options_request){
+        .path = path, .flags = ZOVA_OPEN_READ_ONLY, .busy_timeout_ms = 5000,
+        .out_db = &db, .out_error_message = &error});
+    int opened = open_status == ZOVA_OK && db;
     zova_message_free(&error);
+    zova_status check_status = ZOVA_OK;
     int64_t schema_version = 0;
-    int shared_ok = opened && operations_quick_check(db) == 0 &&
+    int shared_ok = opened && operations_quick_check_status(db, &check_status) == 0 &&
                     operations_query_i64(
                         db, "SELECT schema_version FROM cbm_database_schema_v1 WHERE id=1",
                         &schema_version) == 0 &&
@@ -1664,6 +1688,11 @@ cbm_zova_operation_code_t cbm_zova_database_health(
                     cbm_zova_user_database_schema_is_current(db) == 0;
     if (!shared_ok) {
         if (db) (void)zova_database_close(db);
+        if (operations_status_is_transient(opened ? check_status : open_status)) {
+            /* Unreadable right now is not damage; never send it to recovery. */
+            operations_report(out, CBM_ZOVA_OPERATION_BUSY, "health", "database_unavailable");
+            return CBM_ZOVA_OPERATION_BUSY;
+        }
         operations_report(out, CBM_ZOVA_OPERATION_WHOLE_FILE_RECOVERY_REQUIRED, "health",
                           "shared_database_invalid");
         out->schema_version = (int)schema_version;
@@ -1850,13 +1879,10 @@ static cbm_zova_operation_code_t cbm_zova_workspace_recover_body(
         cbm_zova_database_health(path, workspace_id, &health, &health_report);
     if (health_code == CBM_ZOVA_OPERATION_WHOLE_FILE_RECOVERY_REQUIRED &&
         health == CBM_ZOVA_HEALTH_WHOLE_FILE_RECOVERY) {
-        if (operations_quarantine_database(path) != 0) {
-            operations_report(out, CBM_ZOVA_OPERATION_VERIFY_FAILED, "recover_workspace",
-                              "quarantine_failed");
-            return CBM_ZOVA_OPERATION_VERIFY_FAILED;
-        }
+        /* Moving the file aside needs the exclusive barrier, which the caller
+         * takes after releasing this run's shared hold. */
         operations_report(out, CBM_ZOVA_OPERATION_WHOLE_FILE_RECOVERY_REQUIRED,
-                          "recover_workspace", "quarantined_no_verified_backup");
+                          "recover_workspace", "whole_file_recovery_required");
         snprintf(out->workspace_id, sizeof(out->workspace_id), "%s", workspace_id);
         return CBM_ZOVA_OPERATION_WHOLE_FILE_RECOVERY_REQUIRED;
     }
@@ -2677,6 +2703,47 @@ cbm_zova_operation_code_t cbm_zova_workspace_delete(
 
 /* Recovery rebuilds the workspace through a pipeline, so it holds what every
  * index run holds: the barrier shared, then the workspace lease. */
+/* Quarantine replaces the database under every workspace, so like restore it
+ * holds the prepare barrier exclusive (index runs elsewhere hold it shared), and
+ * it re-checks health under that hold before moving the file aside. */
+static cbm_zova_operation_code_t operations_recover_quarantine(
+    const char *path, const char *workspace_id, cbm_zova_operation_report_t *out) {
+#if !CBM_WITH_ZOVA
+    (void)path;
+    (void)workspace_id;
+    return out->code;
+#else
+    cbm_zova_coord_hold_t barrier = {0};
+    cbm_zova_coord_status_t status = cbm_zova_prepare_barrier_acquire(path, true, 0, &barrier);
+    if (status != CBM_ZOVA_COORD_OK)
+        return operations_coord_refusal(out, "recover_workspace", status,
+                                        "indexing_in_progress");
+    cbm_zova_health_class_t health = CBM_ZOVA_HEALTH_OK;
+    cbm_zova_operation_report_t health_report = {0};
+    cbm_zova_operation_code_t health_code =
+        cbm_zova_database_health(path, workspace_id, &health, &health_report);
+    if (health_code != CBM_ZOVA_OPERATION_WHOLE_FILE_RECOVERY_REQUIRED ||
+        health != CBM_ZOVA_HEALTH_WHOLE_FILE_RECOVERY) {
+        /* The file changed state while no hold was taken; report what it is now. */
+        operations_report(out,
+                          health_code == CBM_ZOVA_OPERATION_OK ? CBM_ZOVA_OPERATION_NOOP
+                                                               : health_code,
+                          "recover_workspace",
+                          health_code == CBM_ZOVA_OPERATION_OK ? "workspace_healthy"
+                                                               : health_report.reason);
+    } else if (operations_quarantine_database(path) != 0) {
+        operations_report(out, CBM_ZOVA_OPERATION_VERIFY_FAILED, "recover_workspace",
+                          "quarantine_failed");
+    } else {
+        operations_report(out, CBM_ZOVA_OPERATION_WHOLE_FILE_RECOVERY_REQUIRED,
+                          "recover_workspace", "quarantined_no_verified_backup");
+        snprintf(out->workspace_id, sizeof(out->workspace_id), "%s", workspace_id);
+    }
+    cbm_zova_coord_release(&barrier);
+    return out->code;
+#endif
+}
+
 cbm_zova_operation_code_t cbm_zova_workspace_recover(
     const char *path, const char *workspace_id, const char *repo_path,
     cbm_zova_operation_report_t *out) {
@@ -2696,7 +2763,10 @@ cbm_zova_operation_code_t cbm_zova_workspace_recover(
         cbm_zova_workspace_recover_body(path, workspace_id, repo_path, out);
     cbm_zova_coord_release(&lease);
     cbm_zova_coord_release(&barrier);
-    return code;
+    if (code != CBM_ZOVA_OPERATION_WHOLE_FILE_RECOVERY_REQUIRED ||
+        strcmp(out->reason, "whole_file_recovery_required") != 0)
+        return code;
+    return operations_recover_quarantine(path, workspace_id, out);
 }
 
 /* Restore replaces the database file, so it waits (bounded) for index runs

@@ -1756,6 +1756,69 @@ TEST(zova_operations_whole_file_corruption_recovers_only_through_verified_restor
     PASS();
 }
 
+/* A database another connection holds locked is unavailable, not damaged: health
+ * must say so, and recover must leave the file in place. */
+TEST(zova_operations_recover_does_not_quarantine_a_busy_database) {
+    char base[OPERATIONS_PATH_MAX], repo_path[OPERATIONS_PATH_MAX];
+    char path[OPERATIONS_PATH_MAX], quarantine[OPERATIONS_PATH_MAX];
+    snprintf(base, sizeof(base), "%s/cbm-zova-busy-recover-%d", cbm_tmpdir(), (int)getpid());
+    snprintf(repo_path, sizeof(repo_path), "%s/busy-repo", base);
+    snprintf(path, sizeof(path), "%s/cbm.zova", base);
+    snprintf(quarantine, sizeof(quarantine), "%s/cbm.corrupt.zova", base);
+    ASSERT_TRUE(cbm_mkdir_p(repo_path, 0700));
+    cbm_zova_workspace_generation_result_t published = {0};
+    ASSERT_EQ(operations_publish_fixture(path, repo_path, "busy-recover", 1, &published), 0);
+    char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
+    ASSERT_EQ(cbm_zova_workspace_id_for_root(repo_path, workspace_id, sizeof(workspace_id)), 0);
+    ASSERT_STR_EQ(published.workspace_id, workspace_id);
+
+    /* Exclusive locking mode keeps the write lock after the commit, so every
+     * other connection gets SQLITE_BUSY until this one closes. */
+    sqlite3 *holder = NULL;
+    ASSERT_EQ(sqlite3_open(path, &holder), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(holder,
+                           "PRAGMA locking_mode=EXCLUSIVE;BEGIN IMMEDIATE;"
+                           "UPDATE cbm_database_schema_v1 SET id=id WHERE id=1;COMMIT;",
+                           NULL, NULL, NULL),
+              SQLITE_OK);
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", base, 1);
+    cbm_zova_health_class_t health = CBM_ZOVA_HEALTH_OK;
+    cbm_zova_operation_report_t report = {0};
+    ASSERT_EQ(cbm_zova_database_health(path, workspace_id, &health, &report),
+              CBM_ZOVA_OPERATION_BUSY);
+    ASSERT_STR_EQ(report.reason, "database_unavailable");
+    ASSERT_EQ(cbm_zova_workspace_recover(path, workspace_id, repo_path, &report),
+              CBM_ZOVA_OPERATION_BUSY);
+    ASSERT_STR_EQ(report.reason, "database_unavailable");
+    ASSERT_TRUE(access(path, F_OK) == 0);
+    ASSERT_TRUE(access(quarantine, F_OK) != 0);
+
+    sqlite3_close(holder);
+    ASSERT_EQ(cbm_zova_database_health(path, workspace_id, &health, &report),
+              CBM_ZOVA_OPERATION_OK);
+    ASSERT_EQ(health, CBM_ZOVA_HEALTH_OK);
+
+    if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+    else cbm_unsetenv("CBM_CACHE_DIR");
+    free(saved_cache_copy);
+    cbm_unlink(path);
+    char sidecar[OPERATIONS_PATH_MAX + 32];
+    const char *suffixes[] = {"-wal", "-shm", ".writer.lock", ".prepare.lock",
+                              ".prepare.turnstile.lock"};
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        snprintf(sidecar, sizeof(sidecar), "%s%s", path, suffixes[i]);
+        cbm_unlink(sidecar);
+    }
+    snprintf(sidecar, sizeof(sidecar), "%s.ws-%s.lock", path, workspace_id);
+    cbm_unlink(sidecar);
+    (void)rmdir(repo_path);
+    (void)rmdir(base);
+    PASS();
+}
+
 TEST(zova_operations_workspace_recover_quarantines_whole_file_without_replacement) {
     char base[OPERATIONS_PATH_MAX], repo_path[OPERATIONS_PATH_MAX];
     char path[OPERATIONS_PATH_MAX], quarantine[OPERATIONS_PATH_MAX];
@@ -1776,6 +1839,16 @@ TEST(zova_operations_workspace_recover_quarantines_whole_file_without_replacemen
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
     cbm_setenv("CBM_CACHE_DIR", base, 1);
     cbm_zova_operation_report_t report = {0};
+    /* Moving the file aside replaces the database under every workspace, so it
+     * waits for index runs elsewhere (shared barrier holders) to finish. */
+    cbm_zova_coord_hold_t other_run = {0};
+    ASSERT_EQ(cbm_zova_prepare_barrier_acquire(path, false, 0, &other_run), CBM_ZOVA_COORD_OK);
+    ASSERT_EQ(cbm_zova_workspace_recover(path, workspace_id, repo_path, &report),
+              CBM_ZOVA_OPERATION_BUSY);
+    ASSERT_STR_EQ(report.reason, "indexing_in_progress");
+    ASSERT_TRUE(access(path, F_OK) == 0);
+    ASSERT_TRUE(access(quarantine, F_OK) != 0);
+    cbm_zova_coord_release(&other_run);
     ASSERT_EQ(cbm_zova_workspace_recover(path, workspace_id, repo_path, &report),
               CBM_ZOVA_OPERATION_WHOLE_FILE_RECOVERY_REQUIRED);
     ASSERT_STR_EQ(report.reason, "quarantined_no_verified_backup");
@@ -3414,6 +3487,7 @@ SUITE(zova_operations) {
     RUN_TEST(zova_operations_rebuild_health_clears_only_with_successful_publication);
     RUN_TEST(zova_operations_workspace_recover_runs_full_source_rebuild_and_retries);
     RUN_TEST(zova_operations_whole_file_corruption_recovers_only_through_verified_restore);
+    RUN_TEST(zova_operations_recover_does_not_quarantine_a_busy_database);
     RUN_TEST(zova_operations_workspace_recover_quarantines_whole_file_without_replacement);
 #endif
     RUN_TEST(zova_operations_empty_bootstrap_creates_exact_v7_health_schema);

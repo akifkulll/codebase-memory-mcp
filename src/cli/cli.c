@@ -2751,7 +2751,7 @@ static void cli_zova_ops_print_report(const char *action, const char *database_p
     yyjson_mut_obj_add_uint(doc, root, "freelist_count",
                             report ? report->freelist_count : 0);
     yyjson_mut_obj_add_real(doc, root, "elapsed_ms", report ? report->elapsed_ms : 0.0);
-    if (has_health)
+    if (has_health && code != CBM_ZOVA_OPERATION_BUSY) /* busy: not classified */
         yyjson_mut_obj_add_str(doc, root, "health_classification",
                                cli_zova_health_name(health));
     else
