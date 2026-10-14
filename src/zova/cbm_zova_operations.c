@@ -1141,7 +1141,8 @@ static int operations_replace_verified_database(
              operations_verify_database(recovery, NULL) != 0) ||
             (options->remove_sidecars &&
              (operations_remove_closed_database_sidecars(temporary) != 0 ||
-              operations_remove_closed_database_sidecars(recovery) != 0)) ||
+              operations_remove_closed_database_sidecars(recovery) != 0 ||
+              operations_remove_closed_database_sidecars(live) != 0)) ||
             rename(temporary, live) != 0 || operations_sync_directory(parent) != 0)
             return -1;
         live_state = 1;
@@ -2035,7 +2036,8 @@ static cbm_zova_operation_code_t cbm_zova_database_restore_body(
         .after_live_to_recovery = "restore_after_live_to_recovery",
         .after_temp_to_live = "restore_after_temp_to_live",
         .before_recovery_cleanup = "restore_before_recovery_cleanup",
-        .remove_sidecars = false,
+        /* A hot -wal left by a crashed writer would replay onto the restored file. */
+        .remove_sidecars = true,
         .require_source_verified = false,
     };
     int replacement_result = operations_replace_verified_database(

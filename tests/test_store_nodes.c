@@ -690,6 +690,46 @@ TEST(store_find_by_qn_suffix_multiple) {
     PASS();
 }
 
+/* Interrupts the statement a few progress callbacks in, i.e. mid-scan. */
+static int qn_suffix_interrupt_progress(void *arg) {
+    int *calls = arg;
+    return ++(*calls) > 3;
+}
+
+/* A row scan that aborts mid-stream (SQLITE_CORRUPT, SQLITE_INTERRUPT, ...) must
+ * fail, not return the rows read so far as a complete answer (upstream #896). */
+TEST(store_find_by_qn_suffix_aborted_scan_errors_not_truncates) {
+    enum { SCAN_NODES = 2000 };
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+    for (int i = 0; i < SCAN_NODES; i++) {
+        char qn[64];
+        snprintf(qn, sizeof(qn), "test.mod%04d.Run", i);
+        cbm_node_t n = {.project = "test", .label = "Function", .name = "Run",
+                        .qualified_name = qn};
+        ASSERT_TRUE(cbm_store_upsert_node(s, &n) > 0);
+    }
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_qn_suffix(s, "test", "Run", &nodes, &count),
+              CBM_STORE_OK);
+    ASSERT_EQ(count, SCAN_NODES);
+    cbm_store_free_nodes(nodes, count);
+
+    int calls = 0;
+    sqlite3_progress_handler(cbm_store_get_db(s), 1000, qn_suffix_interrupt_progress, &calls);
+    nodes = NULL;
+    count = 0;
+    int rc = cbm_store_find_nodes_by_qn_suffix(s, "test", "Run", &nodes, &count);
+    sqlite3_progress_handler(cbm_store_get_db(s), 0, NULL, NULL);
+    ASSERT_TRUE(calls > 3);
+    ASSERT_EQ(rc, CBM_STORE_ERR);
+    ASSERT_EQ(count, 0);
+
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(store_find_by_qn_suffix_dot_boundary) {
     cbm_store_t *s = cbm_store_open_memory();
     cbm_store_upsert_project(s, "test", "/tmp/test");
@@ -1548,6 +1588,7 @@ SUITE(store_nodes) {
     RUN_TEST(store_find_by_qn_suffix_no_match);
     RUN_TEST(store_find_by_qn_suffix_multiple);
     RUN_TEST(store_find_by_qn_suffix_dot_boundary);
+    RUN_TEST(store_find_by_qn_suffix_aborted_scan_errors_not_truncates);
     RUN_TEST(store_node_degree);
     RUN_TEST(store_file_hash_batch);
     RUN_TEST(store_file_hash_batch_equals_loop);

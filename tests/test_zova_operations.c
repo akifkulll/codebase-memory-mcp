@@ -2248,6 +2248,59 @@ TEST(zova_operations_restore_fault_phases_retry_to_verified_live_database) {
     PASS();
 }
 
+/* A crashed writer leaves a hot -wal next to the live database. SQLite checks a
+ * WAL against its own header, not the main file, so if restore leaves that WAL
+ * in place it is replayed on top of the restored generation at the next open. */
+TEST(zova_operations_restore_ignores_stale_live_wal) {
+    char source[OPERATIONS_PATH_MAX], backup[OPERATIONS_PATH_MAX], live[OPERATIONS_PATH_MAX];
+    char wal[OPERATIONS_PATH_MAX];
+    operations_path(source, sizeof(source), "restore-wal-source");
+    operations_path(backup, sizeof(backup), "restore-wal-backup");
+    operations_path(live, sizeof(live), "restore-wal-live");
+    ASSERT_TRUE(snprintf(wal, sizeof(wal), "%s-wal", live) < (int)sizeof(wal));
+    cbm_zova_workspace_generation_result_t source_result = {0}, live_result = {0};
+    ASSERT_EQ(operations_publish_fixture(source, "/tmp/operations-restore-wal", "walrestore", 2,
+                                         &source_result),
+              0);
+    ASSERT_EQ(operations_publish_fixture(live, "/tmp/operations-restore-wal", "walrestore", 1,
+                                         &live_result),
+              0);
+    cbm_zova_operation_report_t report = {0};
+    ASSERT_EQ(cbm_zova_database_backup(source, backup, &report), CBM_ZOVA_OPERATION_OK);
+
+    /* Hot-copy a WAL holding a committed write, close cleanly, put the copy back. */
+    sqlite3 *db = NULL;
+    ASSERT_EQ(sqlite3_open(live, &db), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db,
+                           "PRAGMA journal_mode=WAL;PRAGMA wal_autocheckpoint=0;"
+                           "CREATE TABLE stale_generation(x);"
+                           "INSERT INTO stale_generation VALUES(1);",
+                           NULL, NULL, NULL),
+              SQLITE_OK);
+    FILE *in = fopen(wal, "rb");
+    ASSERT_NOT_NULL(in);
+    static unsigned char wal_bytes[1 << 22];
+    size_t wal_len = fread(wal_bytes, 1, sizeof(wal_bytes), in);
+    fclose(in);
+    ASSERT_TRUE(wal_len > 32 && wal_len < sizeof(wal_bytes));
+    sqlite3_close(db);
+    FILE *out = fopen(wal, "wb");
+    ASSERT_NOT_NULL(out);
+    ASSERT_EQ(fwrite(wal_bytes, 1, wal_len, out), wal_len);
+    fclose(out);
+
+    ASSERT_EQ(cbm_zova_database_restore(live, backup, true, &report), CBM_ZOVA_OPERATION_OK);
+    ASSERT_EQ(operations_scalar(live, "SELECT count(*) FROM sqlite_master "
+                                      "WHERE name='stale_generation'"),
+              0);
+    ASSERT_EQ(operations_repository_inventory(live, "walrestore", 1, 2, 1, 2, 2), 0);
+
+    cbm_unlink(live);
+    cbm_unlink(backup);
+    cbm_unlink(source);
+    PASS();
+}
+
 TEST(zova_operations_database_archive_is_deterministic_and_round_trips) {
     char source[OPERATIONS_PATH_MAX], live[OPERATIONS_PATH_MAX];
     char first[OPERATIONS_PATH_MAX], second[OPERATIONS_PATH_MAX];
@@ -3391,6 +3444,7 @@ SUITE(zova_operations) {
     RUN_TEST(zova_operations_backup_refuses_symlink_source_without_creating_destination);
     RUN_TEST(zova_operations_restore_requires_confirmation_and_replaces_verified_inventory);
     RUN_TEST(zova_operations_restore_fault_phases_retry_to_verified_live_database);
+    RUN_TEST(zova_operations_restore_ignores_stale_live_wal);
     RUN_TEST(zova_operations_database_archive_is_deterministic_and_round_trips);
     RUN_TEST(zova_operations_database_archive_refuses_untrusted_inputs_without_live_writes);
     RUN_TEST(zova_operations_database_archive_rejects_unexpected_top_level_members);

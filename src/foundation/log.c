@@ -203,6 +203,9 @@ static void emit_line(const char *line) {
         }
     }
     (void)fprintf(stderr, "%s\n", line);
+    /* The Windows CRT fully buffers a redirected stderr; a crashed index worker
+     * would otherwise leave an empty log. */
+    (void)fflush(stderr);
 }
 
 void cbm_log(CBMLogLevel level, const char *msg, ...) {
