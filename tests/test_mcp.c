@@ -154,20 +154,6 @@ static void restore_cache_dir(const char *saved_copy) {
     }
 }
 
-static void cleanup_project_db(const char *cache, const char *project) {
-    if (!cache || !project) {
-        return;
-    }
-
-    char path[CBM_SZ_4K];
-    snprintf(path, sizeof(path), "%s/%s.db", cache, project);
-    cbm_unlink(path);
-    snprintf(path, sizeof(path), "%s/%s.db-wal", cache, project);
-    cbm_unlink(path);
-    snprintf(path, sizeof(path), "%s/%s.db-shm", cache, project);
-    cbm_unlink(path);
-}
-
 /* ══════════════════════════════════════════════════════════════════
  *  JSON-RPC PARSING
  * ══════════════════════════════════════════════════════════════════ */
@@ -919,25 +905,6 @@ TEST(tool_search_graph_rejects_empty_projects) {
     PASS();
 }
 
-TEST(tool_search_graph_rejects_multi_project_compatibility_route) {
-    const char *saved_mode = getenv("CBM_ZOVA_MODE");
-    char *saved_mode_copy = saved_mode ? strdup(saved_mode) : NULL;
-    cbm_setenv("CBM_ZOVA_MODE", "off", 1);
-    cbm_mcp_server_t *srv = setup_mcp_with_data();
-    char *resp = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":136,\"method\":\"tools/call\","
-             "\"params\":{\"name\":\"search_graph\",\"arguments\":{"
-             "\"projects\":[\"one\",\"two\"],\"query\":\"handler\"}}}");
-    ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "multi-project search requires Zova full authority"));
-    free(resp);
-    cbm_mcp_server_free(srv);
-    if (saved_mode_copy) cbm_setenv("CBM_ZOVA_MODE", saved_mode_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_MODE");
-    free(saved_mode_copy);
-    PASS();
-}
-
 TEST(tool_search_graph_searches_two_zova_projects_globally) {
 #if !CBM_WITH_ZOVA
     PASS();
@@ -946,14 +913,8 @@ TEST(tool_search_graph_searches_two_zova_projects_globally) {
     snprintf(cache, sizeof(cache), "%s/cbm-mcp-cross-project-XXXXXX", cbm_tmpdir());
     ASSERT_NOT_NULL(cbm_mkdtemp(cache));
     const char *saved_cache = getenv("CBM_CACHE_DIR");
-    const char *saved_flag = getenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
-    const char *saved_mode = getenv("CBM_ZOVA_MODE");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    char *saved_flag_copy = saved_flag ? strdup(saved_flag) : NULL;
-    char *saved_mode_copy = saved_mode ? strdup(saved_mode) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
-    cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", "1", 1);
-    cbm_setenv("CBM_ZOVA_MODE", "authority", 1);
 
     char path[512];
     ASSERT_EQ(cbm_zova_user_database_path(path, sizeof(path)), 0);
@@ -1038,13 +999,7 @@ TEST(tool_search_graph_searches_two_zova_projects_globally) {
 
     if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
     else cbm_unsetenv("CBM_CACHE_DIR");
-    if (saved_flag_copy) cbm_setenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL", saved_flag_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_SINGLE_FILE_EXPERIMENTAL");
-    if (saved_mode_copy) cbm_setenv("CBM_ZOVA_MODE", saved_mode_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_MODE");
     free(saved_cache_copy);
-    free(saved_flag_copy);
-    free(saved_mode_copy);
     cbm_unlink(path);
     cbm_rmdir(cache);
     PASS();
@@ -1070,11 +1025,8 @@ TEST(tool_index_repository_reports_zova_committed_counts) {
     ASSERT_EQ(fclose(source), 0);
 
     const char *saved_cache = getenv("CBM_CACHE_DIR");
-    const char *saved_mode = getenv("CBM_ZOVA_MODE");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    char *saved_mode_copy = saved_mode ? strdup(saved_mode) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
-    cbm_setenv("CBM_ZOVA_MODE", "authority", 1);
 
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
@@ -1089,11 +1041,8 @@ TEST(tool_index_repository_reports_zova_committed_counts) {
     bool degraded = response && strstr(response, "degraded");
 
     char user_db[640];
-    char project_db[640];
     ASSERT_EQ(cbm_zova_user_database_path(user_db, sizeof(user_db)), 0);
-    snprintf(project_db, sizeof(project_db), "%s/zova-status.db", cache);
     bool shared_exists = access(user_db, F_OK) == 0;
-    bool project_db_exists = access(project_db, F_OK) == 0;
 
     char *deleted_response =
         cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"zova-status\"}");
@@ -1113,10 +1062,7 @@ TEST(tool_index_repository_reports_zova_committed_counts) {
     cbm_mcp_server_free(srv);
     if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
     else cbm_unsetenv("CBM_CACHE_DIR");
-    if (saved_mode_copy) cbm_setenv("CBM_ZOVA_MODE", saved_mode_copy, 1);
-    else cbm_unsetenv("CBM_ZOVA_MODE");
     free(saved_cache_copy);
-    free(saved_mode_copy);
     cbm_unlink(user_db);
     char wal[672];
     char shm[672];
@@ -1135,7 +1081,6 @@ TEST(tool_index_repository_reports_zova_committed_counts) {
     ASSERT_TRUE(counts_match);
     ASSERT_FALSE(degraded);
     ASSERT_TRUE(shared_exists);
-    ASSERT_FALSE(project_db_exists);
     ASSERT_TRUE(deleted);
     ASSERT_TRUE(gone);
     ASSERT_TRUE(repeated_not_found);
@@ -1432,130 +1377,6 @@ TEST(tool_trace_call_path_prefers_definition) {
     free(resp);
     cbm_mcp_server_free(srv);
     PASS();
-}
-
-TEST(tool_trace_call_path_projection_free_sidecar_falls_back_to_sqlite) {
-#if !CBM_WITH_ZOVA
-    PASS();
-#else
-    char cache[256];
-    snprintf(cache, sizeof(cache), "/tmp/cbm-zova-mcp-XXXXXX");
-    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
-    const char *saved_cache = getenv("CBM_CACHE_DIR");
-    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    const char *saved_mode = getenv("CBM_ZOVA_MODE");
-    char *saved_mode_copy = saved_mode ? strdup(saved_mode) : NULL;
-    cbm_setenv("CBM_CACHE_DIR", cache, 1);
-    cbm_setenv("CBM_ZOVA_MODE", "off", 1);
-
-    const char *project = "zova-mcp";
-    char db_path[512];
-    char zova_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, project);
-    ASSERT_EQ(cbm_zova_sidecar_path(db_path, zova_path, sizeof(zova_path)), 0);
-    cbm_store_t *store = cbm_store_open_path(db_path);
-    ASSERT_NOT_NULL(store);
-    ASSERT_EQ(cbm_store_upsert_project(store, project, db_path), CBM_STORE_OK);
-    cbm_node_t root = {.project = project,
-                       .label = "Function",
-                       .name = "Root",
-                       .qualified_name = "zova.Root",
-                       .file_path = "src/root.c",
-                       .start_line = 1,
-                       .end_line = 10};
-    cbm_node_t mid = {.project = project,
-                      .label = "Function",
-                      .name = "Mid",
-                      .qualified_name = "zova.Mid",
-                      .file_path = "src/mid.c",
-                      .start_line = 20,
-                      .end_line = 30};
-    cbm_node_t leaf = {.project = project,
-                       .label = "Function",
-                       .name = "Leaf",
-                       .qualified_name = "zova.Leaf",
-                       .file_path = "src/leaf.c",
-                       .start_line = 40,
-                       .end_line = 50};
-    int64_t root_id = cbm_store_upsert_node(store, &root);
-    int64_t mid_id = cbm_store_upsert_node(store, &mid);
-    int64_t leaf_id = cbm_store_upsert_node(store, &leaf);
-    ASSERT_GT(root_id, 0);
-    ASSERT_GT(mid_id, 0);
-    ASSERT_GT(leaf_id, 0);
-    cbm_edge_t one = {.project = project, .source_id = root_id, .target_id = mid_id, .type = "CALLS"};
-    cbm_edge_t two = {.project = project, .source_id = mid_id, .target_id = leaf_id, .type = "CALLS"};
-    ASSERT_GT(cbm_store_insert_edge(store, &one), 0);
-    ASSERT_GT(cbm_store_insert_edge(store, &two), 0);
-    cbm_store_close(store);
-
-    cbm_setenv("CBM_ZOVA_MODE", "graph_read", 1);
-    ASSERT_EQ(cbm_zova_after_sqlite_dump_workspace_with_i8_vectors(
-                  db_path, db_path, project, NULL, 0, NULL, 0, 768),
-              0);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(project);
-    ASSERT_NOT_NULL(srv);
-
-    const char *directions[] = {"outbound", "inbound", "both"};
-    for (int i = 0; i < 3; i++) {
-        char args[512];
-        snprintf(args, sizeof(args),
-                 "{\"function_name\":\"zova.Root\",\"project\":\"%s\","
-                 "\"direction\":\"%s\",\"depth\":2,\"risk_labels\":true}",
-                 project, directions[i]);
-        cbm_setenv("CBM_ZOVA_MODE", "off", 1);
-        char *sqlite_result = cbm_mcp_handle_tool(srv, "trace_path", args);
-        ASSERT_NOT_NULL(sqlite_result);
-        char *sqlite_text = extract_text_content(sqlite_result);
-        ASSERT_NOT_NULL(sqlite_text);
-        cbm_setenv("CBM_ZOVA_MODE", "graph_read", 1);
-        char *zova_result = cbm_mcp_handle_tool(srv, "trace_path", args);
-        ASSERT_NOT_NULL(zova_result);
-        char *zova_text = extract_text_content(zova_result);
-        ASSERT_NOT_NULL(zova_text);
-        ASSERT_STR_EQ(zova_text, sqlite_text);
-        if (strcmp(directions[i], "both") == 0) {
-            cbm_zova_graph_metrics_t metrics = {0};
-            cbm_store_zova_graph_last_metrics(cbm_mcp_server_store(srv), &metrics);
-            ASSERT_TRUE(metrics.fallback);
-        }
-        free(zova_text);
-        free(zova_result);
-        free(sqlite_text);
-        free(sqlite_result);
-    }
-
-    /* Graph reads default to Zova when a current sidecar is present. Unset
-     * mode also enables the default vector authority policy. */
-    cbm_unsetenv("CBM_ZOVA_MODE");
-    char *default_result = cbm_mcp_handle_tool(
-        srv, "trace_path",
-        "{\"function_name\":\"zova.Root\",\"project\":\"zova-mcp\","
-        "\"direction\":\"outbound\",\"depth\":2}");
-    ASSERT_NOT_NULL(default_result);
-    cbm_zova_graph_metrics_t default_metrics = {0};
-    cbm_store_zova_graph_last_metrics(cbm_mcp_server_store(srv), &default_metrics);
-    ASSERT_TRUE(default_metrics.fallback);
-    free(default_result);
-
-    cbm_mcp_server_free(srv);
-    cbm_unlink(zova_path);
-    cleanup_project_db(cache, project);
-    cbm_rmdir(cache);
-    if (saved_cache_copy) {
-        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
-    } else {
-        cbm_unsetenv("CBM_CACHE_DIR");
-    }
-    if (saved_mode_copy) {
-        cbm_setenv("CBM_ZOVA_MODE", saved_mode_copy, 1);
-    } else {
-        cbm_unsetenv("CBM_ZOVA_MODE");
-    }
-    free(saved_cache_copy);
-    free(saved_mode_copy);
-    PASS();
-#endif
 }
 
 /* Reproduce-first (#887): the client-supplied `depth` on trace_call_path must be
@@ -2028,7 +1849,7 @@ TEST(tool_get_architecture_rejects_unknown_aspect_pr560) {
  * alias, not only the canonical `project` key. list_projects surfaces the field
  * as "name" and the error hint says "pass the project name", so a caller
  * naturally passes `project_name`. With no alias, the handler reads key
- * "project" -> NULL -> resolve_store bails before opening any .db -> "project
+ * "project" -> NULL -> resolve_store bails before opening the store -> "project
  * not found or not indexed" even though the project is indexed. Mirrors
  * tool_get_architecture_emits_populated_sections but with the alias key. */
 TEST(tool_get_architecture_accepts_project_name_alias_issue640) {
@@ -2754,7 +2575,7 @@ TEST(tool_index_repository_dot_uses_absolute_project_key) {
     if (!response_contains_json_fragment(resp, "\"status\":\"indexed\"")) {
         free(resp);
         cbm_mcp_server_free(srv);
-        cleanup_project_db(cache, project);
+        th_remove_zova_user_database();
         restore_cache_dir(saved_copy);
         free(saved_copy);
         free(project);
@@ -2768,7 +2589,7 @@ TEST(tool_index_repository_dot_uses_absolute_project_key) {
     free(resp);
 
     cbm_mcp_server_free(srv);
-    cleanup_project_db(cache, project);
+    th_remove_zova_user_database();
     restore_cache_dir(saved_copy);
     free(saved_copy);
     free(project);
@@ -2811,9 +2632,6 @@ TEST(tool_detect_changes_not_found_rich_error) {
  * store stays empty. */
 TEST(tool_detect_changes_reports_impacted_symbols) {
     const char *proj = "detect-impact";
-    if (cbm_zova_route_for_project(proj) != CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        PASS();
-    }
     char *tmp = th_mktempdir("cbm_detect_impact");
     ASSERT_NOT_NULL(tmp);
     char cmd[CBM_SZ_1K];
@@ -3883,18 +3701,36 @@ TEST(mcp_server_run_rapid_messages) {
 }
 #endif /* !_WIN32 */
 
+/* Publish n projects named "<prefix>_NN_bbb…" (~120 chars) into the shared
+ * cbm.zova under cache. Returns 0 on success. */
+static int issue235_publish_projects(const char *cache, const char *prefix, int n) {
+    for (int i = 0; i < n; i++) {
+        char name[256];
+        snprintf(name, sizeof(name),
+                 "%s_%02d_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                 prefix, i);
+        cbm_store_t *st = cbm_store_open_memory();
+        int rc = st && cbm_store_upsert_project(st, name, cache) == CBM_STORE_OK
+                     ? th_publish_store_project(st, name)
+                     : -1;
+        if (st) {
+            cbm_store_close(st);
+        }
+        if (rc != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /* Issue #235: passing an unrecognised project name to a tool crashed the
  * binary with a buffer overflow while building the "available_projects"
- * error list — collect_db_project_names overflowed projects[CBM_SZ_4K] via
+ * error list — the project-name collector overflowed projects[CBM_SZ_4K] via
  * an unsigned underflow on (out_sz - offset) once the listed names exceeded
- * the buffer. Fill a temp cache dir with enough long-named .db files to
- * exceed 4 KB, then hit the bad-project path. Under ASan a regression aborts
- * here; the fixed bounds-check keeps it clean and returns a normal error. */
-#define ISSUE235_DBNAME(buf, dir, i)                                                         \
-    snprintf((buf), sizeof(buf),                                                             \
-             "%s/proj_%02d_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
-             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.db",                      \
-             (dir), (i))
+ * the buffer. Publish enough long-named projects to exceed 4 KB, then hit the
+ * bad-project path. Under ASan a regression aborts here; the fixed
+ * bounds-check keeps it clean and returns a normal error. */
 TEST(tool_bad_project_name_no_overflow_issue235) {
     char cache[256];
     snprintf(cache, sizeof(cache), "/tmp/cbm-badproj-XXXXXX");
@@ -3906,60 +3742,33 @@ TEST(tool_bad_project_name_no_overflow_issue235) {
     char *saved_copy = saved ? strdup(saved) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
 
-    /* 40 * ~120-char names overflows the 4 KB available-projects buffer.
-     * collect_db_project_names advertises each db's INTERNAL project name
-     * (#704), so the fixture must hold valid dbs with long internal names —
-     * not stub files — for the bounds-check path to actually be exercised. */
-    enum { ISSUE235_N = 40 };
-    for (int i = 0; i < ISSUE235_N; i++) {
-        char name[512];
-        ISSUE235_DBNAME(name, cache, i);
-        char iname[256];
-        snprintf(iname, sizeof(iname),
-                 "proj_%02d_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                 i);
-        cbm_store_t *st = cbm_store_open_path(name);
-        if (st) {
-            cbm_store_upsert_project(st, iname, cache);
-            cbm_store_close(st);
-        }
-    }
+    /* 40 * ~120-char names overflows the 4 KB available-projects buffer. */
+    int published = issue235_publish_projects(cache, "proj", 40);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
-    ASSERT_NOT_NULL(srv);
-    char *resp = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":"
-             "\"search_graph\",\"arguments\":{\"label\":\"Function\","
-             "\"project\":\"definitely-not-a-real-project-xyz\"}}}");
-    ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "not found"));
+    char *resp = NULL;
+    if (published == 0) {
+        cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+        resp = srv ? cbm_mcp_server_handle(
+                         srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{"
+                              "\"name\":\"get_graph_schema\",\"arguments\":{"
+                              "\"project\":\"definitely-not-a-real-project-xyz\"}}}")
+                   : NULL;
+        cbm_mcp_server_free(srv);
+    }
+    bool not_found = resp && strstr(resp, "not found");
     free(resp);
-    cbm_mcp_server_free(srv);
 
-    if (saved_copy) {
-        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
-        free(saved_copy);
-    } else {
-        cbm_unsetenv("CBM_CACHE_DIR");
-    }
-    for (int i = 0; i < ISSUE235_N; i++) {
-        char name[512];
-        ISSUE235_DBNAME(name, cache, i);
-        cbm_unlink(name);
-        char side[540];
-        snprintf(side, sizeof(side), "%s-wal", name);
-        cbm_unlink(side);
-        snprintf(side, sizeof(side), "%s-shm", name);
-        cbm_unlink(side);
-    }
-    cbm_rmdir(cache);
+    restore_cache_dir(saved_copy);
+    free(saved_copy);
+    th_rmtree(cache);
+
+    ASSERT_EQ(published, 0);
+    ASSERT_TRUE(not_found);
     PASS();
 }
-#undef ISSUE235_DBNAME
 
-/* Issue #235 (follow-up): with many long-named projects indexed,
- * collect_db_project_names overflowed projects[CBM_SZ_4K] and truncated the
+/* Issue #235 (follow-up): with many long-named projects indexed, the
+ * project-name collector overflowed projects[CBM_SZ_4K] and truncated the
  * LAST name MID-TOKEN, then clamped offset to out_sz-1 — emitting malformed,
  * unterminated JSON like
  *   ...,"available_projects":["a",...,"vjson_49_bbb],"count":50}
@@ -3967,17 +3776,11 @@ TEST(tool_bad_project_name_no_overflow_issue235) {
  * invalid body into the tool error, so a "project not found" reply was NOT
  * valid JSON once enough projects were indexed.
  *
- * Reproduce-first: fill an isolated cache dir with enough long INTERNAL-named
- * dbs to overflow the 4 KB buffer, hit the bad-project path, then assert the
- * ERROR BODY (the inner MCP text content) parses as valid JSON and that
- * available_projects is a JSON array whose length == count. RED on the
- * truncating code (yyjson_read returns NULL on the mid-token cut); GREEN after
- * the element-boundary fix, which only ever writes whole "name" tokens. */
-#define BADPROJ_JSON_DBNAME(buf, dir, i)                                                      \
-    snprintf((buf), sizeof(buf),                                                              \
-             "%s/vjson_%02d_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
-             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.db",                       \
-             (dir), (i))
+ * Publish enough long-named projects to overflow the 4 KB buffer, hit the
+ * bad-project path, then assert the ERROR BODY (the inner MCP text content)
+ * parses as valid JSON and that available_projects is a JSON array whose
+ * length == count. The element-boundary fix only ever writes whole "name"
+ * tokens. */
 TEST(tool_bad_project_error_valid_json_issue235) {
     char cache[256];
     snprintf(cache, sizeof(cache), "/tmp/cbm-badproj-vjson-XXXXXX");
@@ -3989,39 +3792,29 @@ TEST(tool_bad_project_error_valid_json_issue235) {
     char *saved_copy = saved ? strdup(saved) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
 
-    /* 50 * ~120-char INTERNAL names >> 4 KB → the available_projects buffer
-     * overflows and the last name is cut mid-token on the unfixed code. */
-    enum { BADPROJ_N = 50 };
-    for (int i = 0; i < BADPROJ_N; i++) {
-        char name[512];
-        BADPROJ_JSON_DBNAME(name, cache, i);
-        char iname[256];
-        snprintf(iname, sizeof(iname),
-                 "vjson_%02d_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                 i);
-        cbm_store_t *st = cbm_store_open_path(name);
-        if (st) {
-            cbm_store_upsert_project(st, iname, cache);
-            cbm_store_close(st);
-        }
-    }
+    /* 50 * ~120-char names >> 4 KB → the available_projects buffer overflows
+     * and the last name would be cut mid-token without the fix. */
+    int published = issue235_publish_projects(cache, "vjson", 50);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
-    ASSERT_NOT_NULL(srv);
-    char *resp = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":"
-             "\"search_graph\",\"arguments\":{\"label\":\"Function\","
-             "\"project\":\"definitely-not-a-real-project-xyz\"}}}");
-    ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "not found"));
+    char *resp = NULL;
+    if (published == 0) {
+        cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+        resp = srv ? cbm_mcp_server_handle(
+                         srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{"
+                              "\"name\":\"get_graph_schema\",\"arguments\":{"
+                              "\"project\":\"definitely-not-a-real-project-xyz\"}}}")
+                   : NULL;
+        cbm_mcp_server_free(srv);
+    }
+    bool not_found = resp && strstr(resp, "not found");
 
     /* The inner MCP text content is the error body built by
-     * build_project_list_error. Capture its validity BEFORE cleanup so a RED
+     * build_project_list_error. Capture its validity BEFORE cleanup so a
      * failure still restores the environment. */
-    char *body = extract_text_content(resp);
+    char *body = resp ? extract_text_content(resp) : NULL;
     bool body_valid = false;
     bool aps_ok = false; /* available_projects is an array whose len == count */
+    bool truncated = false;
     if (body) {
         yyjson_doc *bdoc = yyjson_read(body, strlen(body), 0);
         if (bdoc) {
@@ -4031,466 +3824,25 @@ TEST(tool_bad_project_error_valid_json_issue235) {
             yyjson_val *cnt = yyjson_obj_get(broot, "count");
             if (aps && yyjson_is_arr(aps) && cnt && yyjson_is_int(cnt)) {
                 aps_ok = (yyjson_arr_size(aps) == (size_t)yyjson_get_int(cnt));
+                truncated = yyjson_arr_size(aps) < 50;
             }
             yyjson_doc_free(bdoc);
         }
     }
     free(body);
     free(resp);
-    cbm_mcp_server_free(srv);
 
-    if (saved_copy) {
-        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
-        free(saved_copy);
-    } else {
-        cbm_unsetenv("CBM_CACHE_DIR");
-    }
-    for (int i = 0; i < BADPROJ_N; i++) {
-        char name[512];
-        BADPROJ_JSON_DBNAME(name, cache, i);
-        cbm_unlink(name);
-        char side[540];
-        snprintf(side, sizeof(side), "%s-wal", name);
-        cbm_unlink(side);
-        snprintf(side, sizeof(side), "%s-shm", name);
-        cbm_unlink(side);
-    }
-    cbm_rmdir(cache);
+    restore_cache_dir(saved_copy);
+    free(saved_copy);
+    th_rmtree(cache);
 
-    /* RED on the unfixed code: mid-token truncation → invalid JSON body. */
+    ASSERT_EQ(published, 0);
+    ASSERT_TRUE(not_found);
     ASSERT_TRUE(body_valid);
     ASSERT_TRUE(aps_ok);
+    ASSERT_TRUE(truncated); /* the 4 KB buffer was actually exceeded */
     PASS();
 }
-#undef BADPROJ_JSON_DBNAME
-
-/* ── #704: project resolution must key on the db's INTERNAL project name ──
- *
- * Issue #704: project resolution is registry-less and filename-addressed.
- * resolve_store() opens <cache>/<passed>.db and then requires the internal
- * `projects.name` row to equal the passed name; list_projects /
- * collect_db_project_names derive the advertised name from the .db FILENAME.
- * When a db's filename != its internal name (a legacy '.'-vs-'-' username
- * twin, or a copied/renamed file) it shows up in list_projects under the
- * filename, but every query returns "project not found" — node rows are
- * tagged with the INTERNAL name, so neither the filename nor the resolve
- * path lines up. The fix makes list + resolve both key on the INTERNAL name.
- *
- * Reproduce-first fixture in an isolated CBM_CACHE_DIR:
- *   - alpha704.db  : filename == internal name "alpha704"   (control / fast path)
- *   - gamma704.db  : internal name "beta704"                (DRIFT: built as
- *                    beta704.db then renamed → filename != internal name)
- *   - ghost704.db  : 0-byte file                            (ghost / unresolvable)
- *
- * RED on buggy code / GREEN on the fix:
- *   A. list_projects advertises "beta704" (internal), NOT "gamma704" (filename),
- *      and NOT "ghost704" (0-byte filtered).
- *   B. search_graph(project="beta704") resolves via the cache-dir scan and
- *      returns the node — not the "project not found" error.
- *   C. control project "alpha704" still resolves on the fast path.
- *   D. the 0-byte ghost is not resolvable.
- *   E. addressing the drifted db by its FILENAME ("gamma704") stays not-found
- *      (we key on the internal name, never the file on disk).
- */
-
-/* Create a file-backed project db at <dir>/<filename> whose INTERNAL project
- * name is `internal` (which may differ from the filename), holding one
- * Function node named `fn`. Returns true on success. */
-static bool issue704_make_db(const char *dir, const char *filename, const char *internal,
-                             const char *fn) {
-    char path[700];
-    snprintf(path, sizeof(path), "%s/%s", dir, filename);
-    cbm_store_t *st = cbm_store_open_path(path);
-    if (!st) {
-        return false;
-    }
-    bool ok = (cbm_store_upsert_project(st, internal, dir) == CBM_STORE_OK);
-    if (ok) {
-        char qn[256];
-        snprintf(qn, sizeof(qn), "%s.%s", internal, fn);
-        cbm_node_t n = {0};
-        n.project = internal;
-        n.label = "Function";
-        n.name = fn;
-        n.qualified_name = qn;
-        n.file_path = "main.go";
-        n.start_line = 1;
-        n.end_line = 2;
-        ok = (cbm_store_upsert_node(st, &n) > 0);
-    }
-    cbm_store_close(st);
-    return ok;
-}
-
-TEST(tool_resolve_store_by_internal_name_issue704) {
-    char cache[256];
-    snprintf(cache, sizeof(cache), "/tmp/cbm-issue704-XXXXXX");
-    if (!cbm_mkdtemp(cache)) {
-        PASS(); /* skip if mkdtemp fails — not a #704 signal */
-    }
-
-    const char *saved = getenv("CBM_CACHE_DIR");
-    char *saved_copy = saved ? strdup(saved) : NULL;
-    cbm_setenv("CBM_CACHE_DIR", cache, 1);
-
-    /* (1) control: filename == internal name */
-    ASSERT_TRUE(issue704_make_db(cache, "alpha704.db", "alpha704", "alphaFunc704"));
-
-    /* (2) DRIFT: build beta704.db (internal "beta704") then rename the file to
-     *     gamma704.db, so filename "gamma704" != internal "beta704". */
-    ASSERT_TRUE(issue704_make_db(cache, "beta704.db", "beta704", "betaFunc704"));
-    char beta_path[700];
-    char gamma_path[700];
-    snprintf(beta_path, sizeof(beta_path), "%s/beta704.db", cache);
-    snprintf(gamma_path, sizeof(gamma_path), "%s/gamma704.db", cache);
-    ASSERT_EQ(rename(beta_path, gamma_path), 0);
-
-    /* (3) ghost: 0-byte db file */
-    char ghost_path[700];
-    snprintf(ghost_path, sizeof(ghost_path), "%s/ghost704.db", cache);
-    FILE *gp = fopen(ghost_path, "w");
-    ASSERT_NOT_NULL(gp);
-    fclose(gp);
-
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
-    ASSERT_NOT_NULL(srv);
-
-    /* ── A: list_projects reports INTERNAL names; filters the ghost ── */
-    char *list =
-        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
-                                   "\"params\":{\"name\":\"list_projects\",\"arguments\":{}}}");
-    ASSERT_NOT_NULL(list);
-    ASSERT_NOT_NULL(strstr(list, "alpha704")); /* control */
-    ASSERT_NOT_NULL(strstr(list, "beta704"));  /* internal name of drifted db (RED before) */
-    ASSERT_NULL(strstr(list, "gamma704"));     /* filename must NOT be advertised (RED before) */
-    ASSERT_NULL(strstr(list, "ghost704"));     /* 0-byte ghost filtered (RED before) */
-    free(list);
-
-    /* ── B: the drifted project resolves by its INTERNAL name ──────── */
-    char *q_beta = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
-             "\"params\":{\"name\":\"search_graph\",\"arguments\":{"
-             "\"project\":\"beta704\",\"name_pattern\":\"betaFunc704\",\"limit\":5}}}");
-    ASSERT_NOT_NULL(q_beta);
-    ASSERT_NOT_NULL(strstr(q_beta, "betaFunc704")); /* resolved + returned node (RED before) */
-    ASSERT_NULL(strstr(q_beta, "not found"));       /* not the not-found error */
-    free(q_beta);
-
-    /* ── C: control project still resolves on the fast path ────────── */
-    char *q_alpha = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
-             "\"params\":{\"name\":\"search_graph\",\"arguments\":{"
-             "\"project\":\"alpha704\",\"name_pattern\":\"alphaFunc704\",\"limit\":5}}}");
-    ASSERT_NOT_NULL(q_alpha);
-    ASSERT_NOT_NULL(strstr(q_alpha, "alphaFunc704"));
-    free(q_alpha);
-
-    /* ── D: the 0-byte ghost is NOT resolvable ─────────────────────── */
-    char *q_ghost = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\","
-             "\"params\":{\"name\":\"search_graph\",\"arguments\":{"
-             "\"project\":\"ghost704\",\"name_pattern\":\".*\",\"limit\":5}}}");
-    ASSERT_NOT_NULL(q_ghost);
-    ASSERT_NOT_NULL(strstr(q_ghost, "not found"));
-    free(q_ghost);
-
-    /* ── E: addressing the drifted db by its FILENAME stays not-found ── */
-    char *q_gamma = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
-             "\"params\":{\"name\":\"search_graph\",\"arguments\":{"
-             "\"project\":\"gamma704\",\"name_pattern\":\".*\",\"limit\":5}}}");
-    ASSERT_NOT_NULL(q_gamma);
-    ASSERT_NOT_NULL(strstr(q_gamma, "not found"));
-    free(q_gamma);
-
-    cbm_mcp_server_free(srv);
-
-    /* ── cleanup ───────────────────────────────────────────────────── */
-    if (saved_copy) {
-        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
-        free(saved_copy);
-    } else {
-        cbm_unsetenv("CBM_CACHE_DIR");
-    }
-    char a_path[700];
-    snprintf(a_path, sizeof(a_path), "%s/alpha704.db", cache);
-    char corrupt_path[720];
-    snprintf(corrupt_path, sizeof(corrupt_path), "%s.corrupt", ghost_path);
-    cbm_unlink(a_path);
-    cbm_unlink(gamma_path);
-    cbm_unlink(ghost_path);
-    cbm_unlink(corrupt_path); /* ghost may be quarantined by resolve_store */
-    char side[740];
-    snprintf(side, sizeof(side), "%s-wal", a_path);
-    cbm_unlink(side);
-    snprintf(side, sizeof(side), "%s-shm", a_path);
-    cbm_unlink(side);
-    snprintf(side, sizeof(side), "%s-wal", gamma_path);
-    cbm_unlink(side);
-    snprintf(side, sizeof(side), "%s-shm", gamma_path);
-    cbm_unlink(side);
-    cbm_rmdir(cache);
-    PASS();
-}
-
-/* ══════════════════════════════════════════════════════════════════
- *  QUERY STORE READ-ONLY  (data-integrity reproductions)
- *
- *  Bug: query tools resolve the project store via resolve_store() ->
- *  cbm_store_open_path_query(), which opens the DB SQLITE_OPEN_READWRITE
- *  and runs configure_pragmas() with the WRITE pragmas
- *  (journal_mode=WAL + wal_checkpoint + synchronous). Two consequences:
- *    (a) read-only query tools MUTATE the on-disk DB (write pragmas), and
- *    (b) query tools FAIL outright on a read-only DB file / filesystem
- *        (the READWRITE open returns CANTOPEN -> resolve_store NULL ->
- *        "project not found").
- *  Both tests below are written reproduce-first and are RED on the
- *  unfixed code, GREEN once query opens are READONLY with read-only
- *  pragmas.
- * ══════════════════════════════════════════════════════════════════ */
-
-#define ROQ_PROJECT "cbm-roq-test"
-
-/* Whole-file byte snapshot. Returns malloc'd buffer (caller frees) and
- * writes the length to *out_len. Returns NULL on failure. */
-static unsigned char *roq_read_file_bytes(const char *path, long *out_len) {
-    *out_len = 0;
-    FILE *fp = fopen(path, "rb");
-    if (!fp) {
-        return NULL;
-    }
-    if (fseek(fp, 0, SEEK_END) != 0) {
-        fclose(fp);
-        return NULL;
-    }
-    long sz = ftell(fp);
-    if (sz < 0) {
-        fclose(fp);
-        return NULL;
-    }
-    rewind(fp);
-    unsigned char *buf = malloc((size_t)sz > 0 ? (size_t)sz : 1);
-    if (!buf) {
-        fclose(fp);
-        return NULL;
-    }
-    size_t got = fread(buf, 1, (size_t)sz, fp);
-    fclose(fp);
-    if (got != (size_t)sz) {
-        free(buf);
-        return NULL;
-    }
-    *out_len = sz;
-    return buf;
-}
-
-static int roq_file_exists(const char *path) {
-    struct stat st;
-    return (stat(path, &st) == 0) ? 1 : 0;
-}
-
-/* ── (a) NO-MUTATION ──────────────────────────────────────────────────
- *
- * readonly_query_does_not_mutate_db
- *
- * Create a real project DB, convert it to rollback (DELETE) journal mode
- * on disk, snapshot its exact bytes, run search_graph through the server,
- * then re-snapshot. The buggy query path runs `PRAGMA journal_mode=WAL`,
- * which rewrites the file header (1,1 -> 2,2) and spawns a -wal sidecar —
- * so the snapshots differ. The fixed READONLY path runs no write pragma,
- * so the file is byte-identical.
- *
- * The DELETE-mode fixture is what makes the mutation OBSERVABLE: on an
- * already-WAL file `journal_mode=WAL` is a silent no-op, so we deliberately
- * stage the DB in rollback mode (the same technique repro_issue557 uses to
- * plant a deterministic trigger).
- *
- * WHY RED on unfixed code:
- *   journal_mode=WAL rewrites the header -> memcmp(before, after) != 0 and
- *   a -wal file is created while the cached store is open. Both assertions
- *   that demand "unchanged" fire.
- * ─────────────────────────────────────────────────────────────────── */
-TEST(readonly_query_does_not_mutate_db) {
-    char tmp_cache[512];
-    snprintf(tmp_cache, sizeof(tmp_cache), "%s/cbm_roq_a_XXXXXX", cbm_tmpdir());
-    if (!cbm_mkdtemp(tmp_cache)) {
-        ASSERT_NOT_NULL(NULL); /* setup failure */
-    }
-    const char *saved = getenv("CBM_CACHE_DIR");
-    char *saved_copy = saved ? strdup(saved) : NULL;
-    cbm_setenv("CBM_CACHE_DIR", tmp_cache, 1);
-
-    char db_path[700];
-    snprintf(db_path, sizeof(db_path), "%s/%s.db", tmp_cache, ROQ_PROJECT);
-    char wal_path[730];
-    char shm_path[730];
-    snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
-    snprintf(shm_path, sizeof(shm_path), "%s-shm", db_path);
-
-    /* Build the DB and flip it to rollback journal mode on disk. */
-    cbm_store_t *setup = cbm_store_open_path(db_path);
-    ASSERT_NOT_NULL(setup);
-    ASSERT_EQ(cbm_store_upsert_project(setup, ROQ_PROJECT, "/tmp/roq"), CBM_STORE_OK);
-    cbm_node_t node = {.project = ROQ_PROJECT,
-                       .label = "Function",
-                       .name = "ReadOnlyProbe",
-                       .qualified_name = "roq.mod.ReadOnlyProbe",
-                       .file_path = "mod.c"};
-    ASSERT_TRUE(cbm_store_upsert_node(setup, &node) > 0);
-    ASSERT_EQ(cbm_store_exec(setup, "PRAGMA journal_mode=DELETE;"), 0);
-    cbm_store_close(setup);
-
-    /* Snapshot BEFORE any query. */
-    long before_len = 0;
-    unsigned char *before = roq_read_file_bytes(db_path, &before_len);
-    ASSERT_NOT_NULL(before);
-
-    /* Run a query tool through the server (the resolve_store path). */
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
-    ASSERT_NOT_NULL(srv);
-    char args[512];
-    snprintf(args, sizeof(args), "{\"project\":\"%s\",\"name_pattern\":\".*ReadOnlyProbe.*\"}",
-             ROQ_PROJECT);
-    char *resp = cbm_mcp_handle_tool(srv, "search_graph", args);
-
-    /* Capture sidecar state WHILE the cached store is still open (the buggy
-     * RW+WAL open creates -wal here; on close it would be removed again). */
-    int wal_while_open = roq_file_exists(wal_path);
-    int query_ok = (resp && strstr(resp, "ReadOnlyProbe") != NULL);
-    int query_failed = (resp && (strstr(resp, "not found") || strstr(resp, "not indexed")));
-
-    cbm_mcp_server_free(srv); /* closes the store; header change is persisted */
-
-    long after_len = 0;
-    unsigned char *after = roq_read_file_bytes(db_path, &after_len);
-
-    int identical = (before && after && before_len == after_len &&
-                     memcmp(before, after, (size_t)before_len) == 0);
-
-    if (resp) {
-        free(resp);
-    }
-    free(before);
-    free(after);
-    cbm_unlink(db_path);
-    cbm_unlink(wal_path);
-    cbm_unlink(shm_path);
-    cbm_rmdir(tmp_cache);
-    if (saved_copy) {
-        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
-        free(saved_copy);
-    } else {
-        cbm_unsetenv("CBM_CACHE_DIR");
-    }
-
-    ASSERT_TRUE(query_ok);        /* read path ran and returned the node */
-    ASSERT_FALSE(query_failed);   /* not the "project not found" path */
-    ASSERT_TRUE(identical);       /* RED on buggy code: WAL pragma rewrote header */
-    ASSERT_FALSE(wal_while_open); /* RED on buggy code: RW+WAL open spawned -wal */
-    PASS();
-}
-
-/* ── (b) READ-ONLY FILESYSTEM ─────────────────────────────────────────
- *
- * readonly_query_succeeds_on_readonly_fs
- *
- * Create a real project DB (left in WAL journal mode, as the indexer
- * writes it), then chmod the CONTAINING DIRECTORY to 0555 (read-only) to
- * simulate a read-only mount / immutable media, then run search_graph.
- *
- * Note on why the directory (not just the file) must be read-only: SQLite's
- * unix VFS auto-downgrades a failed O_RDWR main-db open to O_RDONLY, so a
- * 0444 *file* alone does NOT surface the bug — the connection silently
- * becomes read-only and, with a writable dir, still creates the WAL -shm
- * and reads. The genuine read-only-FS symptom is the WAL write-pragma
- * (journal_mode=WAL) being unable to create the -shm/-wal sidecars in a
- * read-only directory.
- *
- * WHY RED on unfixed code:
- *   cbm_store_open_path_query() runs configure_pragmas(.., false) which
- *   executes `PRAGMA journal_mode = WAL`. In a read-only directory the WAL
- *   wal-index (-shm) cannot be created, so the pragma errors ->
- *   configure_pragmas fails -> the open returns NULL -> resolve_store()
- *   returns NULL -> the handler emits "project not found or not indexed".
- *
- * GREEN on fixed code:
- *   the READONLY open skips the WAL write-pragma; the plain READONLY open
- *   of a WAL-mode DB in a read-only dir still needs -shm, so it fails and
- *   the immutable-URI fallback (file:..?immutable=1) reads the main DB
- *   file directly and the query returns the node. (This is the test that
- *   exercises the immutable fallback path.)
- * ─────────────────────────────────────────────────────────────────── */
-TEST(readonly_query_succeeds_on_readonly_fs) {
-    char tmp_cache[512];
-    snprintf(tmp_cache, sizeof(tmp_cache), "%s/cbm_roq_b_XXXXXX", cbm_tmpdir());
-    if (!cbm_mkdtemp(tmp_cache)) {
-        ASSERT_NOT_NULL(NULL); /* setup failure */
-    }
-    const char *saved = getenv("CBM_CACHE_DIR");
-    char *saved_copy = saved ? strdup(saved) : NULL;
-    cbm_setenv("CBM_CACHE_DIR", tmp_cache, 1);
-
-    char db_path[700];
-    snprintf(db_path, sizeof(db_path), "%s/%s.db", tmp_cache, ROQ_PROJECT);
-    char wal_path[730];
-    char shm_path[730];
-    snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
-    snprintf(shm_path, sizeof(shm_path), "%s-shm", db_path);
-
-    /* Build the DB in its natural WAL journal mode and ensure it is cleanly
-     * checkpointed (no -wal frames) so the immutable fallback can read all
-     * data from the main file. */
-    cbm_store_t *setup = cbm_store_open_path(db_path);
-    ASSERT_NOT_NULL(setup);
-    ASSERT_EQ(cbm_store_upsert_project(setup, ROQ_PROJECT, "/tmp/roq"), CBM_STORE_OK);
-    cbm_node_t node = {.project = ROQ_PROJECT,
-                       .label = "Function",
-                       .name = "ReadOnlyProbe",
-                       .qualified_name = "roq.mod.ReadOnlyProbe",
-                       .file_path = "mod.c"};
-    ASSERT_TRUE(cbm_store_upsert_node(setup, &node) > 0);
-    (void)cbm_store_checkpoint(setup); /* fold WAL frames into the main file */
-    cbm_store_close(setup);            /* clean close removes -wal/-shm */
-
-    /* Make the containing directory read-only (simulate a read-only mount).
-     * SQLite can still traverse + read files, but cannot create -shm/-wal. */
-    ASSERT_EQ(chmod(tmp_cache, 0555), 0);
-
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
-    ASSERT_NOT_NULL(srv);
-    char args[512];
-    snprintf(args, sizeof(args), "{\"project\":\"%s\",\"name_pattern\":\".*ReadOnlyProbe.*\"}",
-             ROQ_PROJECT);
-    char *resp = cbm_mcp_handle_tool(srv, "search_graph", args);
-
-    int query_ok = (resp && strstr(resp, "ReadOnlyProbe") != NULL);
-    int query_failed = (resp && (strstr(resp, "not found") || strstr(resp, "not indexed")));
-
-    if (resp) {
-        free(resp);
-    }
-    cbm_mcp_server_free(srv);
-
-    /* Restore write permission on the dir BEFORE unlink (cannot remove dir
-     * entries while the directory is read-only). */
-    chmod(tmp_cache, 0755);
-    cbm_unlink(db_path);
-    cbm_unlink(wal_path);
-    cbm_unlink(shm_path);
-    cbm_rmdir(tmp_cache);
-    if (saved_copy) {
-        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
-        free(saved_copy);
-    } else {
-        cbm_unsetenv("CBM_CACHE_DIR");
-    }
-
-    ASSERT_FALSE(query_failed); /* RED on buggy code: WAL pragma fails on RO dir */
-    ASSERT_TRUE(query_ok);      /* RED on buggy code: no node returned */
-    PASS();
-}
-
-#undef ROQ_PROJECT
 
 /* ══════════════════════════════════════════════════════════════════
  *  #845 — supervisor gate must not wrap embedders of cbm_mcp_handle_tool
@@ -4604,9 +3956,7 @@ TEST(index_supervisor_gate_requires_marked_host_issue845) {
     } else {
         cbm_unsetenv("CBM_INDEX_SUPERVISOR");
     }
-    char *project = cbm_project_name_from_path(tmp_dir);
-    cleanup_project_db(cache, project);
-    free(project);
+    th_remove_zova_user_database();
     restore_cache_dir(saved_cache_copy);
     free(saved_cache_copy);
     remove(src_path);
@@ -4757,9 +4107,7 @@ TEST(index_bg_paths_route_through_supervisor_issue832) {
         sig = WTERMSIG(status);
     }
 
-    char *project = cbm_project_name_from_path(tmp_dir);
-    cleanup_project_db(cache, project);
-    free(project);
+    th_remove_zova_user_database();
     restore_cache_dir(saved_cache_copy);
     free(saved_cache_copy);
     remove(src_path);
@@ -4920,9 +4268,7 @@ TEST(index_recovery_parallel_quarantines_crasher) {
         sig = WTERMSIG(status);
     }
 
-    char *project = cbm_project_name_from_path(tmp_dir);
-    cleanup_project_db(cache, project);
-    free(project);
+    th_remove_zova_user_database();
     restore_cache_dir(saved_cache_copy);
     free(saved_cache_copy);
     remove(p1);
@@ -4978,20 +4324,26 @@ static int auto_watch_connect_watch_count(const char *auto_watch_value) {
         return -3;
     }
 
-    /* Pre-create <cache>/<project>.db so maybe_auto_index takes the
-     * "already indexed" branch — the watcher-registration site under test. */
-    char db_path[1024];
-    snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, project);
-    if (th_write_file(db_path, "") != 0) {
-        free(project);
-        th_rmtree(cache);
-        return -4;
-    }
-    free(project);
-
     const char *saved = getenv("CBM_CACHE_DIR");
     char *saved_copy = saved ? strdup(saved) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    /* Publish the project to <cache>/cbm.zova so maybe_auto_index takes the
+     * "already indexed" branch — the watcher-registration site under test. */
+    cbm_store_t *fixture = cbm_store_open_memory();
+    int published = fixture && cbm_store_upsert_project(fixture, project, repodir) == CBM_STORE_OK
+                        ? th_publish_store_project(fixture, project)
+                        : -1;
+    if (fixture) {
+        cbm_store_close(fixture);
+    }
+    free(project);
+    if (published != 0) {
+        restore_cache_dir(saved_copy);
+        free(saved_copy);
+        th_rmtree(cache);
+        return -4;
+    }
 
     char old_cwd[1024];
     if (!cbm_getcwd(old_cwd, sizeof(old_cwd)) || cbm_chdir(repodir) != 0) {
@@ -5077,7 +4429,7 @@ TEST(mcp_auto_watch_false_skips_watcher_on_connect) {
  * autoindex_thread branch that #832 introduced.
  *
  * Drive the real public entry initialize → maybe_auto_index → autoindex_thread on
- * a supervisor-marked host (kill switch off) with a FRESH project (no prior .db)
+ * a supervisor-marked host (kill switch off) with a FRESH project (not yet in cbm.zova)
  * and auto_watch=false. cbm_mcp_server_free() joins the autoindex thread, so the
  * (buggy or gated) registration decision has run before we read the watch count.
  *
@@ -5219,9 +4571,7 @@ TEST(mcp_auto_watch_false_skips_supervised_autoindex_issue853) {
         sig = WTERMSIG(status);
     }
 
-    char *project = cbm_project_name_from_path(tmp_dir);
-    cleanup_project_db(cache, project);
-    free(project);
+    th_remove_zova_user_database();
     restore_cache_dir(saved_cache_copy);
     free(saved_cache_copy);
     remove(src_path);
@@ -5379,184 +4729,7 @@ TEST(index_root_boundary_is_component_aware) {
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
 
-/* #1206/#1037: a transient SQLITE_BUSY from a concurrent writer must NOT
- * quarantine (rename to .corrupt) a healthy per-project db. Old code fed the
- * lock-induced prepare failure into the plain bool check and renamed the DB
- * away; the fix classifies the state as transient and leaves the file alone. */
-TEST(mcp_busy_lock_does_not_quarantine_project_db) {
-    char cache[256];
-    snprintf(cache, sizeof(cache), "/tmp/cbm-mcp-busy-quarantine-XXXXXX");
-    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
-    const char *saved_cache = getenv("CBM_CACHE_DIR");
-    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    const char *saved_mode = getenv("CBM_ZOVA_MODE");
-    char *saved_mode_copy = saved_mode ? strdup(saved_mode) : NULL;
-    cbm_setenv("CBM_CACHE_DIR", cache, 1);
-    cbm_setenv("CBM_ZOVA_MODE", "off", 1); /* compatibility per-project .db route */
-
-    /* Healthy per-project db in rollback-journal mode with one project row. */
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/busy-proj.db", cache);
-    sqlite3 *writer = NULL;
-    ASSERT_EQ(sqlite3_open(db_path, &writer), SQLITE_OK);
-    char *err = NULL;
-    ASSERT_EQ(sqlite3_exec(writer,
-                           "PRAGMA journal_mode = DELETE;"
-                           "CREATE TABLE projects ("
-                           "  name TEXT PRIMARY KEY,"
-                           "  indexed_at TEXT NOT NULL,"
-                           "  root_path TEXT NOT NULL"
-                           ");"
-                           "INSERT INTO projects(name, indexed_at, root_path)"
-                           " VALUES('busy-proj', '2026-01-01T00:00:00Z', '/tmp/busy-proj');",
-                           NULL, NULL, &err),
-              SQLITE_OK);
-    sqlite3_free(err);
-    sqlite3_close(writer);
-
-    /* The contender holds the writer lock for the whole resolve. */
-    sqlite3 *locker = NULL;
-    ASSERT_EQ(sqlite3_open(db_path, &locker), SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(locker, "BEGIN EXCLUSIVE;", NULL, NULL, NULL), SQLITE_OK);
-
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
-    ASSERT_NOT_NULL(srv);
-    /* The resolve may stall up to busy_timeout (10s) and is then served via
-     * the immutable-URI read fallback (locks ignored) or refused — either way,
-     * the contract under test is that the DB FILE SURVIVES: a writer conflict
-     * is a transient condition, never a quarantine trigger. */
-    char *resp = cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"busy-proj\"}");
-    ASSERT_NOT_NULL(resp);
-    free(resp);
-    cbm_mcp_server_free(srv);
-
-    /* THE BUG: old code renamed the locked db to .corrupt (and deleted it when
-     * rename failed). Fixed: the file must still be at its original path and
-     * no .corrupt quarantine artifact may exist. */
-    struct stat st;
-    ASSERT_EQ(stat(db_path, &st), 0);
-    char corrupt_path[540];
-    snprintf(corrupt_path, sizeof(corrupt_path), "%s.corrupt", db_path);
-    ASSERT_TRUE(stat(corrupt_path, &st) != 0);
-
-    ASSERT_EQ(sqlite3_exec(locker, "COMMIT;", NULL, NULL, NULL), SQLITE_OK);
-    sqlite3_close(locker);
-    unlink(db_path);
-    if (saved_cache_copy) {
-        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
-    } else {
-        cbm_unsetenv("CBM_CACHE_DIR");
-    }
-    if (saved_mode_copy) {
-        cbm_setenv("CBM_ZOVA_MODE", saved_mode_copy, 1);
-    } else {
-        cbm_unsetenv("CBM_ZOVA_MODE");
-    }
-    free(saved_cache_copy);
-    free(saved_mode_copy);
-    cbm_rmdir(cache);
-    PASS();
-}
-
-/* #1037: a DB whose projects table is intact but whose btrees are torn must
- * be QUARANTINED, not served. The old shallow-only check passed this DB and
- * resolve_store() served queries against a structurally damaged file; the
- * verdict runs quick_check and confirms corruption. */
-TEST(mcp_torn_btree_db_is_quarantined_not_served) {
-    char cache[256];
-    snprintf(cache, sizeof(cache), "/tmp/cbm-mcp-torn-quarantine-XXXXXX");
-    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
-    const char *saved_cache = getenv("CBM_CACHE_DIR");
-    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    const char *saved_mode = getenv("CBM_ZOVA_MODE");
-    char *saved_mode_copy = saved_mode ? strdup(saved_mode) : NULL;
-    cbm_setenv("CBM_CACHE_DIR", cache, 1);
-    cbm_setenv("CBM_ZOVA_MODE", "off", 1); /* compatibility per-project .db route */
-
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/torn-proj.db", cache);
-    sqlite3 *writer = NULL;
-    ASSERT_EQ(sqlite3_open(db_path, &writer), SQLITE_OK);
-    char *err = NULL;
-    /* DELETE journal so the file is self-contained after close; projects table
-     * tiny (page 1), a big filler btree fills the mid-file pages. */
-    ASSERT_EQ(sqlite3_exec(writer,
-                           "PRAGMA journal_mode = DELETE;"
-                           "CREATE TABLE projects ("
-                           "  name TEXT PRIMARY KEY,"
-                           "  indexed_at TEXT NOT NULL,"
-                           "  root_path TEXT NOT NULL"
-                           ");"
-                           "INSERT INTO projects(name, indexed_at, root_path)"
-                           " VALUES('torn-proj', '2026-01-01T00:00:00Z', '/tmp/torn-proj');"
-                           "CREATE TABLE filler(id INTEGER PRIMARY KEY, pad TEXT);",
-                           NULL, NULL, &err),
-              SQLITE_OK);
-    sqlite3_free(err);
-    for (int i = 0; i < 2000; i++) {
-        char sql[320];
-        snprintf(sql, sizeof(sql), "INSERT INTO filler(id, pad) VALUES(%d, '%0198d');", i, i);
-        ASSERT_EQ(sqlite3_exec(writer, sql, NULL, NULL, &err), SQLITE_OK);
-        sqlite3_free(err);
-        err = NULL;
-    }
-    sqlite3_close(writer);
-
-    /* Zero a band of mid-file pages: filler btree leaves torn, projects table
-     * (page 1) intact — exactly the shape the shallow check cannot see. */
-    FILE *f = fopen(db_path, "rb+");
-    ASSERT_NOT_NULL(f);
-    (void)fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    enum { PAGE = 4096, ZERO_PAGES = 40 };
-    long page_count = fsize / PAGE;
-    ASSERT_TRUE(page_count > ZERO_PAGES + 8);
-    char zero[PAGE];
-    memset(zero, 0, sizeof(zero));
-    (void)fseek(f, (page_count / 4) * (long)PAGE, SEEK_SET);
-    for (int i = 0; i < ZERO_PAGES; i++) {
-        ASSERT_EQ(fwrite(zero, 1, PAGE, f), (size_t)PAGE);
-    }
-    (void)fclose(f);
-
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
-    ASSERT_NOT_NULL(srv);
-    /* Response is an error (store refused) — and, decisively, the damaged file
-     * is quarantined to .corrupt instead of kept in service. */
-    char *resp = cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"torn-proj\"}");
-    ASSERT_NOT_NULL(resp);
-    free(resp);
-    cbm_mcp_server_free(srv);
-
-    struct stat st;
-    char corrupt_path[540];
-    snprintf(corrupt_path, sizeof(corrupt_path), "%s.corrupt", db_path);
-    /* no longer served in place; recoverable quarantine copy */
-    ASSERT_TRUE(stat(db_path, &st) != 0);
-    ASSERT_EQ(stat(corrupt_path, &st), 0);
-
-    unlink(corrupt_path);
-    if (saved_cache_copy) {
-        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
-    } else {
-        cbm_unsetenv("CBM_CACHE_DIR");
-    }
-    if (saved_mode_copy) {
-        cbm_setenv("CBM_ZOVA_MODE", saved_mode_copy, 1);
-    } else {
-        cbm_unsetenv("CBM_ZOVA_MODE");
-    }
-    free(saved_cache_copy);
-    free(saved_mode_copy);
-    cbm_rmdir(cache);
-    PASS();
-}
-
 SUITE(mcp) {
-#if CBM_WITH_ZOVA
-    RUN_TEST(mcp_busy_lock_does_not_quarantine_project_db);
-    RUN_TEST(mcp_torn_btree_db_is_quarantined_not_served);
-#endif
     RUN_TEST(index_job_queue_is_fifo_and_blocks_second_contender);
     RUN_TEST(mcp_path_within_root_rejects_escape);
     RUN_TEST(detect_changes_rejects_option_like_base_branch);
@@ -5641,7 +4814,6 @@ SUITE(mcp) {
     RUN_TEST(search_graph_schema_accepts_project_or_projects);
     RUN_TEST(tool_search_graph_rejects_project_and_projects);
     RUN_TEST(tool_search_graph_rejects_empty_projects);
-    RUN_TEST(tool_search_graph_rejects_multi_project_compatibility_route);
     RUN_TEST(tool_search_graph_searches_two_zova_projects_globally);
     RUN_TEST(tool_index_repository_reports_zova_committed_counts);
     RUN_TEST(tool_search_graph_includes_node_properties);
@@ -5655,7 +4827,6 @@ SUITE(mcp) {
     RUN_TEST(tool_trace_missing_function_name);
     RUN_TEST(tool_trace_call_path_ambiguous);
     RUN_TEST(tool_trace_call_path_prefers_definition);
-    RUN_TEST(tool_trace_call_path_projection_free_sidecar_falls_back_to_sqlite);
     RUN_TEST(tool_trace_call_path_depth_clamped);
     RUN_TEST(tool_trace_call_path_distinct_defs_not_over_unioned);
     RUN_TEST(tool_trace_call_path_dts_stub_unions_with_impl);
@@ -5695,8 +4866,6 @@ SUITE(mcp) {
     RUN_TEST(tool_ingest_traces_empty);
 
     /* Query store read-only (data integrity) */
-    RUN_TEST(readonly_query_does_not_mutate_db);
-    RUN_TEST(readonly_query_succeeds_on_readonly_fs);
 
     /* Idle store eviction */
     RUN_TEST(store_idle_eviction);
@@ -5739,7 +4908,6 @@ SUITE(mcp) {
     RUN_TEST(snippet_source_invalid_utf8);
     RUN_TEST(tool_bad_project_name_no_overflow_issue235);
     RUN_TEST(tool_bad_project_error_valid_json_issue235);
-    RUN_TEST(tool_resolve_store_by_internal_name_issue704);
 
     /* auto_watch gate (distilled from PR #625) */
     RUN_TEST(mcp_auto_watch_default_registers_watcher_on_connect);

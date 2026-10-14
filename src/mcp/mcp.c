@@ -20,8 +20,6 @@ enum {
     MCP_COL_7 = 7,
     MCP_COL_10 = 10,
     MCP_COL_16 = 16,
-    MCP_DB_EXT = 3,      /* strlen(".db") */
-    MCP_MIN_DB_NAME = 4, /* min length for "x.db" */
     MCP_SEPARATOR = 2,   /* space for separator chars */
     MCP_DEFAULT_DEPTH = 3,
     MCP_DEFAULT_BFS_DEPTH = 2,
@@ -1071,50 +1069,9 @@ cbm_pipeline_t *cbm_mcp_server_active_pipeline(cbm_mcp_server_t *srv) {
     return srv ? srv->active_pipeline : NULL;
 }
 
-/* ── Cache dir + project DB path helpers ───────────────────────── */
-
-/* Returns the cache directory. Writes to buf, returns buf for convenience. */
-static const char *cache_dir(char *buf, size_t bufsz) {
-    const char *dir = cbm_resolve_cache_dir();
-    if (!dir) {
-        dir = cbm_tmpdir();
-    }
-    snprintf(buf, bufsz, "%s", dir);
-    return buf;
-}
-
-/* Returns full .db path for a project: <cache_dir>/<project>.db */
-static const char *project_db_path(const char *project, char *buf, size_t bufsz) {
-    if (!cbm_validate_project_name(project)) {
-        buf[0] = '\0';
-        return buf;
-    }
-    char dir[CBM_SZ_1K];
-    cache_dir(dir, sizeof(dir));
-    snprintf(buf, bufsz, "%s/%s.db", dir, project);
-    return buf;
-}
-
 /* ── Store resolution ──────────────────────────────────────────── */
 
-/* Read the sole INTERNAL project name from a .db file at full_path.
- * Opens the file query-mode (no create) and succeeds ONLY when the db holds
- * exactly one project row with a non-empty name — this filters ghost/empty
- * /corrupt dbs (0-byte file, missing `projects` table, or >1 row). On success
- * the internal name is copied into name_out; if out_store is non-NULL the open
- * handle is transferred to the caller (who must cbm_store_close it). On failure
- * the store is always closed. Defined after is_project_db_file below. */
-static bool db_internal_project_name(const char *full_path, char *name_out, size_t name_sz,
-                                     cbm_store_t **out_store);
-
-/* #704 fallback: scan the cache dir for the db whose sole internal project name
- * equals `project`, returning an open store handle (caller owns it) or NULL.
- * Used only when <project>.db is absent or its internal name differs from the
- * passed name (drifted filename). Defined after is_project_db_file below. */
-static cbm_store_t *resolve_store_fallback_scan(const char *project);
-
-/* Open the right project's .db file for query tools.
- * Caches the connection — reopens only when project changes.
+/* Open the project's workspace store in the shared cbm.zova for query tools.
  * Tracks last-access time so the event loop can evict idle stores. */
 static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
     if (!project) {
@@ -1123,171 +1080,66 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
 
     srv->store_last_used = time(NULL);
 
-    if (cbm_zova_route_for_project(project) == CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        char path[CBM_SZ_1K];
-        cbm_zova_repository_t *repo = NULL;
-        if (cbm_zova_user_database_path(path, sizeof(path)) != 0 ||
-            !(repo = cbm_zova_repository_open(path, project))) {
-            return NULL;
-        }
-        char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
-        snprintf(workspace_id, sizeof(workspace_id), "%s",
-                 cbm_zova_repository_workspace_id(repo));
-        cbm_zova_repository_close(repo);
-        if (cbm_zova_workspace_id_validate(workspace_id) != 0) return NULL;
-        if (srv->owns_store && srv->store) cbm_store_close(srv->store);
-        srv->store = cbm_store_open_zova_workspace_query(path, workspace_id);
-        srv->owns_store = srv->store != NULL;
-        free(srv->current_project);
-        srv->current_project = srv->store ? heap_strdup(project) : NULL;
-        return srv->store;
-    }
-
-    /* Already open for this project? */
-    if (srv->current_project && strcmp(srv->current_project, project) == 0 && srv->store) {
-        return srv->store;
-    }
-
-    /* Close old store */
-    if (srv->owns_store && srv->store) {
-        cbm_store_close(srv->store);
-        srv->store = NULL;
-    }
-
-    /* Open project's .db file — query-only open (no SQLITE_OPEN_CREATE) to
-     * prevent ghost .db file creation for unknown/unindexed projects. */
     char path[CBM_SZ_1K];
-    project_db_path(project, path, sizeof(path));
-    srv->store = cbm_store_open_path_query(path);
-    if (srv->store) {
-        /* Check DB integrity — quarantine only on CONFIRMED corruption
-         * (upstream #1206/#1037). The plain bool check cannot tell a malformed
-         * projects table from a transient SQLITE_BUSY/LOCKED race with another
-         * instance holding the writer lock, and it never runs quick_check, so
-         * page-torn DBs with an intact projects table sail through. */
-        cbm_integrity_verdict_t verdict = cbm_store_check_integrity_verdict(srv->store);
-        if (verdict == CBM_INTEGRITY_TRANSIENT) {
-            /* The DB could not be conclusively evaluated (lock contention,
-             * busy writer, IO hiccup). Do NOT quarantine — close and let the
-             * next resolve retry. A spurious quarantine here is exactly what
-             * destroys healthy DBs under concurrent access. */
-            cbm_log_error("store.integrity_transient", "project", project, "path", path, "action",
-                          "integrity inconclusive (lock/IO) — not quarantining, retry on next "
-                          "resolve");
-            cbm_store_close(srv->store);
-            srv->store = NULL;
-            return NULL;
-        }
-        if (verdict == CBM_INTEGRITY_CORRUPT) {
-            cbm_log_error("store.auto_clean", "project", project, "path", path, "action",
-                          "backing up corrupt db to .corrupt — re-index required");
-            cbm_store_close(srv->store);
-            srv->store = NULL;
-            /* #557 (data loss): rename the corrupt DB to a .corrupt backup instead
-             * of unlinking it, so the user's graph is recoverable / reportable.
-             * Re-index rebuilds a fresh DB at `path`. WAL/SHM are transient. */
-            char bak_path[MCP_FIELD_SIZE];
-            snprintf(bak_path, sizeof(bak_path), "%s.corrupt", path);
-            cbm_unlink(bak_path); /* clear any prior backup so rename succeeds on Windows */
-            if (rename(path, bak_path) != 0) {
-                cbm_unlink(path); /* rename failed (e.g. cross-device) — fall back to delete */
-            }
-            char wal_path[MCP_FIELD_SIZE];
-            char shm_path[MCP_FIELD_SIZE];
-            snprintf(wal_path, sizeof(wal_path), "%s-wal", path);
-            snprintf(shm_path, sizeof(shm_path), "%s-shm", path);
-            cbm_unlink(wal_path);
-            cbm_unlink(shm_path);
-            return NULL;
-        }
-
-        /* Verify the project actually exists in this database.
-         * A .db file may exist but be empty (e.g., after delete_project on
-         * Linux where unlink defers actual removal). Opening an empty/deleted
-         * store without closing it leaks the SQLite connection. */
-        cbm_project_t proj_verify = {0};
-        if (cbm_store_get_project(srv->store, project, &proj_verify) == CBM_STORE_OK) {
-            cbm_project_free_fields(&proj_verify);
-            srv->owns_store = true;
-            free(srv->current_project);
-            srv->current_project = heap_strdup(project);
-            return srv->store; /* fast path: filename == internal name */
-        }
-        /* #704: <project>.db exists but its INTERNAL project name differs from
-         * the passed name (a copied/renamed db, or a legacy '.'-vs-'-' username
-         * twin). Close it and fall through to the cache-dir scan below. */
-        cbm_store_close(srv->store);
-        srv->store = NULL;
+    cbm_zova_repository_t *repo = NULL;
+    if (cbm_zova_user_database_path(path, sizeof(path)) != 0 ||
+        !(repo = cbm_zova_repository_open(path, project))) {
+        return NULL;
     }
-
-    /* #704 fallback: either <project>.db is absent or its internal name drifted
-     * from its filename. Node rows are keyed on the INTERNAL name (== the passed
-     * name, since list_projects now advertises internal names), so scan the
-     * cache dir for the db whose sole internal project name equals `project` and
-     * adopt it. Runs ONLY on the fallback — the common fast path is unchanged.
-     * No match → NULL (a genuine typo stays not-found). */
-    cbm_store_t *scanned = resolve_store_fallback_scan(project);
-    if (scanned) {
-        srv->store = scanned;
-        srv->owns_store = true;
-        free(srv->current_project);
-        srv->current_project = heap_strdup(project);
-    }
-
+    char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
+    snprintf(workspace_id, sizeof(workspace_id), "%s",
+             cbm_zova_repository_workspace_id(repo));
+    cbm_zova_repository_close(repo);
+    if (cbm_zova_workspace_id_validate(workspace_id) != 0) return NULL;
+    if (srv->owns_store && srv->store) cbm_store_close(srv->store);
+    srv->store = cbm_store_open_zova_workspace_query(path, workspace_id);
+    srv->owns_store = srv->store != NULL;
+    free(srv->current_project);
+    srv->current_project = srv->store ? heap_strdup(project) : NULL;
     return srv->store;
 }
-
-/* Forward decl — definition lives below alongside list_projects. */
-static bool is_project_db_file(const char *name, size_t len);
 
 /* Forward decl — definition lives below in handle_trace_call_path's helpers. */
 static void free_node_contents(cbm_node_t *n);
 
-/* Scan cache dir for .db files, writing comma-separated quoted names into out.
- * Returns the number of projects found. */
-static int collect_db_project_names(const char *dir_path, char *out, size_t out_sz) {
+/* Write the shared cbm.zova catalog's project selectors into out as
+ * comma-separated quoted names. Returns the number of projects written. */
+static int collect_zova_project_names(char *out, size_t out_sz) {
     int count = 0;
     int offset = 0;
-    cbm_dir_t *d = cbm_opendir(dir_path);
-    if (!d) {
+    char path[CBM_SZ_1K];
+    if (cbm_zova_user_database_path(path, sizeof(path)) != 0 || !cbm_file_exists(path)) {
         return 0;
     }
-    cbm_dirent_t *entry;
-    while ((entry = cbm_readdir(d)) != NULL) {
-        const char *n = entry->name;
-        size_t len = strlen(n);
-        if (!is_project_db_file(n, len)) {
-            continue;
-        }
-        /* #704: advertise the db's INTERNAL project name, not its filename, and
-         * skip ghost/empty/corrupt dbs — so the hint lists names the user can
-         * actually pass to resolve a store. */
-        char full_path[CBM_SZ_2K];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, n);
-        char iname[CBM_SZ_1K];
-        if (!db_internal_project_name(full_path, iname, sizeof(iname), NULL)) {
-            continue;
-        }
+    cbm_zova_catalog_t *catalog = cbm_zova_catalog_open(path);
+    cbm_zova_catalog_scope_t listed = {0};
+    if (!catalog || cbm_zova_catalog_list(catalog, &listed) != CBM_STORE_OK) {
+        cbm_zova_catalog_close(catalog);
+        return 0;
+    }
+    for (int i = 0; i < listed.count; i++) {
+        const char *name = listed.projects[i].selector;
         /* Element-boundary write: only emit this name if the WHOLE element —
-         * optional leading comma + "iname" — plus the NUL fits in what remains.
+         * optional leading comma + "name" — plus the NUL fits in what remains.
          * Never truncate mid-token; a partial name would corrupt the JSON array
          * (issue #235). Stop cleanly at the last name that fits: the array then
          * always holds complete names and `count` == its length. */
         size_t off = (size_t)offset;
-        size_t need = strlen(iname) + 2 /* quotes */ + (count > 0 ? 1u : 0u) /* comma */;
+        size_t need = strlen(name) + 2 /* quotes */ + (count > 0 ? 1u : 0u) /* comma */;
         if (off + need + 1 > out_sz) {
             break; /* would not fit entirely — stop at this element boundary */
         }
         if (count > 0) {
             out[offset++] = ',';
         }
-        int wrote = snprintf(out + offset, out_sz - (size_t)offset, "\"%s\"", iname);
+        int wrote = snprintf(out + offset, out_sz - (size_t)offset, "\"%s\"", name);
         if (wrote > 0) {
             offset += wrote; /* guaranteed to fit (checked above) — no truncation */
         }
         count++;
     }
-    cbm_closedir(d);
+    cbm_zova_catalog_scope_free(&listed);
+    cbm_zova_catalog_close(catalog);
     return count;
 }
 
@@ -1324,11 +1176,8 @@ static void add_git_context_json(yyjson_mut_doc *doc, yyjson_mut_val *obj, const
 
 /* Build a helpful error listing available projects. Caller must free() result. */
 static char *build_project_list_error(const char *reason) {
-    char dir_path[CBM_SZ_1K];
-    cache_dir(dir_path, sizeof(dir_path));
-
     char projects[CBM_SZ_4K] = "";
-    int count = collect_db_project_names(dir_path, projects, sizeof(projects));
+    int count = collect_zova_project_names(projects, sizeof(projects));
 
     enum { ERR_BUF_SZ = 5120 };
     char buf[ERR_BUF_SZ];
@@ -1379,124 +1228,6 @@ static char *build_no_store_error(const char *project) {
 
 /* ── Tool handler implementations ─────────────────────────────── */
 
-/* Return true if filename is a valid project .db file (not temp/internal).
- *
- * Project names derived from /tmp/... source roots legitimately begin with
- * "tmp-" (cbm_project_name_from_path: "/tmp/bench/..." → "tmp-bench-...";
- * see tests/test_pipeline.c fixtures), so the prefix must NOT be excluded.
- * The "_" prefix is reserved for internal/hidden DBs, and ":memory:" is the
- * SQLite in-memory marker (defensive — never appears as a real file). */
-static bool is_project_db_file(const char *name, size_t len) {
-    if (len < MCP_MIN_DB_NAME || strcmp(name + len - MCP_DB_EXT, ".db") != 0) {
-        return false;
-    }
-    if (strncmp(name, "_", SLEN("_")) == 0 || strncmp(name, ":memory:", SLEN(":memory:")) == 0) {
-        return false;
-    }
-    return true;
-}
-
-/* db_internal_project_name — see forward declaration above resolve_store. */
-static bool db_internal_project_name(const char *full_path, char *name_out, size_t name_sz,
-                                     cbm_store_t **out_store) {
-    if (out_store) {
-        *out_store = NULL;
-    }
-    cbm_store_t *st = cbm_store_open_path_query(full_path);
-    if (!st) {
-        return false; /* nonexistent / unreadable */
-    }
-    cbm_project_t *projs = NULL;
-    int n = 0;
-    bool ok = false;
-    if (cbm_store_list_projects(st, &projs, &n) == CBM_STORE_OK && n == 1 && projs[0].name &&
-        projs[0].name[0]) {
-        snprintf(name_out, name_sz, "%s", projs[0].name);
-        ok = true;
-    }
-    cbm_store_free_projects(projs, n);
-    if (ok && out_store) {
-        *out_store = st; /* transfer ownership to caller */
-    } else {
-        cbm_store_close(st);
-    }
-    return ok;
-}
-
-/* resolve_store_fallback_scan — see forward declaration above resolve_store. */
-static cbm_store_t *resolve_store_fallback_scan(const char *project) {
-    char dir_path[CBM_SZ_1K];
-    cache_dir(dir_path, sizeof(dir_path));
-    cbm_dir_t *d = cbm_opendir(dir_path);
-    if (!d) {
-        return NULL;
-    }
-    cbm_store_t *found = NULL;
-    cbm_dirent_t *entry;
-    while ((entry = cbm_readdir(d)) != NULL) {
-        const char *n = entry->name;
-        size_t len = strlen(n);
-        if (!is_project_db_file(n, len)) {
-            continue;
-        }
-        char full_path[CBM_SZ_2K];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, n);
-        char iname[CBM_SZ_1K];
-        cbm_store_t *st = NULL;
-        if (db_internal_project_name(full_path, iname, sizeof(iname), &st)) {
-            if (strcmp(iname, project) == 0) {
-                found = st; /* adopt — caller takes ownership */
-                break;
-            }
-            cbm_store_close(st);
-        }
-    }
-    cbm_closedir(d);
-    return found;
-}
-
-/* Open a .db file briefly, collect node/edge counts and root_path,
- * then append a JSON entry to arr. */
-static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, const char *dir_path,
-                                     const char *name, size_t name_len, int64_t size_bytes) {
-    (void)name_len;
-
-    char full_path[CBM_SZ_2K];
-    snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
-
-    /* #704: key on the db's INTERNAL project name, not its filename. Node/edge
-     * rows are tagged with the internal name, so a drifted filename (copied or
-     * renamed db, legacy '.'-vs-'-' username twin) would otherwise report 0
-     * nodes/edges and be unresolvable. Skip ghost/empty/corrupt dbs entirely so
-     * they don't appear as resolvable projects. */
-    char project_name[CBM_SZ_1K];
-    cbm_store_t *pstore = NULL;
-    if (!db_internal_project_name(full_path, project_name, sizeof(project_name), &pstore)) {
-        return; /* ghost / unreadable — not a resolvable project */
-    }
-
-    int nodes = cbm_store_count_nodes(pstore, project_name);
-    int edges = cbm_store_count_edges(pstore, project_name);
-    char root_path_buf[CBM_SZ_1K] = "";
-    cbm_project_t proj = {0};
-    if (cbm_store_get_project(pstore, project_name, &proj) == CBM_STORE_OK) {
-        if (proj.root_path) {
-            snprintf(root_path_buf, sizeof(root_path_buf), "%s", proj.root_path);
-        }
-        cbm_project_free_fields(&proj);
-    }
-    cbm_store_close(pstore);
-
-    yyjson_mut_val *p = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_strcpy(doc, p, "name", project_name);
-    yyjson_mut_obj_add_strcpy(doc, p, "root_path", root_path_buf);
-    add_git_context_json(doc, p, root_path_buf[0] ? root_path_buf : NULL);
-    yyjson_mut_obj_add_int(doc, p, "nodes", nodes);
-    yyjson_mut_obj_add_int(doc, p, "edges", edges);
-    yyjson_mut_obj_add_int(doc, p, "size_bytes", size_bytes);
-    yyjson_mut_arr_add_val(arr, p);
-}
-
 static char *handle_list_zova_projects(void) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -1542,74 +1273,18 @@ static char *handle_list_zova_projects(void) {
     return result;
 }
 
-/* list_projects: scan cache directory for .db files in compatibility mode.
- * Full-authority Zova uses the workspace catalog in the shared database. */
+/* list_projects: the workspace catalog in the shared cbm.zova. */
 static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     (void)srv;
     (void)args;
-
-    if (cbm_zova_route_for_project(NULL) == CBM_ZOVA_ROUTE_FULL_AUTHORITY)
-        return handle_list_zova_projects();
-
-    char dir_path[CBM_SZ_1K];
-    cache_dir(dir_path, sizeof(dir_path));
-
-    cbm_dir_t *d = cbm_opendir(dir_path);
-
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-    yyjson_mut_val *arr = yyjson_mut_arr(doc);
-
-    if (!d) {
-        char msg[CBM_SZ_1K];
-        snprintf(msg, sizeof(msg),
-                 "{\"error\":\"cannot read cache directory: %s\",\"hint\":"
-                 "\"Check directory permissions or run index_repository first.\"}",
-                 dir_path);
-        yyjson_mut_doc_free(doc);
-        return cbm_mcp_text_result(msg, true);
-    }
-
-    cbm_dirent_t *entry;
-    while ((entry = cbm_readdir(d)) != NULL) {
-        const char *name = entry->name;
-        size_t len = strlen(name);
-        if (!is_project_db_file(name, len)) {
-            continue;
-        }
-        char full_path[CBM_SZ_2K];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
-        int64_t size_bytes = cbm_file_size(full_path);
-        if (size_bytes < 0) {
-            continue;
-        }
-        build_project_json_entry(doc, arr, dir_path, name, len, size_bytes);
-    }
-    cbm_closedir(d);
-
-    yyjson_mut_obj_add_val(doc, root, "projects", arr);
-
-    /* Guide user when no projects are indexed */
-    if (yyjson_mut_arr_size(arr) == 0) {
-        yyjson_mut_obj_add_str(doc, root, "hint",
-                               "No projects indexed. Call index_repository(repo_path=...) first.");
-    }
-
-    char *json = yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
-
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return handle_list_zova_projects();
 }
 
 /* verify_project_indexed — returns a heap-allocated error JSON string when the
  * named project has not been indexed yet, or NULL when the project exists.
- * resolve_store uses cbm_store_open_path_query (no SQLITE_OPEN_CREATE), so
- * store is NULL for missing .db files (REQUIRE_STORE fires first). This
- * function catches the remaining case: a .db file exists but has no indexed
- * nodes (e.g., an empty or half-initialised project).
+ * resolve_store returns NULL for a project missing from cbm.zova
+ * (REQUIRE_STORE fires first). This function catches the remaining case: the
+ * store opened but has no project row.
  * Callers that receive a non-NULL return value must free(project) themselves
  * before returning the error string. */
 static char *verify_project_indexed(cbm_store_t *store, const char *project) {
@@ -1739,39 +1414,7 @@ enum {
     BM25_SEP_RESERVE = 1,
     BM25_QUERY_BUF = 1024,
     BM25_DEFAULT_LIMIT = 100,
-    BM25_COL_ID = 0,
-    BM25_COL_LABEL = 1,
-    BM25_COL_NAME = 2,
-    BM25_COL_QN = 3,
-    BM25_COL_FILE = 4,
-    BM25_COL_START = 5,
-    BM25_COL_END = 6,
-    BM25_COL_RANK = 7,
-    BM25_BIND_QUERY = 1,
-    BM25_BIND_PROJECT = 2,
-    BM25_BIND_LIMIT = 3,
-    BM25_BIND_OFFSET = 4,
-    BM25_BIND_INNER = 5,
-    BM25_BIND_FILE = 6,
-    BM25_SQL_AUTO_LEN = -1,
-    /* Inner FTS5 candidate cap.  SQLite can early-terminate a plain FTS5 query
-     * (no JOIN/WHERE on outer table) of the form:
-     *   SELECT rowid, bm25() FROM nodes_fts WHERE MATCH ? ORDER BY bm25() LIMIT N
-     * By fetching only the top BM25_INNER_LIMIT candidates from the FTS5 index
-     * and then joining/filtering/re-ranking those, we bound all work to O(N) where
-     * N = BM25_INNER_LIMIT rather than the full match set size. */
-    BM25_INNER_LIMIT = 2000,
 };
-
-/* Module-local SQLITE_TRANSIENT wrapper to dodge performance-no-int-to-ptr.
- * See the matching helper in src/store/store.c for the same pattern. */
-static sqlite3_destructor_type mcp_sqlite_transient(void) {
-    static const volatile intptr_t raw = -1;
-    sqlite3_destructor_type dtor = NULL;
-    memcpy(&dtor, (const void *)&raw, sizeof(dtor));
-    return dtor;
-}
-#define MCP_SQLITE_TRANSIENT (mcp_sqlite_transient())
 
 static int bm25_build_match(const char *query, char *out, size_t out_size) {
     if (!query || !out || out_size < BM25_MIN_BUF) {
@@ -1844,161 +1487,6 @@ static bool zova_fts_match(const char *query, char *out, size_t out_size) {
         return snprintf(out, out_size, "%s", query) < (int)out_size;
     }
     return bm25_build_match(query, out, out_size) > 0;
-}
-
-static char *bm25_file_pattern_like(const char *file_pattern) {
-    if (!file_pattern) {
-        return NULL;
-    }
-    char *like = cbm_glob_to_like(file_pattern);
-    if (like && !strchr(file_pattern, '*') && !strchr(file_pattern, '?')) {
-        size_t len = strlen(like);
-        char *contains = malloc(len + MCP_SEPARATOR + SKIP_ONE);
-        if (contains) {
-            contains[0] = '%';
-            memcpy(contains + SKIP_ONE, like, len);
-            contains[len + SKIP_ONE] = '%';
-            contains[len + MCP_SEPARATOR] = '\0';
-            free(like);
-            like = contains;
-        }
-    }
-    return like;
-}
-
-/* Run the BM25 full-text search path and return the JSON result string.
- * Returns NULL if FTS5 is unavailable or the query produced no usable tokens,
- * in which case the caller falls back to the regex-based search path. */
-static char *bm25_search(cbm_store_t *store, const char *project, const char *query,
-                         const char *file_pattern, int limit, int offset) {
-    sqlite3 *db = cbm_store_get_db(store);
-    if (!db) {
-        return NULL;
-    }
-    char fts_query[BM25_QUERY_BUF];
-    int tok_count = bm25_build_match(query, fts_query, sizeof(fts_query));
-    if (tok_count == 0) {
-        return NULL;
-    }
-    char *file_like = bm25_file_pattern_like(file_pattern);
-
-    /* BM25 ranked query using a two-step approach to enable FTS5 early termination.
-     *
-     * Flat queries of the form:
-     *   SELECT ... FROM nodes_fts JOIN nodes WHERE MATCH ? AND n.project=? ORDER BY rank LIMIT N
-     * block FTS5's WAND/MaxScore early-exit because the outer JOIN+WHERE conditions
-     * are invisible to the FTS5 planner — it must score every matching document before
-     * the project/label filter can discard any of them.  On a large codebase with 100K+
-     * matches, this causes multi-minute queries.
-     *
-     * The fix: let FTS5 drive the inner subquery alone.  SQLite CAN early-terminate
-     *   SELECT rowid, bm25(nodes_fts) FROM nodes_fts WHERE MATCH ? ORDER BY bm25() LIMIT N
-     * because no outer predicate blocks it.  We fetch BM25_INNER_LIMIT top candidates
-     * from the FTS5 index, then join/filter/boost only those rows.  bm25() returns a
-     * NEGATIVE score (lower = more relevant). */
-    const char *sql =
-        "SELECT n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, "
-        "       (fts.base_rank "
-        "        - CASE WHEN n.label IN ('Function','Method') THEN 10.0 "
-        "               WHEN n.label = 'Route' THEN 8.0 "
-        "               WHEN n.label IN ('Class','Interface','Type','Enum') THEN 5.0 "
-        "               ELSE 0.0 END) AS rank "
-        "FROM ("
-        "    SELECT rowid, bm25(nodes_fts) AS base_rank"
-        "    FROM nodes_fts WHERE nodes_fts MATCH ?1"
-        "    ORDER BY base_rank LIMIT ?5"
-        ") fts "
-        "JOIN nodes n ON n.id = fts.rowid "
-        "WHERE n.project = ?2 "
-        "  AND n.label NOT IN ('File','Folder','Module','Section','Variable','Project') "
-        "  AND (?6 IS NULL OR n.file_path LIKE ?6) "
-        "ORDER BY rank, n.qualified_name, n.id "
-        "LIMIT ?3 OFFSET ?4";
-
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db, sql, BM25_SQL_AUTO_LEN, &stmt, NULL) != SQLITE_OK) {
-        free(file_like);
-        return NULL;
-    }
-    sqlite3_bind_text(stmt, BM25_BIND_QUERY, fts_query, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, BM25_BIND_PROJECT, project, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, BM25_BIND_LIMIT, limit > 0 ? limit : BM25_DEFAULT_LIMIT);
-    sqlite3_bind_int(stmt, BM25_BIND_OFFSET, offset > 0 ? offset : 0);
-    sqlite3_bind_int(stmt, BM25_BIND_INNER, BM25_INNER_LIMIT);
-    if (file_like) {
-        sqlite3_bind_text(stmt, BM25_BIND_FILE, file_like, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
-    } else {
-        sqlite3_bind_null(stmt, BM25_BIND_FILE);
-    }
-
-    /* Count hits within the same inner-limit window — capped at BM25_INNER_LIMIT.
-     * Uses the identical subquery structure so the FTS5 early-exit applies here too. */
-    int total = 0;
-    {
-        const char *count_sql =
-            "SELECT COUNT(*) FROM ("
-            "    SELECT fts.rowid FROM ("
-            "        SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1"
-            "        ORDER BY bm25(nodes_fts) LIMIT ?3"
-            "    ) fts "
-            "    JOIN nodes n ON n.id = fts.rowid "
-            "    WHERE n.project = ?2 "
-            "      AND n.label NOT IN ('File','Folder','Module','Section','Variable','Project')"
-            "      AND (?6 IS NULL OR n.file_path LIKE ?6)"
-            ")";
-        sqlite3_stmt *cs = NULL;
-        if (sqlite3_prepare_v2(db, count_sql, BM25_SQL_AUTO_LEN, &cs, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(cs, BM25_BIND_QUERY, fts_query, BM25_SQL_AUTO_LEN,
-                              MCP_SQLITE_TRANSIENT);
-            sqlite3_bind_text(cs, BM25_BIND_PROJECT, project, BM25_SQL_AUTO_LEN,
-                              MCP_SQLITE_TRANSIENT);
-            sqlite3_bind_int(cs, BM25_BIND_LIMIT, BM25_INNER_LIMIT);
-            if (file_like) {
-                sqlite3_bind_text(cs, BM25_BIND_FILE, file_like, BM25_SQL_AUTO_LEN,
-                                  MCP_SQLITE_TRANSIENT);
-            } else {
-                sqlite3_bind_null(cs, BM25_BIND_FILE);
-            }
-            if (sqlite3_step(cs) == SQLITE_ROW) {
-                total = sqlite3_column_int(cs, 0);
-            }
-            sqlite3_finalize(cs);
-        }
-    }
-
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-    yyjson_mut_obj_add_int(doc, root, "total", total);
-    yyjson_mut_obj_add_str(doc, root, "search_mode", "bm25");
-
-    yyjson_mut_val *results = yyjson_mut_arr(doc);
-    int emitted = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        yyjson_mut_val *item = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_strcpy(doc, item, "name",
-                                  (const char *)sqlite3_column_text(stmt, BM25_COL_NAME));
-        yyjson_mut_obj_add_strcpy(doc, item, "qualified_name",
-                                  (const char *)sqlite3_column_text(stmt, BM25_COL_QN));
-        yyjson_mut_obj_add_strcpy(doc, item, "label",
-                                  (const char *)sqlite3_column_text(stmt, BM25_COL_LABEL));
-        yyjson_mut_obj_add_strcpy(doc, item, "file_path",
-                                  (const char *)sqlite3_column_text(stmt, BM25_COL_FILE));
-        yyjson_mut_obj_add_int(doc, item, "start_line", sqlite3_column_int(stmt, BM25_COL_START));
-        yyjson_mut_obj_add_int(doc, item, "end_line", sqlite3_column_int(stmt, BM25_COL_END));
-        yyjson_mut_obj_add_real(doc, item, "rank", sqlite3_column_double(stmt, BM25_COL_RANK));
-        yyjson_mut_arr_add_val(results, item);
-        emitted++;
-    }
-    sqlite3_finalize(stmt);
-    free(file_like);
-
-    yyjson_mut_obj_add_val(doc, root, "results", results);
-    yyjson_mut_obj_add_bool(doc, root, "has_more", total > offset + emitted);
-
-    char *json = yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
-    return json;
 }
 
 /* Forward declaration — defined later. enrich_node_properties parses the
@@ -2317,10 +1805,6 @@ static void emit_catalog_scope(yyjson_mut_doc *doc, yyjson_mut_val *root,
 
 static char *handle_search_graph_catalog(const char *args,
                                          const cbm_mcp_project_scope_t *requested) {
-    if (cbm_zova_route_for_project(NULL) != CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        return cbm_mcp_text_result(
-            "multi-project search requires Zova full authority", true);
-    }
     if (cbm_mcp_get_bool_arg(args, "include_connected")) {
         return cbm_mcp_text_result(
             "include_connected is not supported for multi-project search", true);
@@ -2483,426 +1967,150 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
     char *project = scope.project;
     scope.project = NULL;
     project_scope_free(&scope);
-    if (cbm_zova_route_for_project(project) == CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        return handle_search_graph_flagged(args, project);
-    }
-    cbm_store_t *store = resolve_store(srv, project);
-    REQUIRE_STORE(store, project);
-
-    char *not_indexed = verify_project_indexed(store, project);
-    if (not_indexed) {
-        free(project);
-        return not_indexed;
-    }
-
-    /* BM25 path: if `query` is set, run FTS5 full-text search with ranking
-     * and return early.  The regex/vector path below is untouched for all
-     * other callers.  If FTS5 is unavailable or the query is empty after
-     * tokenization, fall through to the regex path. */
-    char *query = cbm_mcp_get_string_arg(args, "query");
-    if (query && query[0]) {
-        int q_limit = cbm_mcp_get_int_arg(args, "limit", BM25_DEFAULT_LIMIT);
-        int q_offset = cbm_mcp_get_int_arg(args, "offset", 0);
-        char *q_file_pattern = cbm_mcp_get_string_arg(args, "file_pattern");
-        char *bm25_json = bm25_search(store, project, query, q_file_pattern, q_limit, q_offset);
-        free(q_file_pattern);
-        if (bm25_json) {
-            free(query);
-            free(project);
-            char *result = cbm_mcp_text_result(bm25_json, false);
-            free(bm25_json);
-            return result;
-        }
-    }
-    free(query);
-
-    char *label = cbm_mcp_get_string_arg(args, "label");
-    char *name_pattern = cbm_mcp_get_string_arg(args, "name_pattern");
-    char *qn_pattern = cbm_mcp_get_string_arg(args, "qn_pattern");
-    char *file_pattern = cbm_mcp_get_string_arg(args, "file_pattern");
-    char *relationship = cbm_mcp_get_string_arg(args, "relationship");
-    bool exclude_entry_points = cbm_mcp_get_bool_arg(args, "exclude_entry_points");
-    bool include_connected = cbm_mcp_get_bool_arg(args, "include_connected");
-    int limit = cbm_mcp_get_int_arg(args, "limit", CBM_DEFAULT_SEARCH_LIMIT);
-    int offset = cbm_mcp_get_int_arg(args, "offset", 0);
-    int min_degree = cbm_mcp_get_int_arg(args, "min_degree", CBM_NOT_FOUND);
-    int max_degree = cbm_mcp_get_int_arg(args, "max_degree", CBM_NOT_FOUND);
-
-    /* Structural filters present? A semantic_query with NO structural filter
-     * must not also run the UNFILTERED regex search: that prepended up to
-     * `limit` unrelated enriched nodes to a purely semantic request. The
-     * flagged (full-authority) path has the same gate. (Upstream 108740d8.) */
-    bool has_structural_filters = !search_args_has_semantic_query(args) || label || name_pattern ||
-                                  qn_pattern || file_pattern ||
-                                  relationship || exclude_entry_points ||
-                                  min_degree != CBM_NOT_FOUND || max_degree != CBM_NOT_FOUND;
-
-    if (relationship && !validate_edge_type(relationship)) {
-        free(project);
-        free(label);
-        free(name_pattern);
-        free(qn_pattern);
-        free(file_pattern);
-        free(relationship);
-        return cbm_mcp_text_result("relationship must be uppercase letters and underscores", true);
-    }
-
-    cbm_search_params_t params = {
-        .project = project,
-        .label = label,
-        .name_pattern = name_pattern,
-        .qn_pattern = qn_pattern,
-        .file_pattern = file_pattern,
-        .relationship = relationship,
-        .exclude_entry_points = exclude_entry_points,
-        .include_connected = include_connected,
-        .limit = limit,
-        .offset = offset,
-        .min_degree = min_degree,
-        .max_degree = max_degree,
-    };
-
-    cbm_search_output_t out = {0};
-    if (has_structural_filters) {
-        cbm_store_search(store, &params, &out);
-    }
-
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-
-    yyjson_doc **props_docs = NULL;
-    int props_doc_count = 0;
-    if (has_structural_filters) {
-        emit_search_results(doc, root, &out, store, relationship, include_connected, offset,
-                            &props_docs, &props_doc_count);
-    }
-
-    /* Add diagnostic hint when zero results — only meaningful when the
-     * structural search actually ran (a semantic-only request legitimately
-     * has zero structural results). */
-    if (has_structural_filters && out.total == 0) {
-        if (name_pattern && label) {
-            yyjson_mut_obj_add_str(
-                doc, root, "hint",
-                "No results. Try removing the label filter or broadening the name_pattern regex.");
-        } else if (name_pattern) {
-            yyjson_mut_obj_add_str(
-                doc, root, "hint",
-                "No nodes match this pattern. Check spelling or try a broader regex.");
-        } else if (label) {
-            yyjson_mut_obj_add_str(
-                doc, root, "hint",
-                "No nodes with this label. Available labels: Function, Method, Class, "
-                "Interface, Route, Variable, Module, Package, File, Folder.");
-        }
-    }
-
-    bool sq_type_error = run_semantic_query(doc, root, args, store, project, limit);
-
-    if (sq_type_error) {
-        for (int pi = 0; pi < props_doc_count; pi++) {
-            yyjson_doc_free(props_docs[pi]);
-        }
-        free(props_docs);
-        yyjson_mut_doc_free(doc);
-        cbm_store_search_free(&out);
-        free(project);
-        free(label);
-        free(name_pattern);
-        free(qn_pattern);
-        free(file_pattern);
-        free(relationship);
-        return cbm_mcp_text_result(
-            "semantic_query must be an array of keyword strings, e.g. "
-            "[\"send\",\"pubsub\",\"publish\"] — not a single string. Split your query "
-            "into individual keywords; each is scored independently via per-keyword "
-            "min-cosine.",
-            true);
-    }
-
-    char *json = yy_doc_to_str(doc);
-    /* Property docs are zero-copy referenced by the mut doc — they must
-     * outlive yy_doc_to_str. Free them once serialization is complete. */
-    for (int pi = 0; pi < props_doc_count; pi++) {
-        yyjson_doc_free(props_docs[pi]);
-    }
-    free(props_docs);
-    yyjson_mut_doc_free(doc);
-    cbm_store_search_free(&out);
-
-    free(project);
-    free(label);
-    free(name_pattern);
-    free(qn_pattern);
-    free(file_pattern);
-    free(relationship);
-
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return handle_search_graph_flagged(args, project);
 }
 
 static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     char *query = cbm_mcp_get_string_arg(args, "query");
     char *project = get_project_arg(args);
-    if (cbm_zova_route_for_project(project) == CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        char path[CBM_SZ_1K];
-        cbm_zova_repository_t *repo = NULL;
-        if (!query) {
-            free(project);
-            return cbm_mcp_text_result("query is required", true);
-        }
-        if (!project || cbm_zova_user_database_path(path, sizeof(path)) != 0 ||
-            !(repo = cbm_zova_repository_open(path, project)) ||
-            cbm_zova_workspace_id_validate(cbm_zova_repository_workspace_id(repo)) != 0) {
-            if (repo) cbm_zova_repository_close(repo);
-            free(query); free(project);
-            return cbm_mcp_text_result("workspace-scoped Zova Cypher request is invalid", true);
-        }
-        const char *workspace_id = cbm_zova_repository_workspace_id(repo);
-        char workspace_copy[CBM_ZOVA_WORKSPACE_ID_MAX];
-        snprintf(workspace_copy, sizeof(workspace_copy), "%s", workspace_id);
-        int64_t generation = 0;
-        char *indexed_at = NULL;
-        if (cbm_zova_repository_index_status(repo, workspace_id, &generation,
-                                             &indexed_at) != CBM_STORE_OK) {
-            cbm_zova_repository_close(repo);
-            free(query); free(project); free(indexed_at);
-            return cbm_mcp_text_result("could not bind Cypher request generation", true);
-        }
-        free(indexed_at);
-        cbm_query_t *plan = NULL;
-        char *parse_error = NULL;
-        if (cbm_cypher_parse(query, &plan, &parse_error) != 0) {
-            char diagnostic[CBM_SZ_1K];
-            snprintf(diagnostic, sizeof(diagnostic),
-                     "route=unsupported workspace=%s operator=parser reason=%s",
-                     workspace_copy, parse_error ? parse_error : "Cypher parse failed");
-            cbm_zova_repository_close(repo);
-            free(query); free(project);
-            char *response = cbm_mcp_text_result(diagnostic, true);
-            free(parse_error);
-            return response;
-        }
-        const char *route_reason = NULL;
-        cbm_cypher_route_t route = cbm_cypher_classify_plan(plan, &route_reason);
-        cbm_query_free(plan);
-        if (route == CBM_CYPHER_ROUTE_UNSUPPORTED) {
-            char diagnostic[CBM_SZ_1K];
-            snprintf(diagnostic, sizeof(diagnostic),
-                     "route=unsupported workspace=%s operator=logical_plan reason=%s",
-                     workspace_copy, route_reason ? route_reason : "unsupported query shape");
-            cbm_zova_repository_close(repo);
-            free(query); free(project); free(parse_error);
-            return cbm_mcp_text_result(diagnostic, true);
-        }
-        free(parse_error);
-        cbm_store_t *zova_store = cbm_store_open_zova_workspace_query(path, workspace_id);
-        if (!zova_store) {
-            cbm_zova_repository_close(repo);
-            free(query); free(project);
-            return cbm_mcp_text_result("could not open workspace-scoped Cypher session", true);
-        }
-        cbm_zova_repository_close(repo);
-        int max_rows = cbm_mcp_get_int_arg(args, "max_rows", 1000);
-        cbm_cypher_result_t result = {0};
-        int rc = cbm_cypher_execute(zova_store, query, project, max_rows, &result);
-        cbm_store_close(zova_store);
-        free(query); free(project);
-        if (rc != 0) {
-            char *error = cbm_mcp_text_result(result.error ? result.error : "Cypher execution failed", true);
-            cbm_cypher_result_free(&result);
-            return error;
-        }
-        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-        yyjson_mut_val *root = yyjson_mut_obj(doc);
-        yyjson_mut_doc_set_root(doc, root);
-        yyjson_mut_val *cols = yyjson_mut_arr(doc);
-        for (int i = 0; i < result.col_count; ++i) yyjson_mut_arr_add_str(doc, cols, result.columns[i]);
-        yyjson_mut_obj_add_val(doc, root, "columns", cols);
-        yyjson_mut_val *rows = yyjson_mut_arr(doc);
-        for (int r = 0; r < result.row_count; ++r) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            for (int c = 0; c < result.col_count; ++c)
-                yyjson_mut_arr_add_str(doc, row, result.rows[r][c] ? result.rows[r][c] : "");
-            yyjson_mut_arr_add_val(rows, row);
-        }
-        yyjson_mut_obj_add_val(doc, root, "rows", rows);
-        yyjson_mut_obj_add_int(doc, root, "total", result.row_count);
-        yyjson_mut_obj_add_str(doc, root, "route",
-                               route == CBM_CYPHER_ROUTE_NATIVE_GRAPH
-                                   ? "native_graph" : "in_database_compat");
-        if (result.warning) {
-            yyjson_mut_obj_add_str(doc, root, "warning", result.warning);
-        }
-        yyjson_mut_obj_add_sint(doc, root, "generation", generation);
-        char *json = yy_doc_to_str(doc);
-        yyjson_mut_doc_free(doc);
-        cbm_cypher_result_free(&result);
-        char *response = cbm_mcp_text_result(json, false);
-        free(json);
-        return response;
-    }
-    cbm_store_t *store = resolve_store(srv, project);
-    int max_rows = cbm_mcp_get_int_arg(args, "max_rows", 0);
-
+    char path[CBM_SZ_1K];
+    cbm_zova_repository_t *repo = NULL;
     if (!query) {
         free(project);
         return cbm_mcp_text_result("query is required", true);
     }
-    if (!store) {
-        char *_err = build_project_list_error("project not found or not indexed");
-        char *_res = cbm_mcp_text_result(_err, true);
-        free(_err);
-        free(project);
-        free(query);
-        return _res;
+    if (!project || cbm_zova_user_database_path(path, sizeof(path)) != 0 ||
+        !(repo = cbm_zova_repository_open(path, project)) ||
+        cbm_zova_workspace_id_validate(cbm_zova_repository_workspace_id(repo)) != 0) {
+        if (repo) cbm_zova_repository_close(repo);
+        free(query); free(project);
+        return cbm_mcp_text_result("workspace-scoped Zova Cypher request is invalid", true);
     }
-
-    char *not_indexed = verify_project_indexed(store, project);
-    if (not_indexed) {
-        free(project);
-        free(query);
-        return not_indexed;
+    const char *workspace_id = cbm_zova_repository_workspace_id(repo);
+    char workspace_copy[CBM_ZOVA_WORKSPACE_ID_MAX];
+    snprintf(workspace_copy, sizeof(workspace_copy), "%s", workspace_id);
+    int64_t generation = 0;
+    char *indexed_at = NULL;
+    if (cbm_zova_repository_index_status(repo, workspace_id, &generation,
+                                         &indexed_at) != CBM_STORE_OK) {
+        cbm_zova_repository_close(repo);
+        free(query); free(project); free(indexed_at);
+        return cbm_mcp_text_result("could not bind Cypher request generation", true);
     }
-
+    free(indexed_at);
+    cbm_query_t *plan = NULL;
+    char *parse_error = NULL;
+    if (cbm_cypher_parse(query, &plan, &parse_error) != 0) {
+        char diagnostic[CBM_SZ_1K];
+        snprintf(diagnostic, sizeof(diagnostic),
+                 "route=unsupported workspace=%s operator=parser reason=%s",
+                 workspace_copy, parse_error ? parse_error : "Cypher parse failed");
+        cbm_zova_repository_close(repo);
+        free(query); free(project);
+        char *response = cbm_mcp_text_result(diagnostic, true);
+        free(parse_error);
+        return response;
+    }
+    const char *route_reason = NULL;
+    cbm_cypher_route_t route = cbm_cypher_classify_plan(plan, &route_reason);
+    cbm_query_free(plan);
+    if (route == CBM_CYPHER_ROUTE_UNSUPPORTED) {
+        char diagnostic[CBM_SZ_1K];
+        snprintf(diagnostic, sizeof(diagnostic),
+                 "route=unsupported workspace=%s operator=logical_plan reason=%s",
+                 workspace_copy, route_reason ? route_reason : "unsupported query shape");
+        cbm_zova_repository_close(repo);
+        free(query); free(project); free(parse_error);
+        return cbm_mcp_text_result(diagnostic, true);
+    }
+    free(parse_error);
+    cbm_store_t *zova_store = cbm_store_open_zova_workspace_query(path, workspace_id);
+    if (!zova_store) {
+        cbm_zova_repository_close(repo);
+        free(query); free(project);
+        return cbm_mcp_text_result("could not open workspace-scoped Cypher session", true);
+    }
+    cbm_zova_repository_close(repo);
+    int max_rows = cbm_mcp_get_int_arg(args, "max_rows", 1000);
     cbm_cypher_result_t result = {0};
-    int rc = cbm_cypher_execute(store, query, project, max_rows, &result);
-
-    if (rc < 0) {
-        char *err_msg = result.error ? result.error : "query execution failed";
-        char *resp = cbm_mcp_text_result(err_msg, true);
+    int rc = cbm_cypher_execute(zova_store, query, project, max_rows, &result);
+    cbm_store_close(zova_store);
+    free(query); free(project);
+    if (rc != 0) {
+        char *error = cbm_mcp_text_result(
+            result.error ? result.error : "Cypher execution failed", true);
         cbm_cypher_result_free(&result);
-        free(query);
-        free(project);
-        return resp;
+        return error;
     }
-
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
-
-    /* columns */
     yyjson_mut_val *cols = yyjson_mut_arr(doc);
-    for (int i = 0; i < result.col_count; i++) {
-        yyjson_mut_arr_add_str(doc, cols, result.columns[i]);
-    }
+    for (int i = 0; i < result.col_count; ++i) yyjson_mut_arr_add_str(doc, cols, result.columns[i]);
     yyjson_mut_obj_add_val(doc, root, "columns", cols);
-
-    /* rows */
     yyjson_mut_val *rows = yyjson_mut_arr(doc);
-    for (int r = 0; r < result.row_count; r++) {
+    for (int r = 0; r < result.row_count; ++r) {
         yyjson_mut_val *row = yyjson_mut_arr(doc);
-        for (int c = 0; c < result.col_count; c++) {
-            yyjson_mut_arr_add_str(doc, row, result.rows[r][c]);
-        }
+        for (int c = 0; c < result.col_count; ++c)
+            yyjson_mut_arr_add_str(doc, row, result.rows[r][c] ? result.rows[r][c] : "");
         yyjson_mut_arr_add_val(rows, row);
     }
     yyjson_mut_obj_add_val(doc, root, "rows", rows);
     yyjson_mut_obj_add_int(doc, root, "total", result.row_count);
+    yyjson_mut_obj_add_str(doc, root, "route",
+                           route == CBM_CYPHER_ROUTE_NATIVE_GRAPH
+                               ? "native_graph" : "in_database_compat");
     if (result.warning) {
         yyjson_mut_obj_add_str(doc, root, "warning", result.warning);
     }
-
-    if (result.row_count == 0) {
-        yyjson_mut_obj_add_str(
-            doc, root, "hint",
-            "Query returned no results. Use get_graph_schema() to see available labels and "
-            "edge types.");
-    }
-
+    yyjson_mut_obj_add_sint(doc, root, "generation", generation);
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
     cbm_cypher_result_free(&result);
-    free(query);
-    free(project);
-
-    char *res = cbm_mcp_text_result(json, false);
+    char *response = cbm_mcp_text_result(json, false);
     free(json);
-    return res;
+    return response;
 }
 
 static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     char *project = get_project_arg(args);
-    if (cbm_zova_route_for_project(project) == CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        char path[CBM_SZ_1K];
-        cbm_zova_repository_t *repo = NULL;
-        if (!project || cbm_zova_user_database_path(path, sizeof(path)) != 0 ||
-            !(repo = cbm_zova_repository_open(path, project))) {
-            free(project);
-            return cbm_mcp_text_result("project not indexed in shared cbm.zova", true);
-        }
-        int nodes = 0, edges = 0;
-        cbm_project_t info = {0};
-        const char *workspace_id = cbm_zova_repository_workspace_id(repo);
-        int rc = cbm_zova_repository_counts(repo, workspace_id, &nodes, &edges);
-        if (rc == CBM_STORE_OK)
-            rc = cbm_zova_repository_get_project(repo, workspace_id, &info);
-        cbm_zova_repository_close(repo);
-        if (rc != CBM_STORE_OK) {
-            free(project);
-            return cbm_mcp_text_result("shared cbm.zova status read failed", true);
-        }
-        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-        yyjson_mut_val *root = yyjson_mut_obj(doc);
-        yyjson_mut_doc_set_root(doc, root);
-        yyjson_mut_obj_add_str(doc, root, "project", project);
-        yyjson_mut_obj_add_int(doc, root, "nodes", nodes);
-        yyjson_mut_obj_add_int(doc, root, "edges", edges);
-        yyjson_mut_obj_add_str(doc, root, "status", nodes > 0 ? "ready" : "empty");
-        yyjson_mut_obj_add_strcpy(doc, root, "root_path", info.root_path ? info.root_path : "");
-        add_git_context_json(doc, root, info.root_path);
-        char *json = yy_doc_to_str(doc);
-        yyjson_mut_doc_free(doc);
-        safe_str_free(&info.name); safe_str_free(&info.indexed_at); safe_str_free(&info.root_path);
+    char path[CBM_SZ_1K];
+    cbm_zova_repository_t *repo = NULL;
+    if (!project || cbm_zova_user_database_path(path, sizeof(path)) != 0 ||
+        !(repo = cbm_zova_repository_open(path, project))) {
         free(project);
-        char *result = cbm_mcp_text_result(json, false);
-        free(json);
-        return result;
+        return cbm_mcp_text_result("project not indexed in shared cbm.zova", true);
     }
-    cbm_store_t *store = resolve_store(srv, project);
-    REQUIRE_STORE(store, project);
-
+    int nodes = 0, edges = 0;
+    cbm_project_t info = {0};
+    const char *workspace_id = cbm_zova_repository_workspace_id(repo);
+    int rc = cbm_zova_repository_counts(repo, workspace_id, &nodes, &edges);
+    if (rc == CBM_STORE_OK)
+        rc = cbm_zova_repository_get_project(repo, workspace_id, &info);
+    cbm_zova_repository_close(repo);
+    if (rc != CBM_STORE_OK) {
+        free(project);
+        return cbm_mcp_text_result("shared cbm.zova status read failed", true);
+    }
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
-
-    if (project) {
-        int nodes = cbm_store_count_nodes(store, project);
-        int edges = cbm_store_count_edges(store, project);
-        yyjson_mut_obj_add_str(doc, root, "project", project);
-        yyjson_mut_obj_add_int(doc, root, "nodes", nodes);
-        yyjson_mut_obj_add_int(doc, root, "edges", edges);
-        yyjson_mut_obj_add_str(doc, root, "status", nodes > 0 ? "ready" : "empty");
-        cbm_project_t proj_info = {0};
-        if (cbm_store_get_project(store, project, &proj_info) == CBM_STORE_OK) {
-            yyjson_mut_obj_add_strcpy(doc, root, "root_path",
-                                      proj_info.root_path ? proj_info.root_path : "");
-            add_git_context_json(doc, root, proj_info.root_path);
-            safe_str_free(&proj_info.name);
-            safe_str_free(&proj_info.indexed_at);
-            safe_str_free(&proj_info.root_path);
-        }
-        if (nodes == 0) {
-            yyjson_mut_obj_add_str(
-                doc, root, "hint",
-                "Project is empty. Re-run index_repository(repo_path=...) to populate.");
-        }
-    } else {
-        yyjson_mut_obj_add_str(doc, root, "status", "no_project");
-    }
-
+    yyjson_mut_obj_add_str(doc, root, "project", project);
+    yyjson_mut_obj_add_int(doc, root, "nodes", nodes);
+    yyjson_mut_obj_add_int(doc, root, "edges", edges);
+    yyjson_mut_obj_add_str(doc, root, "status", nodes > 0 ? "ready" : "empty");
+    yyjson_mut_obj_add_strcpy(doc, root, "root_path", info.root_path ? info.root_path : "");
+    add_git_context_json(doc, root, info.root_path);
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
+    safe_str_free(&info.name); safe_str_free(&info.indexed_at); safe_str_free(&info.root_path);
     free(project);
-
     char *result = cbm_mcp_text_result(json, false);
     free(json);
     return result;
 }
 
-/* delete_project: just erase the .db file (and WAL/SHM). */
+/* delete_project: delete the project's workspace from the shared cbm.zova. */
 static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
     char *name = get_project_arg(args);
     if (!name) {
@@ -2928,51 +2136,25 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
     bool is_error = false;
     cbm_zova_operation_report_t report = {0};
 
-    if (cbm_zova_route_for_project(name) == CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        /* The project is a workspace inside the shared cbm.zova file. */
-        char workspace_id[CBM_SZ_256] = {0};
-        cbm_zova_repository_t *repo = NULL;
-        if (cbm_zova_user_database_path(path, sizeof(path)) == 0 &&
-            (repo = cbm_zova_repository_open(path, name))) {
-            snprintf(workspace_id, sizeof(workspace_id), "%s",
-                     cbm_zova_repository_workspace_id(repo));
-            cbm_zova_repository_close(repo);
-        }
-        cbm_zova_operation_code_t code =
-            workspace_id[0] ? cbm_zova_workspace_delete(path, workspace_id, workspace_id, &report)
-                            : CBM_ZOVA_OPERATION_NOOP;
-        if (code == CBM_ZOVA_OPERATION_OK) {
-            status = "deleted";
-        } else if (code == CBM_ZOVA_OPERATION_NOOP) {
-            is_error = true;
-        } else {
-            status = "delete_failed";
-            error_detail = report.reason;
-            is_error = true;
-        }
+    char workspace_id[CBM_SZ_256] = {0};
+    cbm_zova_repository_t *repo = NULL;
+    if (cbm_zova_user_database_path(path, sizeof(path)) == 0 &&
+        (repo = cbm_zova_repository_open(path, name))) {
+        snprintf(workspace_id, sizeof(workspace_id), "%s",
+                 cbm_zova_repository_workspace_id(repo));
+        cbm_zova_repository_close(repo);
+    }
+    cbm_zova_operation_code_t code =
+        workspace_id[0] ? cbm_zova_workspace_delete(path, workspace_id, workspace_id, &report)
+                        : CBM_ZOVA_OPERATION_NOOP;
+    if (code == CBM_ZOVA_OPERATION_OK) {
+        status = "deleted";
+    } else if (code == CBM_ZOVA_OPERATION_NOOP) {
+        is_error = true;
     } else {
-        /* Delete the .db file + WAL/SHM */
-        project_db_path(name, path, sizeof(path));
-
-        char wal[CBM_SZ_1K];
-        char shm[CBM_SZ_1K];
-        snprintf(wal, sizeof(wal), "%s-wal", path);
-        snprintf(shm, sizeof(shm), "%s-shm", path);
-
-        if (access(path, F_OK) == 0) {
-            int rc = cbm_unlink(path);
-            (void)cbm_unlink(wal);
-            (void)cbm_unlink(shm);
-            if (rc == 0) {
-                status = "deleted";
-            } else {
-                status = "delete_failed";
-                error_detail = strerror(errno);
-                is_error = true;
-            }
-        } else {
-            is_error = true;
-        }
+        status = "delete_failed";
+        error_detail = report.reason;
+        is_error = true;
     }
 
     cbm_pipeline_unlock();
@@ -3861,8 +3043,7 @@ static int zova_union_same_name(cbm_store_t *store, const char *project, const c
 
 static bool trace_can_use_zova_graph_read(const char *mode, const char **edge_types,
                                           int edge_type_count) {
-    return cbm_zova_graph_read_is_enabled() &&
-           (!mode || strcmp(mode, "calls") == 0) && edge_type_count == 1 &&
+    return (!mode || strcmp(mode, "calls") == 0) && edge_type_count == 1 &&
            strcmp(edge_types[0], "CALLS") == 0;
 }
 
@@ -4156,34 +3337,19 @@ static char *get_project_root(cbm_mcp_server_t *srv, const char *project) {
     if (!project) {
         return NULL;
     }
-    if (cbm_zova_route_for_project(project) == CBM_ZOVA_ROUTE_FULL_AUTHORITY) {
-        char path[CBM_SZ_1K];
-        if (cbm_zova_user_database_path(path, sizeof(path)) != 0) return NULL;
-        cbm_zova_repository_t *repo = cbm_zova_repository_open(path, project);
-        if (!repo) return NULL;
-        cbm_project_t proj = {0};
-        const char *workspace_id = cbm_zova_repository_workspace_id(repo);
-        char *root = cbm_zova_repository_get_project(repo, workspace_id, &proj) == CBM_STORE_OK
-                         ? heap_strdup(proj.root_path)
-                         : NULL;
-        safe_str_free(&proj.name);
-        safe_str_free(&proj.indexed_at);
-        safe_str_free(&proj.root_path);
-        cbm_zova_repository_close(repo);
-        return root;
-    }
-    cbm_store_t *store = resolve_store(srv, project);
-    if (!store) {
-        return NULL;
-    }
+    char path[CBM_SZ_1K];
+    if (cbm_zova_user_database_path(path, sizeof(path)) != 0) return NULL;
+    cbm_zova_repository_t *repo = cbm_zova_repository_open(path, project);
+    if (!repo) return NULL;
     cbm_project_t proj = {0};
-    if (cbm_store_get_project(store, project, &proj) != CBM_STORE_OK) {
-        return NULL;
-    }
-    char *root = heap_strdup(proj.root_path);
+    const char *workspace_id = cbm_zova_repository_workspace_id(repo);
+    char *root = cbm_zova_repository_get_project(repo, workspace_id, &proj) == CBM_STORE_OK
+                     ? heap_strdup(proj.root_path)
+                     : NULL;
     safe_str_free(&proj.name);
     safe_str_free(&proj.indexed_at);
     safe_str_free(&proj.root_path);
+    cbm_zova_repository_close(repo);
     return root;
 }
 
@@ -4320,56 +3486,26 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
     const double ratio = cbm_dump_verify_min_ratio();
     const int min_floor = CBM_DUMP_VERIFY_MIN_FLOOR;
 
-    cbm_store_t *store = NULL;
     int nodes = 0;
     int edges = 0;
-    bool zova_authority = false;
 
-#if CBM_WITH_ZOVA
-    zova_authority = cbm_zova_route_for_project(project_name) == CBM_ZOVA_ROUTE_FULL_AUTHORITY;
-    if (zova_authority) {
-        char zova_path[CBM_SZ_1K];
-        cbm_zova_repository_t *repository = NULL;
-        if (cbm_zova_user_database_path(zova_path, sizeof(zova_path)) != 0 ||
-            !(repository = cbm_zova_repository_open(zova_path, project_name))) {
+    char zova_path[CBM_SZ_1K];
+    cbm_zova_repository_t *repository = NULL;
+    if (cbm_zova_user_database_path(zova_path, sizeof(zova_path)) != 0 ||
+        !(repository = cbm_zova_repository_open(zova_path, project_name))) {
+        degraded = true;
+    } else {
+        const char *workspace_id = cbm_zova_repository_workspace_id(repository);
+        if (cbm_zova_repository_counts(repository, workspace_id, &nodes, &edges) != CBM_STORE_OK ||
+            nodes < 0 || edges < 0) {
+            nodes = 0;
+            edges = 0;
             degraded = true;
-        } else {
-            const char *workspace_id = cbm_zova_repository_workspace_id(repository);
-            if (cbm_zova_repository_counts(repository, workspace_id, &nodes, &edges) !=
-                    CBM_STORE_OK ||
-                nodes < 0 || edges < 0) {
-                nodes = 0;
-                edges = 0;
-                degraded = true;
-            }
-            cbm_zova_repository_close(repository);
         }
-        if (!degraded)
-            degraded = cbm_dump_verify_is_degraded(exp_nodes, nodes, ratio, min_floor);
+        cbm_zova_repository_close(repository);
     }
-#endif
-
-    if (!zova_authority) {
-        store = resolve_store(srv, project_name);
-        if (!store) {
-            degraded = true;
-        } else {
-            nodes = cbm_store_count_nodes(store, project_name);
-            edges = cbm_store_count_edges(store, project_name);
-            if (nodes < 0) {
-                degraded = true;
-                nodes = 0;
-                edges = edges >= 0 ? edges : 0;
-            } else if (cbm_dump_verify_is_degraded(exp_nodes, nodes, ratio, min_floor)) {
-                (void)cbm_store_checkpoint(store);
-                int nodes2 = cbm_store_count_nodes(store, project_name);
-                int edges2 = cbm_store_count_edges(store, project_name);
-                if (nodes2 >= 0) nodes = nodes2;
-                if (edges2 >= 0) edges = edges2;
-                degraded = cbm_dump_verify_is_degraded(exp_nodes, nodes, ratio, min_floor);
-            }
-        }
-    }
+    if (!degraded)
+        degraded = cbm_dump_verify_is_degraded(exp_nodes, nodes, ratio, min_floor);
 
     yyjson_mut_obj_add_int(doc, root, "nodes", nodes);
     yyjson_mut_obj_add_int(doc, root, "edges", edges);
@@ -4386,29 +3522,13 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
                 "failure) — the index covers only the files that were found. "
                 "Re-run index_repository(repo_path=...) to rebuild.");
             cbm_log_warn("dump.verify", "reason", "discover_degraded");
-        } else if (zova_authority) {
+        } else {
             yyjson_mut_obj_add_str(
                 doc, root, "hint",
                 "Committed shared Zova workspace failed verification. "
                 "Re-run index_repository(repo_path=...) to rebuild.");
             cbm_log_warn("dump.verify", "reason", "zova_workspace_verification_failed",
                          "expected_nodes", exp_nodes >= 0 ? "set" : "unknown");
-        } else if (!store) {
-            yyjson_mut_obj_add_str(doc, root, "hint",
-                                   "Index database failed integrity check and was removed. "
-                                   "Re-run index_repository(repo_path=...) to rebuild.");
-            cbm_log_warn("dump.verify", "reason", "store_missing", "expected_nodes",
-                         exp_nodes >= 0 ? "set" : "unknown");
-        } else {
-            char exp_buf[MCP_FIELD_SIZE];
-            char got_buf[MCP_FIELD_SIZE];
-            snprintf(exp_buf, sizeof(exp_buf), "%d", exp_nodes);
-            snprintf(got_buf, sizeof(got_buf), "%d", nodes);
-            yyjson_mut_obj_add_str(
-                doc, root, "hint",
-                "Persisted far fewer nodes than indexed — likely durability loss from a "
-                "hard-killed sibling process. Re-run index_repository(repo_path=...) to rebuild.");
-            cbm_log_warn("dump.verify", "expected_nodes", exp_buf, "persisted_nodes", got_buf);
         }
     }
 
@@ -4444,11 +3564,10 @@ static char *build_worker_failure_response(const char *args, cbm_proc_outcome_t 
     return result;
 }
 
-/* Drop the cached store so the next query reopens whatever the worker wrote (each
- * worker is a fresh process that deletes + recreates the .db). NULL-safe: the
- * background watcher path (main.c) has no MCP server / cached store — the child
- * writes the DB and the parent only needs the return code, so there is nothing
- * to invalidate. */
+/* Drop the cached store so the next query reopens whatever the worker published
+ * to cbm.zova. NULL-safe: the background watcher path (main.c) has no MCP server
+ * / cached store — the child publishes and the parent only needs the return
+ * code, so there is nothing to invalidate. */
 static void supervisor_invalidate_store(cbm_mcp_server_t *srv) {
     if (!srv) {
         return;
@@ -4788,10 +3907,9 @@ uint64_t cbm_index_job_queue_waiter_count(const cbm_mcp_server_t *srv) {
 }
 
 static char *index_run_supervised(cbm_mcp_server_t *srv, const char *args) {
-    bool queued = srv && cbm_zova_route_from_env() == CBM_ZOVA_ROUTE_FULL_AUTHORITY;
-    if (queued) cbm_index_job_queue_enter(srv);
+    if (srv) cbm_index_job_queue_enter(srv);
     char *result = index_run_supervised_impl(srv, args);
-    if (queued) cbm_index_job_queue_leave(srv);
+    if (srv) cbm_index_job_queue_leave(srv);
     return result;
 }
 
@@ -4893,7 +4011,7 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
 
     char *project_name = heap_strdup(cbm_pipeline_project_name(p));
 
-    /* Close cached store — pipeline will delete + recreate the .db file */
+    /* Close cached store — the pipeline republishes the project to cbm.zova */
     if (srv->owns_store && srv->store) {
         cbm_store_close(srv->store);
         srv->store = NULL;
@@ -6693,7 +5811,7 @@ static void detect_session(cbm_mcp_server_t *srv) {
     }
 
     /* Derive project name from path — must match cbm_project_name_from_path
-     * used by the pipeline, otherwise session queries look for a .db file
+     * used by the pipeline, otherwise session queries look for a project
      * that doesn't match the indexed project name. */
     if (srv->session_root[0]) {
         char *pname = cbm_project_name_from_path(srv->session_root);
@@ -6783,19 +5901,19 @@ static void maybe_auto_index(cbm_mcp_server_t *srv) {
         return; /* no session root detected */
     }
 
-    /* Check if project already has a DB */
-    const char *home = cbm_get_home_dir();
-    if (home) {
-        char db_check[CBM_SZ_1K];
-        snprintf(db_check, sizeof(db_check), "%s/%s.db", cbm_resolve_cache_dir(),
-                 srv->session_project);
-        if (cbm_file_size(db_check) >= 0) {
-            /* Already indexed → register watcher for change detection */
-            cbm_log_info("autoindex.skip", "reason", "already_indexed", "project",
-                         srv->session_project);
-            register_watcher_if_enabled(srv);
-            return;
-        }
+    /* Check if the project is already indexed in the shared cbm.zova */
+    char zova_path[CBM_SZ_1K];
+    cbm_zova_repository_t *repo =
+        cbm_zova_user_database_path(zova_path, sizeof(zova_path)) == 0
+            ? cbm_zova_repository_open(zova_path, srv->session_project)
+            : NULL;
+    if (repo) {
+        cbm_zova_repository_close(repo);
+        /* Already indexed → register watcher for change detection */
+        cbm_log_info("autoindex.skip", "reason", "already_indexed", "project",
+                     srv->session_project);
+        register_watcher_if_enabled(srv);
+        return;
     }
 
 /* Default file limit for auto-indexing new projects */
