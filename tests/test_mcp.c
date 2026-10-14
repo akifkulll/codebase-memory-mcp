@@ -947,6 +947,8 @@ TEST(tool_search_graph_empty_structural_search_keeps_envelope) {
                                        "/tmp/empty-structural"),
               CBM_STORE_OK);
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), "empty-structural"), 0);
     char *resp = cbm_mcp_handle_tool(
         srv, "search_graph",
         "{\"project\":\"empty-structural\",\"name_pattern\":\"does-not-exist\"}");
@@ -1879,6 +1881,8 @@ TEST(tool_search_graph_query_honors_file_pattern_issue552) {
                              "FROM nodes;"),
               CBM_STORE_OK);
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":552,\"method\":\"tools/call\","
                                    "\"params\":{\"name\":\"search_graph\","
@@ -2012,6 +2016,8 @@ TEST(tool_trace_call_path_ambiguous) {
     ASSERT_GT(cbm_store_upsert_node(st, &b), 0);
     ASSERT_GT(cbm_store_upsert_node(st, &a), 0);
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":61,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"trace_call_path\","
@@ -2073,6 +2079,8 @@ TEST(tool_trace_call_path_prefers_definition) {
     cbm_edge_t e = {.project = proj, .source_id = id_def, .target_id = id_callee, .type = "CALLS"};
     cbm_store_insert_edge(st, &e);
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":62,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"trace_call_path\",\"arguments\":{\"function_name\":\"dup\","
@@ -2251,6 +2259,8 @@ TEST(tool_trace_call_path_depth_clamped) {
         cbm_store_insert_edge(st, &e);
     }
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"trace_call_path\",\"arguments\":{\"function_name\":\"n00\","
@@ -2324,6 +2334,8 @@ TEST(tool_trace_call_path_distinct_defs_not_over_unioned) {
     cbm_store_insert_edge(st, &ea);
     cbm_store_insert_edge(st, &eb);
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp = cbm_mcp_server_handle(
         srv,
         "{\"jsonrpc\":\"2.0\",\"id\":63,\"method\":\"tools/call\","
@@ -2394,6 +2406,8 @@ TEST(tool_trace_call_path_dts_stub_unions_with_impl) {
     cbm_store_insert_edge(st, &er);
     cbm_store_insert_edge(st, &el);
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":64,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"trace_call_path\",\"arguments\":{\"function_name\":\"sym546\","
@@ -2465,6 +2479,8 @@ TEST(tool_trace_call_path_same_name_union_orders_visits) {
     ASSERT_GT(cbm_store_insert_edge(st, &impl_zeta), 0);
     ASSERT_GT(cbm_store_insert_edge(st, &stub_alpha), 0);
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":65,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"trace_call_path\",\"arguments\":{\"function_name\":\"shared\","
@@ -2544,6 +2560,8 @@ TEST(tool_get_architecture_emits_populated_sections) {
     main_fn.properties_json = "{\"is_entry_point\":true}";
     ASSERT_GT(cbm_store_upsert_node(st, &main_fn), 0);
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":91,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"get_architecture\","
@@ -2602,6 +2620,8 @@ TEST(tool_get_architecture_overview_compact_subset_pr560) {
     ASSERT_GT(cbm_store_upsert_node(st, &file_node), 0);
 
     /* Sanity: with "all", both entry_points and file_tree surface. */
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp_all = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":560,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"get_architecture\","
@@ -2649,6 +2669,8 @@ TEST(tool_get_architecture_rejects_unknown_aspect_pr560) {
     cbm_mcp_server_set_project(srv, proj);
     cbm_store_upsert_project(st, proj, "/tmp/arch560v");
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":562,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"get_architecture\","
@@ -2695,6 +2717,8 @@ TEST(tool_get_architecture_accepts_project_name_alias_issue640) {
     ASSERT_GT(cbm_store_upsert_node(st, &main_fn), 0);
 
     /* Caller passes `project_name` (the natural guess) instead of `project`. */
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":640,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"get_architecture\","
@@ -2737,6 +2761,8 @@ TEST(tool_search_graph_accepts_project_name_alias_issue640) {
     fn.end_line = 2;
     ASSERT_GT(cbm_store_upsert_node(st, &fn), 0);
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":641,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"search_graph\","
@@ -2794,6 +2820,8 @@ TEST(tool_get_architecture_path_scoping) {
                           .file_path = "lib/other.go"};
     cbm_store_upsert_node(st, &f_other);
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp_root = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":92,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"get_architecture\","
@@ -3063,6 +3091,8 @@ TEST(search_code_scoped_path_with_spaces_issue687) {
                     .end_line = 5};
     ASSERT_GT(cbm_store_upsert_node(st, &n), 0);
 
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":94,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"search_code\","
@@ -3143,6 +3173,11 @@ static cbm_mcp_server_t *setup_prefilter_server(char *tmp, size_t tmp_sz, char *
                      .start_line = 3,
                      .end_line = 5};
     if (cbm_store_upsert_node(st, &n1) <= 0 || cbm_store_upsert_node(st, &n2) <= 0) {
+        cbm_mcp_server_free(srv);
+        return NULL;
+    }
+    th_remove_zova_user_database();
+    if (th_publish_store_project(st, proj) != 0) {
         cbm_mcp_server_free(srv);
         return NULL;
     }
