@@ -2843,6 +2843,24 @@ void cbm_cypher_test_set_deadline_ms(int64_t budget_ms) {
     g_cypher_deadline_override_ms = budget_ms;
 }
 
+static _Thread_local const char *g_cypher_test_expire_site = NULL; /* test hook */
+
+/* cypher_deadline_exceeded for a named phase. The test hook moves the deadline
+ * into the past when that phase first checks it, so a test can expire the
+ * budget inside one specific phase. */
+static bool cypher_deadline_exceeded_at(const char *site) {
+    if (g_cypher_test_expire_site && strcmp(site, g_cypher_test_expire_site) == 0) {
+        g_cypher_deadline_ms = SKIP_ONE; /* an instant already in the past */
+    }
+    return cypher_deadline_exceeded();
+}
+
+/* Test-only: expire the deadline when the named phase ("cross_join",
+ * "cross_join_rels", "sort_bindings", "order_by") checks it; NULL disables. */
+void cbm_cypher_test_expire_deadline_at(const char *site) {
+    g_cypher_test_expire_site = site;
+}
+
 /* ── Binding virtual variables (for WITH clause) ──────────────── */
 
 static const char *binding_get_virtual(binding_t *b, const char *var, const char *prop) {
@@ -3381,6 +3399,10 @@ static void rb_apply_order_by(result_builder_t *rb, const cbm_return_clause_t *r
         return;
     }
     for (int i = 0; i < rb->row_count - SKIP_ONE; i++) {
+        /* Each pass is O(rows); stop sorting once the budget is spent. */
+        if (cypher_deadline_exceeded_at("order_by")) {
+            return;
+        }
         for (int j = 0; j < rb->row_count - i - SKIP_ONE; j++) {
             int cmp = 0;
             for (int k = 0; k < keys && cmp == 0; k++) {
@@ -3708,6 +3730,10 @@ static void distinct_list_add(char ***list, int *count, const char *val) {
  * sort; later keys break ties, direction is per key (upstream 0a0ef516). */
 static void sort_bindings(binding_t *vbindings, int count, const cbm_return_clause_t *wc) {
     for (int i = 0; i < count - SKIP_ONE; i++) {
+        /* Each pass is O(bindings); stop sorting once the budget is spent. */
+        if (cypher_deadline_exceeded_at("sort_bindings")) {
+            return;
+        }
         for (int j = 0; j < count - i - SKIP_ONE; j++) {
             int cmp = 0;
             for (int k = 0; k < wc->order_key_count && cmp == 0; k++) {
@@ -4514,8 +4540,16 @@ static int cross_join_nodes(binding_t **bindings, int *bind_count, cbm_node_t *e
         return CBM_NOT_FOUND; /* OOM: propagate, don't silently skip the MATCH */
     }
     size_t new_count = 0;
-    for (int bi = 0; bi < *bind_count; bi++) {
+    bool expired = false;
+    for (int bi = 0; bi < *bind_count && !expired; bi++) {
         for (int ni = 0; ni < extra_count && new_count < alloc_n; ni++) {
+            /* Stop producing rows once the budget is spent; the caller reports
+             * the timeout instead of the partial join. */
+            if ((new_count & CYPHER_DEADLINE_CHECK_MASK) == 0 &&
+                cypher_deadline_exceeded_at("cross_join")) {
+                expired = true;
+                break;
+            }
             binding_t nb = {0};
             binding_copy(&nb, &(*bindings)[bi]);
             binding_set(&nb, nvar, &extra_nodes[ni]);
@@ -4550,8 +4584,14 @@ static void cross_join_with_rels(cbm_store_t *store, cbm_pattern_t *patn, bindin
         return; /* OOM: leave existing bindings untouched rather than corrupt */
     }
     int new_count = 0;
-    for (int bi = 0; bi < *bind_count; bi++) {
+    bool expired = false;
+    for (int bi = 0; bi < *bind_count && !expired; bi++) {
         for (int ni = 0; ni < extra_count; ni++) {
+            /* Every pair runs a relationship expansion, so check each one. */
+            if (cypher_deadline_exceeded_at("cross_join_rels")) {
+                expired = true;
+                break;
+            }
             binding_t nb = {0};
             binding_copy(&nb, &(*bindings)[bi]);
             binding_set(&nb, nvar, &extra_nodes[ni]);
@@ -4890,8 +4930,10 @@ int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *projec
     }
 
     /* Abort a runaway query that blew the wall-clock budget before it can
-     * return a misleading partial result. Checked before the row ceiling. */
-    if (g_cypher_timed_out) {
+     * return a misleading partial result. Checks the clock itself, not only
+     * the flag the hot loops set, so time spent in a phase without its own
+     * check still fails the query. Checked before the row ceiling. */
+    if (cypher_deadline_exceeded()) {
         rb_free(&rb);
         cbm_query_free(q);
         out->error =

@@ -816,6 +816,38 @@ TEST(cypher_exec_deadline_allows_normal_query_issue601) {
     PASS();
 }
 
+/* The deadline must also cover the cross joins and both ORDER BY sorts, and a
+ * budget that runs out inside one of them must fail the query rather than
+ * return its rows. The hook expires the deadline when that phase checks it. */
+static bool cypher_expires_at(const char *site, const char *query) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    cbm_cypher_test_expire_deadline_at(site);
+    int rc = cbm_cypher_execute(s, query, "test", 0, &r);
+    cbm_cypher_test_expire_deadline_at(NULL);
+    bool expired = rc != 0 && r.error && strstr(r.error, "time limit") && r.row_count == 0;
+    if (!expired) {
+        printf("\n    phase %s: rc=%d rows=%d error=%s\n", site, rc, r.row_count,
+               r.error ? r.error : "(none)");
+    }
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    return expired;
+}
+
+TEST(cypher_exec_deadline_covers_joins_and_sorts) {
+    ASSERT_TRUE(cypher_expires_at("cross_join",
+                                  "MATCH (a:Module) MATCH (b:Function) RETURN a.name, b.name"));
+    ASSERT_TRUE(cypher_expires_at(
+        "cross_join_rels",
+        "MATCH (a:Module) MATCH (b:Function)-[:CALLS]->(c) RETURN a.name, c.name"));
+    ASSERT_TRUE(cypher_expires_at("sort_bindings",
+                                  "MATCH (f:Function) WITH f.name AS n ORDER BY n RETURN n"));
+    ASSERT_TRUE(
+        cypher_expires_at("order_by", "MATCH (f:Function) RETURN f.name ORDER BY f.name"));
+    PASS();
+}
+
 /* Upstream 73a3c347 (#797): variable-length / repeated-variable path
  * semantics. Fixture: loopy has a SELF-LOOP as one of its outbound CALLS
  * edges plus a real 2-chain loopy->mid->leaf. Correct semantics:
@@ -3346,6 +3378,7 @@ SUITE(cypher) {
     /* Execution */
     RUN_TEST(cypher_exec_deadline_aborts_runaway_query_issue601);
     RUN_TEST(cypher_exec_deadline_allows_normal_query_issue601);
+    RUN_TEST(cypher_exec_deadline_covers_joins_and_sorts);
     RUN_TEST(cypher_deep_nesting_rejected_not_crash);
     RUN_TEST(cypher_parse_unwind_oversized_literal_no_overflow);
     RUN_TEST(cypher_parse_unwind_many_elements_no_overflow);

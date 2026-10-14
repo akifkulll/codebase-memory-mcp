@@ -358,6 +358,11 @@ void cbm_query_free(cbm_query_t *q);
  * the first hot-loop check; a negative value restores the default budget. */
 void cbm_cypher_test_set_deadline_ms(int64_t budget_ms);
 
+/* Test-only: expire the execution deadline when the named phase first checks
+ * it ("cross_join", "cross_join_rels", "sort_bindings", "order_by"), for
+ * queries on the calling thread. NULL disables. */
+void cbm_cypher_test_expire_deadline_at(const char *site);
+
 /* Worst-case binding slot count for a node cross-join (upstream b07dbe67).
  * Computes the count in size_t and rejects any that would not fit the int
  * binding counter or would overflow the size_t byte size; returns 0 and writes
