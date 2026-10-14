@@ -5564,19 +5564,85 @@ static int pipeline_zova_stable_id(const char *path, const char *project, const 
 
 /* Digest the project's rows through its store, then read the native graph
  * counts and the CALLS walk from main in the shared cbm.zova. */
+static void pipeline_edge_row_end(char *row, size_t cap, size_t *len, const cbm_node_t *node) {
+    int written = snprintf(row + *len, cap - *len, "\x1f%s\x1f%s\x1f%s\x1f%s\x1f%d\x1f%d",
+                           node->label ? node->label : "", node->name ? node->name : "",
+                           node->qualified_name ? node->qualified_name : "",
+                           node->file_path ? node->file_path : "", node->start_line,
+                           node->end_line);
+    *len = written < 0 ? cap : *len + (size_t)written;
+}
+
+static int pipeline_row_compare(const void *left, const void *right) {
+    return strcmp(*(char *const *)left, *(char *const *)right);
+}
+
+/* Digest every edge as its type, properties and both endpoint nodes, in a
+ * sorted order that does not depend on node or edge ids. */
+static int pipeline_digest_project_edges(cbm_store_t *store, const char *project,
+                                         pipeline_sql_digest_t *out) {
+    *out = (pipeline_sql_digest_t){.hash = UINT64_C(1469598103934665603), .rows = 0};
+    cbm_schema_info_t schema = {0};
+    if (cbm_store_get_schema_counts(store, project, &schema) != CBM_STORE_OK) {
+        return -1;
+    }
+    char **rows = NULL;
+    int row_count = 0;
+    int rc = 0;
+    for (int t = 0; rc == 0 && t < schema.edge_type_count; t++) {
+        cbm_edge_t *edges = NULL;
+        int count = 0;
+        if (cbm_store_find_edges_by_type(store, project, schema.edge_types[t].type, &edges,
+                                         &count) != CBM_STORE_OK) {
+            rc = -1;
+            break;
+        }
+        char **grown = realloc(rows, (size_t)(row_count + count + 1) * sizeof(*rows));
+        rc = grown ? 0 : -1;
+        rows = grown ? grown : rows;
+        for (int i = 0; rc == 0 && i < count; i++) {
+            cbm_node_t source = {0};
+            cbm_node_t target = {0};
+            char row[8192];
+            size_t len = 0;
+            if (cbm_store_find_node_by_id(store, edges[i].source_id, &source) != CBM_STORE_OK ||
+                cbm_store_find_node_by_id(store, edges[i].target_id, &target) != CBM_STORE_OK) {
+                rc = -1;
+            } else {
+                int written = snprintf(row, sizeof(row), "%s\x1f%s", edges[i].type,
+                                       edges[i].properties_json ? edges[i].properties_json : "");
+                len = written < 0 ? sizeof(row) : (size_t)written;
+                pipeline_edge_row_end(row, sizeof(row), &len, &source);
+                pipeline_edge_row_end(row, sizeof(row), &len, &target);
+                rows[row_count] = len < sizeof(row) ? strdup(row) : NULL;
+                rc = rows[row_count] ? 0 : -1;
+                row_count += rc == 0;
+            }
+            cbm_node_free_fields(&source);
+            cbm_node_free_fields(&target);
+        }
+        cbm_store_free_edges(edges, count);
+    }
+    cbm_store_schema_free(&schema);
+    if (rc == 0) {
+        qsort(rows, (size_t)row_count, sizeof(*rows), pipeline_row_compare);
+    }
+    for (int i = 0; i < row_count; i++) {
+        if (rc == 0) {
+            out->rows++;
+            pipeline_digest_bytes(out, rows[i], strlen(rows[i]) + 1);
+        }
+        free(rows[i]);
+    }
+    free(rows);
+    return rc;
+}
+
 static int pipeline_zova_project_info(const char *project, pipeline_zova_project_info_t *out) {
     static const char *nodes_sql =
         "SELECT label,name,qualified_name,file_path,start_line,end_line,properties "
         "FROM nodes WHERE project=?1 "
         "ORDER BY label,name,qualified_name,file_path,start_line,end_line,properties";
-    static const char *edges_sql =
-        "SELECT e.type,e.properties,"
-        "s.label,s.name,s.qualified_name,s.file_path,s.start_line,s.end_line,"
-        "t.label,t.name,t.qualified_name,t.file_path,t.start_line,t.end_line "
-        "FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id "
-        "WHERE e.project=?1 "
-        "ORDER BY e.type,e.properties,s.label,s.name,s.qualified_name,s.file_path,"
-        "s.start_line,s.end_line,t.label,t.name,t.qualified_name,t.file_path,t.start_line,t.end_line";
     char path[1024];
     char workspace_id[CBM_ZOVA_WORKSPACE_ID_MAX];
     char graph_name[CBM_ZOVA_WORKSPACE_ID_MAX + 32];
@@ -5597,12 +5663,11 @@ static int pipeline_zova_project_info(const char *project, pipeline_zova_project
     if (!store) {
         return -1;
     }
-    /* Counting edges builds the store's nodes/edges views over the workspace. */
-    bool rows_ok = cbm_store_count_edges_by_type(store, project, "CALLS") >= 0 &&
+    /* Counting nodes builds the store's nodes view over the workspace. */
+    bool rows_ok = cbm_store_count_nodes(store, project) >= 0 &&
                    pipeline_digest_project_rows(cbm_store_get_db(store), project, nodes_sql,
                                                 &out->nodes) == 0 &&
-                   pipeline_digest_project_rows(cbm_store_get_db(store), project, edges_sql,
-                                                &out->edges) == 0 &&
+                   pipeline_digest_project_edges(store, project, &out->edges) == 0 &&
                    pipeline_zova_find_main_qn(cbm_store_get_db(store), project, main_qn,
                                               sizeof(main_qn)) == 0;
     cbm_store_close(store);

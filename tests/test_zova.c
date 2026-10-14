@@ -3801,21 +3801,47 @@ TEST(zova_workspace_store_reports_schema_counts_and_architecture) {
         has_args |= strcmp(schema.edge_types[0].properties[i], "args") == 0;
     }
     ASSERT_TRUE(has_args);
+    ASSERT_EQ(schema.edge_types[0].property_count, 3);
+    ASSERT_STR_EQ(schema.edge_types[1].type, "USAGE");
+    ASSERT_EQ(schema.edge_types[1].count, 1);
+    ASSERT_EQ(schema.edge_types[1].property_count, 2);
     cbm_store_schema_free(&schema);
 
     ASSERT_EQ(cbm_store_get_schema_counts_scoped(store, "proj", "lib", &schema), CBM_STORE_OK);
     ASSERT_EQ(schema.node_label_count, 2);
     ASSERT_EQ(schema.edge_type_count, 0);
     cbm_store_schema_free(&schema);
+    ASSERT_EQ(cbm_store_get_schema_counts_scoped(store, "proj", "src", &schema), CBM_STORE_OK);
+    ASSERT_EQ(schema.edge_type_count, 1);
+    ASSERT_STR_EQ(schema.edge_types[0].type, "CALLS");
+    ASSERT_EQ(schema.edge_types[0].count, 3);
+    cbm_store_schema_free(&schema);
+    ASSERT_EQ(cbm_store_count_edges_by_type(store, "proj", "USAGE"), 1);
 
     cbm_architecture_info_t arch = {0};
     ASSERT_EQ(cbm_store_get_architecture(store, "proj", NULL, NULL, 0, &arch), CBM_STORE_OK);
     ASSERT_EQ(arch.language_count, 2);
-    ASSERT_GT(arch.hotspot_count, 0);
+    ASSERT_EQ(arch.hotspot_count, 1);
     ASSERT_STR_EQ(arch.hotspots[0].name, "Beta");
     ASSERT_EQ(arch.hotspots[0].fan_in, 3);
+    ASSERT_EQ(arch.boundary_count, 1);
+    ASSERT_STR_EQ(arch.boundaries[0].from, "b");
+    ASSERT_STR_EQ(arch.boundaries[0].to, "a");
+    ASSERT_EQ(arch.boundaries[0].call_count, 1);
+    ASSERT_EQ(arch.cluster_count, 1);
+    ASSERT_EQ(arch.clusters[0].members, 3);
     ASSERT_GT(arch.file_tree_count, 0);
     cbm_store_architecture_free(&arch);
+
+    /* Edges are read from the Zova graph, not copied into a temp table. */
+    sqlite3_stmt *temp_edges = NULL;
+    ASSERT_EQ(sqlite3_prepare_v2(cbm_store_get_db(store),
+                                 "SELECT count(*) FROM sqlite_temp_master WHERE name='edges'",
+                                 -1, &temp_edges, NULL),
+              SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(temp_edges), SQLITE_ROW);
+    ASSERT_EQ(sqlite3_column_int(temp_edges, 0), 0);
+    sqlite3_finalize(temp_edges);
 
     char **files = NULL;
     int file_count = 0;
@@ -3836,6 +3862,36 @@ TEST(zova_workspace_store_reports_schema_counts_and_architecture) {
     ASSERT_STR_EQ(matches[0].qualified_name, "proj.src.a.Beta");
     ASSERT_EQ(matches[0].id, exact.id);
     cbm_store_free_nodes(matches, match_count);
+
+    /* Edges by type carry the same node ids as the node reads. */
+    cbm_node_t alpha = {0};
+    cbm_node_t gamma = {0};
+    ASSERT_EQ(cbm_store_find_node_by_qn(store, "proj", "proj.src.a.Alpha", &alpha),
+              CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_find_node_by_qn(store, "proj", "proj.src.b.Gamma", &gamma),
+              CBM_STORE_OK);
+    cbm_edge_t *calls = NULL;
+    int call_count = 0;
+    ASSERT_EQ(cbm_store_find_edges_by_type(store, "proj", "CALLS", &calls, &call_count),
+              CBM_STORE_OK);
+    ASSERT_EQ(call_count, 3);
+    int from_alpha = 0;
+    int from_gamma = 0;
+    int with_args = 0;
+    for (int i = 0; i < call_count; i++) {
+        ASSERT_EQ(calls[i].target_id, exact.id);
+        ASSERT_STR_EQ(calls[i].type, "CALLS");
+        from_alpha += calls[i].source_id == alpha.id;
+        from_gamma += calls[i].source_id == gamma.id;
+        with_args += strcmp(calls[i].properties_json, "{\"args\":\"x\"}") == 0;
+    }
+    ASSERT_EQ(from_alpha, 2);
+    ASSERT_EQ(from_gamma, 1);
+    ASSERT_EQ(with_args, 1);
+    ASSERT_NEQ(calls[0].id, calls[1].id);
+    cbm_store_free_edges(calls, call_count);
+    cbm_node_free_fields(&alpha);
+    cbm_node_free_fields(&gamma);
 
     char **callers = NULL;
     char **callees = NULL;

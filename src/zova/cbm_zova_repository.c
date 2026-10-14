@@ -1814,50 +1814,61 @@ int cbm_zova_repository_find_edges(cbm_zova_repository_t *repo, const char *work
     *out=edges;*out_count=count;return CBM_STORE_OK;
 }
 
+typedef int (*repo_edge_record_visitor_t)(const zova_graph_scan_edge *native,
+                                          const cbm_zova_edge_payload_record_t *record,
+                                          void *context);
+
 typedef struct {
     const zova_graph_scan_edge *native;
-    cbm_zova_repository_edge_visitor_t visitor;
+    repo_edge_record_visitor_t visitor;
     void *context;
-} repo_visit_edge_context_t;
+} repo_scan_record_context_t;
 
-static int repo_visit_payload_edge(const cbm_zova_edge_payload_record_t *record,
-                                   void *context_ptr) {
-    const repo_visit_edge_context_t *context = context_ptr;
-    return context->visitor(context->native->source_node_key, context->native->target_node_key,
-                            context->native->edge_type, context->native->edge_type_len,
-                            record->properties.data, record->properties.len, context->context);
+static int repo_scan_payload_record(const cbm_zova_edge_payload_record_t *record,
+                                    void *context_ptr) {
+    const repo_scan_record_context_t *context = context_ptr;
+    return context->visitor(context->native, record, context->context);
 }
 
-int cbm_zova_repository_visit_edges(cbm_zova_repository_t *repo, const char *workspace_id,
-                                    cbm_zova_repository_edge_visitor_t visitor, void *context) {
+static bool repo_edge_type_matches(const zova_graph_scan_edge *edge, const char *edge_type) {
+    return !edge_type || (edge->edge_type && edge->edge_type_len == strlen(edge_type) &&
+                          memcmp(edge->edge_type, edge_type, edge->edge_type_len) == 0);
+}
+
+/* Visit every cbm edge record of the workspace graph in scan order, or only
+ * those of edge_type. Payloads are read only for matching graph edges. */
+static int repo_scan_edges(cbm_zova_repository_t *repo, const char *edge_type,
+                           repo_edge_record_visitor_t visitor, void *context) {
     char graph_name[REPO_GRAPH_NAME_CAP];
-    if (repo_workspace_required(repo, workspace_id) != CBM_STORE_OK || !visitor ||
-        repo_graph_name(repo, graph_name, sizeof(graph_name)) != 0) {
-        return CBM_STORE_ERR;
-    }
+    if (repo_graph_name(repo, graph_name, sizeof(graph_name)) != 0) return CBM_STORE_ERR;
     zova_graph_scan_cursor cursor = {0};
     int64_t edge_keys[REPO_EDGE_SCAN_PAGE];
+    const zova_graph_scan_edge *matched[REPO_EDGE_SCAN_PAGE];
     for (;;) {
         zova_graph_scan_results page = {0};
         zova_graph_edge_payload_results payloads = {0};
+        size_t match_count = 0;
         int ok = zova_graph_scan(&(zova_graph_scan_request){
                      .db = repo->db, .graph_name = graph_name, .edge_after = cursor,
                      .node_limit = 0, .edge_limit = REPO_EDGE_SCAN_PAGE,
                      .out_results = &page}) == ZOVA_OK &&
                  page.edges_len <= REPO_EDGE_SCAN_PAGE;
-        for (size_t i = 0; ok && i < page.edges_len; i++) edge_keys[i] = page.edges[i].edge_key;
-        ok = ok && (page.edges_len == 0 ||
+        for (size_t i = 0; ok && i < page.edges_len; i++) {
+            if (!repo_edge_type_matches(&page.edges[i], edge_type)) continue;
+            matched[match_count] = &page.edges[i];
+            edge_keys[match_count++] = page.edges[i].edge_key;
+        }
+        ok = ok && (match_count == 0 ||
                     (zova_graph_edge_payload_get_many(&(zova_graph_edge_payload_get_many_request){
                          .db = repo->db, .graph_name = graph_name, .edge_keys = edge_keys,
-                         .key_count = page.edges_len, .out_results = &payloads}) == ZOVA_OK &&
-                     payloads.len == page.edges_len));
-        for (size_t i = 0; ok && i < page.edges_len; i++) {
-            repo_visit_edge_context_t edge = {&page.edges[i], visitor, context};
-            ok = payloads.items[i].found &&
-                 payloads.items[i].edge_key == page.edges[i].edge_key &&
+                         .key_count = match_count, .out_results = &payloads}) == ZOVA_OK &&
+                     payloads.len == match_count));
+        for (size_t i = 0; ok && i < match_count; i++) {
+            repo_scan_record_context_t edge = {matched[i], visitor, context};
+            ok = payloads.items[i].found && payloads.items[i].edge_key == matched[i]->edge_key &&
                  cbm_zova_edge_payload_visit(payloads.items[i].payload,
                                              payloads.items[i].payload_len,
-                                             repo_visit_payload_edge, &edge, NULL) == 0;
+                                             repo_scan_payload_record, &edge, NULL) == 0;
         }
         if (page.edges_len) {
             const zova_graph_scan_edge *last = &page.edges[page.edges_len - 1];
@@ -1870,6 +1881,148 @@ int cbm_zova_repository_visit_edges(cbm_zova_repository_t *repo, const char *wor
         if (!ok) return CBM_STORE_ERR;
         if (!more) return CBM_STORE_OK;
     }
+}
+
+typedef struct {
+    cbm_zova_repository_edge_visitor_t visitor;
+    void *context;
+} repo_visit_edge_context_t;
+
+static int repo_visit_edge_record(const zova_graph_scan_edge *native,
+                                  const cbm_zova_edge_payload_record_t *record,
+                                  void *context_ptr) {
+    const repo_visit_edge_context_t *context = context_ptr;
+    return context->visitor(native->source_node_key, native->target_node_key, native->edge_type,
+                            native->edge_type_len, record->properties.data,
+                            record->properties.len, context->context);
+}
+
+int cbm_zova_repository_visit_edges(cbm_zova_repository_t *repo, const char *workspace_id,
+                                    const char *edge_type,
+                                    cbm_zova_repository_edge_visitor_t visitor, void *context) {
+    if (repo_workspace_required(repo, workspace_id) != CBM_STORE_OK || !visitor) {
+        return CBM_STORE_ERR;
+    }
+    repo_visit_edge_context_t visit = {visitor, context};
+    return repo_scan_edges(repo, edge_type, repo_visit_edge_record, &visit);
+}
+
+typedef struct {
+    int64_t source_key;
+    int64_t target_key;
+    char *local_name;
+    char *properties;
+} repo_typed_edge_t;
+
+typedef struct {
+    repo_typed_edge_t *items;
+    int count;
+    int capacity;
+} repo_typed_edges_t;
+
+static int repo_collect_typed_edge(const zova_graph_scan_edge *native,
+                                   const cbm_zova_edge_payload_record_t *record,
+                                   void *context_ptr) {
+    repo_typed_edges_t *edges = context_ptr;
+    if (edges->count == edges->capacity) {
+        int capacity = edges->capacity ? edges->capacity * 2 : 64;
+        repo_typed_edge_t *grown = realloc(edges->items, (size_t)capacity * sizeof(*grown));
+        if (!grown) return -1;
+        edges->items = grown;
+        edges->capacity = capacity;
+    }
+    repo_typed_edge_t *edge = &edges->items[edges->count];
+    edge->source_key = native->source_node_key;
+    edge->target_key = native->target_node_key;
+    edge->local_name = repo_dup(record->local_name.data, record->local_name.len);
+    edge->properties = repo_dup(record->properties.data, record->properties.len);
+    if (!edge->local_name || !edge->properties) {
+        free(edge->local_name);
+        free(edge->properties);
+        return -1;
+    }
+    edges->count++;
+    return 0;
+}
+
+static int repo_int64_compare(const void *left_ptr, const void *right_ptr) {
+    int64_t left = *(const int64_t *)left_ptr;
+    int64_t right = *(const int64_t *)right_ptr;
+    return (left > right) - (left < right);
+}
+
+/* Every cbm edge of one type, in scan order, with the ids the other reads
+ * use: endpoints and edge ids derive from stable ids, as in find_edges. */
+int cbm_zova_repository_find_edges_by_type(cbm_zova_repository_t *repo, const char *workspace_id,
+                                           const char *edge_type, cbm_edge_t **out,
+                                           int *out_count) {
+    if (repo_workspace_required(repo, workspace_id) != CBM_STORE_OK || !edge_type || !out ||
+        !out_count) return CBM_STORE_ERR;
+    *out = NULL;
+    *out_count = 0;
+    repo_typed_edges_t found = {0};
+    int64_t *keys = NULL;
+    zova_graph_keyed_node_results native = {0};
+    cbm_edge_t *edges = NULL;
+    int rc = repo_scan_edges(repo, edge_type, repo_collect_typed_edge, &found);
+    size_t key_count = 0;
+    if (rc == CBM_STORE_OK && found.count > 0) {
+        keys = malloc((size_t)found.count * 2 * sizeof(*keys));
+        edges = calloc((size_t)found.count, sizeof(*edges));
+        if (!keys || !edges) rc = CBM_STORE_ERR;
+    }
+    if (rc == CBM_STORE_OK && found.count > 0) {
+        for (int i = 0; i < found.count; i++) {
+            keys[key_count++] = found.items[i].source_key;
+            keys[key_count++] = found.items[i].target_key;
+        }
+        qsort(keys, key_count, sizeof(*keys), repo_int64_compare);
+        size_t unique = 0;
+        for (size_t i = 0; i < key_count; i++)
+            if (unique == 0 || keys[unique - 1] != keys[i]) keys[unique++] = keys[i];
+        key_count = unique;
+        if (repo_native_nodes_by_key(repo, keys, key_count, &native) != 0) rc = CBM_STORE_ERR;
+    }
+    for (int i = 0; rc == CBM_STORE_OK && i < found.count; i++) {
+        const int64_t *source = bsearch(&found.items[i].source_key, keys, key_count,
+                                        sizeof(*keys), repo_int64_compare);
+        const int64_t *target = bsearch(&found.items[i].target_key, keys, key_count,
+                                        sizeof(*keys), repo_int64_compare);
+        const char *source_id = source ? native.items[source - keys].node_id : NULL;
+        const char *target_id = target ? native.items[target - keys].node_id : NULL;
+        char edge_id[CBM_ZOVA_WORKSPACE_ID_MAX + 80];
+        if (!source_id || !target_id || !native.items[source - keys].found ||
+            !native.items[target - keys].found ||
+            repo_edge_id(repo->workspace_id, source_id, edge_type, target_id,
+                         found.items[i].local_name, edge_id, sizeof(edge_id)) != 0) {
+            rc = CBM_STORE_ERR;
+            break;
+        }
+        edges[i] = (cbm_edge_t){
+            .id = stable_numeric_id(edge_id),
+            .project = repo_dup((const uint8_t *)repo->project, strlen(repo->project)),
+            .source_id = stable_numeric_id(source_id),
+            .target_id = stable_numeric_id(target_id),
+            .type = repo_dup((const uint8_t *)edge_type, strlen(edge_type)),
+            .properties_json = found.items[i].properties,
+        };
+        found.items[i].properties = NULL;
+        if (!edges[i].project || !edges[i].type) rc = CBM_STORE_ERR;
+    }
+    for (int i = 0; i < found.count; i++) {
+        free(found.items[i].local_name);
+        free(found.items[i].properties);
+    }
+    free(found.items);
+    free(keys);
+    zova_graph_keyed_node_results_free(&native);
+    if (rc != CBM_STORE_OK) {
+        cbm_store_free_edges(edges, found.count);
+        return CBM_STORE_ERR;
+    }
+    *out = edges;
+    *out_count = found.count;
+    return CBM_STORE_OK;
 }
 
 int cbm_zova_repository_search_fts(cbm_zova_repository_t *repo, const char *workspace_id,
@@ -3144,7 +3297,8 @@ int cbm_zova_repository_find_nodes_by_file_overlap(cbm_zova_repository_t*r,const
 int cbm_zova_repository_stable_id_for_numeric_id(cbm_zova_repository_t*r,const char*w,int64_t n,char*o,size_t z){(void)r;(void)w;(void)n;if(o&&z)o[0]='\0';return CBM_STORE_ERR;}
 int cbm_zova_repository_call_neighbor_keys(cbm_zova_repository_t*r,const char*w,const char*s,bool i,int64_t**o,int*c){(void)r;(void)w;(void)s;(void)i;(void)o;(void)c;return CBM_STORE_ERR;}
 int cbm_zova_repository_find_edges(cbm_zova_repository_t*r,const char*w,const char*s,const char*d,cbm_edge_t**o,int*c){(void)r;(void)w;(void)s;(void)d;(void)o;(void)c;return CBM_STORE_ERR;}
-int cbm_zova_repository_visit_edges(cbm_zova_repository_t*r,const char*w,cbm_zova_repository_edge_visitor_t v,void*c){(void)r;(void)w;(void)v;(void)c;return CBM_STORE_ERR;}
+int cbm_zova_repository_visit_edges(cbm_zova_repository_t*r,const char*w,const char*t,cbm_zova_repository_edge_visitor_t v,void*c){(void)r;(void)w;(void)t;(void)v;(void)c;return CBM_STORE_ERR;}
+int cbm_zova_repository_find_edges_by_type(cbm_zova_repository_t*r,const char*w,const char*t,cbm_edge_t**o,int*c){(void)r;(void)w;(void)t;(void)o;(void)c;return CBM_STORE_ERR;}
 int cbm_zova_repository_search(cbm_zova_repository_t*r,const char*w,const cbm_search_params_t*p,cbm_search_output_t*o){(void)r;(void)w;(void)p;(void)o;return CBM_STORE_ERR;}
 int cbm_zova_repository_search_fts(cbm_zova_repository_t*r,const char*w,const char*q,const char*f,int l,int x,cbm_search_output_t*o){(void)r;(void)w;(void)q;(void)f;(void)l;(void)x;(void)o;return CBM_STORE_ERR;}
 int cbm_zova_repository_index_status(cbm_zova_repository_t*r,const char*w,int64_t*g,char**i){(void)r;(void)w;(void)g;(void)i;return CBM_STORE_ERR;}

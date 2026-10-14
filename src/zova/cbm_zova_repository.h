@@ -179,8 +179,15 @@ typedef int (*cbm_zova_repository_edge_visitor_t)(int64_t source_key, int64_t ta
                                                   const char *type, size_t type_len,
                                                   const uint8_t *properties,
                                                   size_t properties_len, void *context);
+/* Visit every cbm edge in graph scan order, or only those of edge_type
+ * (NULL for all). */
 int cbm_zova_repository_visit_edges(cbm_zova_repository_t *repo, const char *workspace_id,
+                                    const char *edge_type,
                                     cbm_zova_repository_edge_visitor_t visitor, void *context);
+/* Every cbm edge of edge_type in graph scan order. Caller frees *out. */
+int cbm_zova_repository_find_edges_by_type(cbm_zova_repository_t *repo, const char *workspace_id,
+                                           const char *edge_type, cbm_edge_t **out,
+                                           int *out_count);
 int cbm_zova_repository_search(cbm_zova_repository_t *repo, const char *workspace_id,
                                const cbm_search_params_t *params, cbm_search_output_t *out);
 int cbm_zova_repository_search_fts(cbm_zova_repository_t *repo, const char *workspace_id,
