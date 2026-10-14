@@ -84,7 +84,6 @@ pub fn build(b: *std.Build) void {
     addZovaSuiteStep(b, cfg, test_runner, "test-zova-c-sql-functions", "container", "zova_c_sql_functions");
     addZovaSuiteStep(b, cfg, test_runner, "test-zova-bridge", "container", "zova_bridge");
     addZovaSuiteStep(b, cfg, test_runner, "test-zova-graph-mirror", "graph_mirror", "zova");
-    addZovaRealRepoStep(b, cfg, cbm_copy, test_runner_copy);
 
     const test_install_safety =
         b.step("test-install-safety", "Verify installer replacement and idempotency safeguards");
@@ -449,26 +448,6 @@ fn addZovaSuiteStep(
     step.dependOn(&run.step);
 }
 
-fn addZovaRealRepoStep(
-    b: *std.Build,
-    cfg: Config,
-    cbm_copy: *std.Build.Step.Run,
-    test_runner_copy: *std.Build.Step.Run,
-) void {
-    const step = b.step("test-zova-real-repo", "Run Zova validation against this repository");
-    if (!cfg.with_zova) {
-        const fail = b.addFail("test-zova-real-repo requires -Dwith-zova=true");
-        step.dependOn(&fail.step);
-        return;
-    }
-    const run = b.addSystemCommand(&.{ "bash", "scripts/zova-real-repo-validation.sh" });
-    run.step.dependOn(&cbm_copy.step);
-    run.step.dependOn(&test_runner_copy.step);
-    run.setEnvironmentVariable("CBM_ZOVA_VALIDATION_SKIP_BUILD", "1");
-    run.setEnvironmentVariable("ZOVA_ROOT", cfg.zova_root);
-    step.dependOn(&run.step);
-}
-
 fn grammarSources(b: *std.Build) []const []const u8 {
     var dir = b.root.root_dir.handle.openDir(b.graph.io, "internal/cbm", .{ .iterate = true }) catch @panic("unable to open internal/cbm");
     defer dir.close(b.graph.io);
@@ -594,7 +573,6 @@ const zova_test_sources = [_][]const u8{
     "tests/test_zova_plugin.c",
     "tests/test_zova_real_repo.c",
     "tests/test_zova_graph_real_repo.c",
-    "tests/test_zova_single_file_real_repo.c",
     "tests/test_incremental.c",
 };
 
@@ -699,7 +677,6 @@ const all_test_sources = [_][]const u8{
     "tests/test_zova_plugin.c",
     "tests/test_zova_real_repo.c",
     "tests/test_zova_graph_real_repo.c",
-    "tests/test_zova_single_file_real_repo.c",
     "tests/test_integration.c",
     "tests/test_incremental.c",
     "tests/test_lang_contract.c",

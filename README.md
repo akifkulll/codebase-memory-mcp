@@ -444,14 +444,6 @@ scripts/zova-operations.sh status
 scripts/zova-operations.sh backup --output /safe/path/cbm-backup.zova
 ```
 
-The compact real-repository validation runner is:
-
-```bash
-scripts/zova-single-file-validation.sh
-```
-
-It retains only a JSON report on success.
-
 The current schema is CBM v7 on Zova format v9. It removes projection
 tables, duplicate workspace FTS/rowmaps, compatibility-vector tables, and the
 separate native norm table. Native topology edges carry compact CBM payloads,
