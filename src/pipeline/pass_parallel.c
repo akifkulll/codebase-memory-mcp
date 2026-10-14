@@ -902,6 +902,13 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
             pp_err_add(errs, fi->rel_path, result->error_msg ? result->error_msg : "extract failed",
                        "extract");
             ws->errors++;
+        } else if (result->parse_incomplete) {
+            /* Indexed, but with unrecovered ERROR/MISSING regions. Not a skip:
+             * recorded under the distinct "parse_partial" phase with the
+             * line-range list as the reason. Keep in sync with
+             * pass_definitions.c. */
+            pp_err_add(errs, fi->rel_path, result->error_ranges ? result->error_ranges : "",
+                       "parse_partial");
         }
 
         /* Create definition nodes in local gbuf */

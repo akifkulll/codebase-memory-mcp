@@ -59,6 +59,7 @@ enum {
 #include "zova/cbm_zova_operations.h"
 #include "zova/cbm_zova_repository.h"
 #include "zova/cbm_zova_route.h"
+#include "discover/discover.h"
 
 #ifdef _WIN32
 #include <direct.h>
@@ -78,6 +79,7 @@ enum {
 #include <sys/stat.h>
 #include <time.h>
 #include <errno.h>
+#include <ctype.h>
 #include <math.h>
 
 /* ── Constants ────────────────────────────────────────────────── */
@@ -352,7 +354,11 @@ static const tool_def_t TOOLS[] = {
      "'has_more' (true when total > offset+returned). Detect truncation with has_more, then "
      "page by re-calling with offset=offset+limit until has_more is false. Narrow first via "
      "label/file_pattern/min_degree before paginating large result sets.",
-     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+     "{\"type\":\"object\",\"properties\":{"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"json\",\"compact\"],\"default\":\"json\","
+     "\"description\":\"compact: indented key/value text with flat object arrays as "
+     "tables; fewer bytes, same data.\"},"
+     "\"project\":{\"type\":\"string\"},"
      "\"projects\":{\"type\":\"array\",\"minItems\":1,\"items\":{\"type\":\"string\"},"
      "\"description\":\"Project selectors to search together. Use [\\\"*\\\"] for all "
      "ready projects. Requires Zova full authority; ranking and pagination are global. "
@@ -396,7 +402,11 @@ static const tool_def_t TOOLS[] = {
      "Find all hot-path candidates in one query, e.g. MATCH (f:Function) WHERE "
      "f.transitive_loop_depth >= 3 OR f.linear_scan_in_loop >= 1 RETURN f.qualified_name, "
      "f.transitive_loop_depth, f.linear_scan_in_loop ORDER BY f.transitive_loop_depth DESC.",
-     "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Cypher "
+     "{\"type\":\"object\",\"properties\":{"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"json\",\"compact\"],\"default\":\"json\","
+     "\"description\":\"compact: indented key/value text with flat object arrays as "
+     "tables; fewer bytes, same data.\"},"
+     "\"query\":{\"type\":\"string\",\"description\":\"Cypher "
      "query\"},\"project\":{\"type\":\"string\"},\"max_rows\":{\"type\":\"integer\","
      "\"description\":"
      "\"Optional row limit. Default: unlimited up to a 100k row "
@@ -407,7 +417,11 @@ static const tool_def_t TOOLS[] = {
      "Trace paths through the code graph. Modes: calls (callers/callees), data_flow (value "
      "propagation with args at each hop), cross_service (through HTTP/async Route nodes). "
      "Use INSTEAD OF grep for callers, dependencies, impact analysis, or data flow tracing.",
-     "{\"type\":\"object\",\"properties\":{\"function_name\":{\"type\":\"string\"},\"project\":{"
+     "{\"type\":\"object\",\"properties\":{"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"json\",\"compact\"],\"default\":\"json\","
+     "\"description\":\"compact: indented key/value text with flat object arrays as "
+     "tables; fewer bytes, same data.\"},"
+     "\"function_name\":{\"type\":\"string\"},\"project\":{"
      "\"type\":\"string\"},\"direction\":{\"type\":\"string\",\"enum\":[\"inbound\",\"outbound\","
      "\"both\"],\"default\":\"both\"},\"depth\":{\"type\":\"integer\",\"default\":3},\"mode\":{"
      "\"type\":\"string\",\"enum\":[\"calls\",\"data_flow\",\"cross_service\"],\"default\":"
@@ -445,7 +459,11 @@ static const tool_def_t TOOLS[] = {
      "the real architectural seams, which often cut across the folder layout. Optional path scopes "
      "analysis to nodes under that directory prefix (file_path).",
      /* The aspects enum mirrors VALID_ASPECTS (see aspect_is_valid) — update both together. */
-     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},\"path\":{\"type\":"
+     "{\"type\":\"object\",\"properties\":{"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"json\",\"compact\"],\"default\":\"json\","
+     "\"description\":\"compact: indented key/value text with flat object arrays as "
+     "tables; fewer bytes, same data.\"},"
+     "\"project\":{\"type\":\"string\"},\"path\":{\"type\":"
      "\"string\",\"description\":\"Optional directory prefix to scope architecture (e.g. "
      "apps/hoa)\"},"
      "\"aspects\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"enum\":[\"all\","
@@ -464,7 +482,11 @@ static const tool_def_t TOOLS[] = {
      "'total_grep_matches' (raw grep hit count) and 'total_results' (deduplicated function "
      "count) — compare to limit to detect truncation. There is no offset parameter; to see "
      "more, raise limit or narrow the query with file_pattern / path_filter.",
-     "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"project\":{\"type\":"
+     "{\"type\":\"object\",\"properties\":{"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"json\",\"compact\"],\"default\":\"json\","
+     "\"description\":\"compact: indented key/value text with flat object arrays as "
+     "tables; fewer bytes, same data.\"},"
+     "\"pattern\":{\"type\":\"string\"},\"project\":{\"type\":"
      "\"string\"},\"file_pattern\":{\"type\":\"string\",\"description\":\"Glob for grep "
      "--include (e.g. *.go)\"},\"path_filter\":{\"type\":\"string\",\"description\":\"Regex "
      "filter on result file paths (e.g. ^src/ or \\\\.(go|ts)$)\"},\"mode\":{\"type\":\"string\","
@@ -478,8 +500,21 @@ static const tool_def_t TOOLS[] = {
      "offset parameter — raise limit or narrow with file_pattern / path_filter to see more."
      "\",\"default\":10}},\"required\":[\"pattern\",\"project\"]}"},
 
-    {"list_projects", "List projects", "List all indexed projects",
-     "{\"type\":\"object\",\"properties\":{}}"},
+    {"list_projects", "List projects",
+     "List indexed projects ordered by name. Pass limit/offset to page; each response carries "
+     "catalog_token, and passing it back reports catalog_changed when projects were added, "
+     "deleted, renamed or changed health between pages (restart from offset 0).",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"offset\":{\"type\":\"integer\",\"default\":0,\"minimum\":0},"
+     "\"limit\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":500,\"description\":"
+     "\"Page size. Omit or 0 for every project.\"},"
+     "\"include_details\":{\"type\":\"boolean\",\"default\":false,\"description\":"
+     "\"Add node and edge counts per project.\"},"
+     "\"catalog_token\":{\"type\":\"string\",\"description\":"
+     "\"catalog_token from the previous page.\"},"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"json\",\"compact\"],\"default\":\"json\","
+     "\"description\":\"compact: indented key/value text with flat object arrays as "
+     "tables; fewer bytes, same data.\"}}}"},
     {"delete_project", "Delete project", "Delete a project from the index",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":["
      "\"project\"]}"},
@@ -487,6 +522,28 @@ static const tool_def_t TOOLS[] = {
     {"index_status", "Index status", "Get the indexing status of a project",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":["
      "\"project\"]}"},
+
+    {"check_index_coverage", "Check index coverage",
+     "Check per-file extraction coverage of a project's active index generation for exact "
+     "repository-relative paths and path scopes. Use it for files you cite or act on, and on "
+     "scopes before negative or exhaustive claims: files the parser skipped or only partly "
+     "understood can be missing from graph results. Reports status (no_recorded_issue, partial "
+     "with parse_error_ranges, skipped, excluded, not_indexed, missing, coverage_unavailable), "
+     "filesystem freshness against the indexed metadata, and a recommended_action. Best-effort "
+     "and about extraction only. At least one of paths or scopes is required.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"project\":{\"type\":\"string\"},"
+     "\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":128,"
+     "\"description\":\"Repository-relative files to check exactly.\"},"
+     "\"scopes\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":32,"
+     "\"description\":\"Repository-relative path prefixes; . for the whole project.\"},"
+     "\"scope_limit\":{\"type\":\"integer\",\"default\":200,\"minimum\":1,"
+     "\"maximum\":1000,\"description\":\"Max gap entries per scope.\"},"
+     "\"scope_offset\":{\"type\":\"integer\",\"default\":0,\"minimum\":0},"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"json\",\"compact\"],\"default\":\"json\","
+     "\"description\":\"compact: indented key/value text with flat object arrays as "
+     "tables; fewer bytes, same data.\"}},"
+     "\"required\":[\"project\"]}"},
 
     {"detect_changes", "Detect changes", "Detect code changes and their impact",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},\"scope\":{\"type\":"
@@ -594,6 +651,18 @@ const char *cbm_mcp_tool_input_schema(const char *tool_name) {
         }
     }
     return NULL;
+}
+
+int cbm_mcp_tool_count(void) {
+    return TOOL_COUNT;
+}
+
+const char *cbm_mcp_tool_name(int i) {
+    return i >= 0 && i < TOOL_COUNT ? TOOLS[i].name : NULL;
+}
+
+const char *cbm_mcp_tool_description(int i) {
+    return i >= 0 && i < TOOL_COUNT ? TOOLS[i].description : NULL;
 }
 
 static int mcp_tools_cursor_offset(const char *params_json) {
@@ -1227,7 +1296,61 @@ static char *project_not_found_result(char *project) {
 
 /* ── Tool handler implementations ─────────────────────────────── */
 
-static char *handle_list_zova_projects(void) {
+enum { LIST_PROJECTS_MAX_LIMIT = 500 };
+
+/* Fingerprint of what decides list_projects paging: membership, order
+ * (selectors are the sort key and change on collision renames) and health.
+ * A new generation of an existing workspace does not move any row. */
+static void catalog_page_token(const cbm_zova_catalog_scope_t *listed, char *out, size_t out_sz) {
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a 64 */
+    for (int i = 0; i < listed->count; i++) {
+        const cbm_zova_catalog_project_t *project = &listed->projects[i];
+        const char *parts[] = {project->workspace_id, project->selector,
+                               project->ready ? "r" : "-", project->healthy ? "h" : "-"};
+        for (size_t k = 0; k < sizeof(parts) / sizeof(parts[0]); k++) {
+            for (const unsigned char *c = (const unsigned char *)parts[k]; c && *c; c++) {
+                h = (h ^ *c) * 1099511628211ULL;
+            }
+            h = (h ^ 0x1fU) * 1099511628211ULL; /* field separator */
+        }
+    }
+    snprintf(out, out_sz, "%016llx", (unsigned long long)h);
+}
+
+static void add_project_details(yyjson_mut_doc *doc, yyjson_mut_val *entry, const char *db_path,
+                                const char *selector) {
+    cbm_zova_repository_t *repo = cbm_zova_repository_open(db_path, selector);
+    int nodes = 0;
+    int edges = 0;
+    bool ok = repo && cbm_zova_repository_counts(repo, cbm_zova_repository_workspace_id(repo),
+                                                 &nodes, &edges) == CBM_STORE_OK;
+    cbm_zova_repository_close(repo);
+    if (ok) {
+        yyjson_mut_obj_add_int(doc, entry, "nodes", nodes);
+        yyjson_mut_obj_add_int(doc, entry, "edges", edges);
+    } else {
+        yyjson_mut_obj_add_str(doc, entry, "details_error", "counts unavailable");
+    }
+}
+
+/* list_projects: the workspace catalog in the shared cbm.zova, ordered by
+ * selector. offset/limit page through it (no limit = every project, the
+ * original output); catalog_token from a previous page detects a catalog
+ * that changed between pages. */
+static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
+    (void)srv;
+    int offset = cbm_mcp_get_int_arg(args, "offset", 0);
+    int limit = cbm_mcp_get_int_arg(args, "limit", 0);
+    bool include_details = cbm_mcp_get_bool_arg(args, "include_details");
+    char *page_token = cbm_mcp_get_string_arg(args, "catalog_token");
+    if (offset < 0 || limit < 0) {
+        free(page_token);
+        return cbm_mcp_text_result("offset and limit must be >= 0", true);
+    }
+    if (limit > LIST_PROJECTS_MAX_LIMIT) {
+        limit = LIST_PROJECTS_MAX_LIMIT;
+    }
+
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_val *projects = yyjson_mut_arr(doc);
@@ -1237,16 +1360,24 @@ static char *handle_list_zova_projects(void) {
     char path[CBM_SZ_1K];
     cbm_zova_catalog_t *catalog = NULL;
     cbm_zova_catalog_scope_t listed = {0};
-    if (cbm_zova_user_database_path(path, sizeof(path)) == 0 && cbm_file_exists(path)) {
+    bool have_db = cbm_zova_user_database_path(path, sizeof(path)) == 0 && cbm_file_exists(path);
+    if (have_db) {
         catalog = cbm_zova_catalog_open(path);
         if (!catalog || cbm_zova_catalog_list(catalog, &listed) != CBM_STORE_OK) {
             cbm_zova_catalog_close(catalog);
             yyjson_mut_doc_free(doc);
+            free(page_token);
             return cbm_mcp_text_result("{\"error\":\"cannot read Zova project catalog\"}",
                                        true);
         }
     }
-    for (int i = 0; i < listed.count; i++) {
+    /* The catalog snapshot is taken; release the read before per-project
+     * detail reads open their own. */
+    cbm_zova_catalog_close(catalog);
+
+    int start = offset < listed.count ? offset : listed.count;
+    int end = limit > 0 && limit < listed.count - start ? start + limit : listed.count;
+    for (int i = start; i < end; i++) {
         const cbm_zova_catalog_project_t *project = &listed.projects[i];
         yyjson_mut_val *entry = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_strcpy(doc, entry, "name", project->selector);
@@ -1259,26 +1390,40 @@ static char *handle_list_zova_projects(void) {
         yyjson_mut_obj_add_strcpy(doc, entry, "health_reason", project->health_reason);
         yyjson_mut_obj_add_strcpy(doc, entry, "indexed_at", project->indexed_at);
         yyjson_mut_obj_add_int(doc, entry, "vector_dimensions", project->vector_dimensions);
+        if (include_details) {
+            add_project_details(doc, entry, path, project->selector);
+        }
         yyjson_mut_arr_add_val(projects, entry);
     }
-    if (listed.count == 0) {
+
+    char token[CBM_SZ_32];
+    catalog_page_token(&listed, token, sizeof(token));
+    yyjson_mut_obj_add_int(doc, root, "total", listed.count);
+    yyjson_mut_obj_add_int(doc, root, "offset", start);
+    yyjson_mut_obj_add_int(doc, root, "returned", end - start);
+    yyjson_mut_obj_add_bool(doc, root, "has_more", end < listed.count);
+    if (end < listed.count) {
+        yyjson_mut_obj_add_int(doc, root, "next_offset", end);
+    }
+    yyjson_mut_obj_add_strcpy(doc, root, "catalog_token", token);
+    if (page_token && strcmp(page_token, token) != 0) {
+        /* Workspaces were added, deleted, renamed or changed health since the
+         * page that issued page_token: offsets no longer line up. */
+        yyjson_mut_obj_add_bool(doc, root, "catalog_changed", true);
+        yyjson_mut_obj_add_str(doc, root, "hint",
+                               "The project catalog changed since the previous page. Restart "
+                               "from offset 0 with the new catalog_token.");
+    } else if (listed.count == 0) {
         yyjson_mut_obj_add_str(doc, root, "hint",
                                "No projects indexed. Call index_repository(repo_path=...) first.");
     }
     cbm_zova_catalog_scope_free(&listed);
-    cbm_zova_catalog_close(catalog);
+    free(page_token);
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
     char *result = cbm_mcp_text_result(json, false);
     free(json);
     return result;
-}
-
-/* list_projects: the workspace catalog in the shared cbm.zova. */
-static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
-    (void)srv;
-    (void)args;
-    return handle_list_zova_projects();
 }
 
 /* verify_project_indexed — returns a heap-allocated error JSON string when the
@@ -2068,6 +2213,594 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     return response;
 }
 
+/* ── Index coverage ───────────────────────────────────────────────
+ * Coverage is stamped on File node properties by the pipeline and published
+ * with the generation (see CBM_COVERAGE_* in pipeline.h), so every read here
+ * is scoped to one workspace and its active generation. */
+
+bool cbm_path_within_root(const char *root_path, const char *abs_path); /* defined below */
+
+enum {
+    COVERAGE_PATH_MAX = 128,
+    COVERAGE_SCOPE_MAX = 32,
+    COVERAGE_SCOPE_DEFAULT_LIMIT = 200,
+    COVERAGE_SCOPE_MAX_LIMIT = 1000,
+    COVERAGE_RANGE_MAX = 64,
+    COVERAGE_STATUS_EXAMPLES = 5,
+};
+
+typedef enum {
+    COVERAGE_PATH_OK = 0,
+    COVERAGE_PATH_OUTSIDE,
+    COVERAGE_PATH_INVALID,
+} coverage_path_result_t;
+
+/* What one File row says about extraction. */
+typedef struct {
+    const char *status; /* no_recorded_issue | partial | skipped */
+    char *ranges;       /* partial: "12-40,88-90" */
+    char *phase;        /* skipped */
+    char *reason;       /* skipped */
+} coverage_file_t;
+
+static void coverage_file_parse(const cbm_zova_file_coverage_t *row, coverage_file_t *out) {
+    memset(out, 0, sizeof(*out));
+    out->status = "no_recorded_issue";
+    if (!row->properties) {
+        /* Tracked by a file hash but without a File node: nothing extracted. */
+        out->status = "skipped";
+        out->phase = heap_strdup("structure");
+        out->reason = heap_strdup("tracked file has no File node");
+        return;
+    }
+    yyjson_doc *doc = yyjson_read(row->properties, strlen(row->properties), 0);
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    const char *coverage = yyjson_get_str(yyjson_obj_get(root, "coverage"));
+    if (coverage && strcmp(coverage, CBM_COVERAGE_PARTIAL) == 0) {
+        const char *ranges = yyjson_get_str(yyjson_obj_get(root, "parse_error_ranges"));
+        out->status = "partial";
+        out->ranges = heap_strdup(ranges ? ranges : "");
+    } else if (coverage && strcmp(coverage, CBM_COVERAGE_MISSED) == 0) {
+        const char *phase = yyjson_get_str(yyjson_obj_get(root, "coverage_phase"));
+        const char *reason = yyjson_get_str(yyjson_obj_get(root, "coverage_reason"));
+        out->status = "skipped";
+        out->phase = heap_strdup(phase ? phase : "");
+        out->reason = heap_strdup(reason ? reason : "");
+    }
+    yyjson_doc_free(doc);
+}
+
+static void coverage_file_clear(coverage_file_t *c) {
+    free(c->ranges);
+    free(c->phase);
+    free(c->reason);
+    memset(c, 0, sizeof(*c));
+}
+
+/* Normalize an untrusted repository-relative path without touching the
+ * filesystem. Absolute paths, drive/UNC paths and any `..` component are
+ * outside the project; control bytes are invalid. A root scope (`.`)
+ * normalizes to the empty prefix. */
+static coverage_path_result_t coverage_normalize_rel(const char *input, bool allow_root, char *out,
+                                                     size_t out_size) {
+    if (!input || !out || out_size == 0U) {
+        return COVERAGE_PATH_INVALID;
+    }
+    out[0] = '\0';
+    size_t len = strlen(input);
+    if (len == 0U && allow_root) {
+        return COVERAGE_PATH_OK;
+    }
+    if (len == 0U || len >= out_size) {
+        return COVERAGE_PATH_INVALID;
+    }
+    if (input[0] == '/' || input[0] == '\\' ||
+        (len >= 2U && isalpha((unsigned char)input[0]) && input[1] == ':')) {
+        return COVERAGE_PATH_OUTSIDE;
+    }
+    size_t in = 0U;
+    size_t written = 0U;
+    while (in < len) {
+        while (in < len && (input[in] == '/' || input[in] == '\\')) {
+            in++;
+        }
+        if (in >= len) {
+            break;
+        }
+        size_t start = in;
+        while (in < len && input[in] != '/' && input[in] != '\\') {
+            if ((unsigned char)input[in] < 0x20U) {
+                return COVERAGE_PATH_INVALID;
+            }
+            in++;
+        }
+        size_t part_len = in - start;
+        if (part_len == 1U && input[start] == '.') {
+            continue;
+        }
+        if (part_len == 2U && input[start] == '.' && input[start + 1U] == '.') {
+            return COVERAGE_PATH_OUTSIDE;
+        }
+        if (written > 0U) {
+            out[written++] = '/';
+        }
+        memcpy(out + written, input + start, part_len);
+        written += part_len;
+    }
+    out[written] = '\0';
+    return written > 0U || allow_root ? COVERAGE_PATH_OK : COVERAGE_PATH_INVALID;
+}
+
+/* Same clock the pipeline records in cbm_file_hashes_v1.mtime_ns. */
+static int64_t coverage_stat_mtime_ns(const struct stat *st) {
+#ifdef __APPLE__
+    return ((int64_t)st->st_mtimespec.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
+           (int64_t)st->st_mtimespec.tv_nsec;
+#elif defined(_WIN32)
+    return (int64_t)st->st_mtime * (int64_t)CBM_NSEC_PER_SEC;
+#else
+    return ((int64_t)st->st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) + (int64_t)st->st_mtim.tv_nsec;
+#endif
+}
+
+/* stat root/rel. Returns 0 when it exists, -1 when it does not, -2 when it
+ * resolves outside the root (symlink escape). */
+static int coverage_stat(const char *root_path, const char *rel, struct stat *st) {
+    char abs_path[CBM_SZ_4K];
+    int n = snprintf(abs_path, sizeof(abs_path), "%s/%s", root_path, rel);
+    if (n < 0 || (size_t)n >= sizeof(abs_path) || stat(abs_path, st) != 0) {
+        return -1;
+    }
+    return cbm_path_within_root(root_path, abs_path) ? 0 : -2;
+}
+
+/* Filesystem metadata against the hash row published with the generation. */
+static const char *coverage_freshness(const char *root_path, const cbm_zova_file_coverage_t *row) {
+    if (!root_path || !root_path[0]) {
+        return "unavailable";
+    }
+    struct stat st;
+    int rc = coverage_stat(root_path, row->file_path, &st);
+    if (rc == -1) {
+        return "missing";
+    }
+    if (rc != 0) {
+        return "unavailable";
+    }
+    if (!row->has_hash) {
+        return "not_tracked";
+    }
+    return row->mtime_ns == coverage_stat_mtime_ns(&st) && row->size_bytes == (int64_t)st.st_size
+               ? "metadata_match"
+               : "metadata_changed";
+}
+
+/* Discovery rules that provably exclude rel: built-in skip directories and
+ * suffixes, and the root .gitignore / .cbmignore. NULL when none applies;
+ * nested ignore files and global excludes are not consulted. */
+static const char *coverage_exclusion(const char *rel, const cbm_gitignore_t *gitignore,
+                                      const cbm_gitignore_t *cbmignore) {
+    char prefix[CBM_SZ_4K];
+    snprintf(prefix, sizeof(prefix), "%s", rel);
+    for (char *slash = strchr(prefix, '/'); slash; slash = strchr(slash + 1, '/')) {
+        *slash = '\0';
+        const char *base = strrchr(prefix, '/');
+        base = base ? base + 1 : prefix;
+        if (cbm_should_skip_dir(base, CBM_MODE_FULL)) {
+            return "skipped_directory";
+        }
+        if (gitignore && cbm_gitignore_matches(gitignore, prefix, true)) {
+            return "gitignore";
+        }
+        if (cbmignore && cbm_gitignore_matches(cbmignore, prefix, true)) {
+            return "cbmignore";
+        }
+        *slash = '/';
+    }
+    const char *base = strrchr(rel, '/');
+    if (cbm_has_ignored_suffix(base ? base + 1 : rel, CBM_MODE_FULL)) {
+        return "ignored_suffix";
+    }
+    if (gitignore && cbm_gitignore_matches(gitignore, rel, false)) {
+        return "gitignore";
+    }
+    if (cbmignore && cbm_gitignore_matches(cbmignore, rel, false)) {
+        return "cbmignore";
+    }
+    return NULL;
+}
+
+static void coverage_add_ranges(yyjson_mut_doc *doc, yyjson_mut_val *item, const char *ranges) {
+    if (!ranges || !ranges[0]) {
+        return;
+    }
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    const char *p = ranges;
+    int emitted = 0;
+    while (*p && emitted < COVERAGE_RANGE_MAX) {
+        char *end = NULL;
+        long start = strtol(p, &end, 10);
+        if (end == p || start <= 0) {
+            break;
+        }
+        long stop = start;
+        p = end;
+        if (*p == '-') {
+            long parsed = strtol(p + 1, &end, 10);
+            if (end == p + 1 || parsed < start) {
+                break;
+            }
+            stop = parsed;
+            p = end;
+        }
+        yyjson_mut_val *range = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_int(doc, range, "start", start);
+        yyjson_mut_obj_add_int(doc, range, "end", stop);
+        yyjson_mut_arr_add_val(arr, range);
+        emitted++;
+        if (*p != ',') {
+            break;
+        }
+        p++;
+    }
+    yyjson_mut_obj_add_val(doc, item, "parse_error_ranges", arr);
+}
+
+static void coverage_add_detail(yyjson_mut_doc *doc, yyjson_mut_val *item,
+                                const coverage_file_t *c) {
+    if (c->ranges) {
+        coverage_add_ranges(doc, item, c->ranges);
+    }
+    if (c->phase) {
+        yyjson_mut_obj_add_strcpy(doc, item, "phase", c->phase);
+        yyjson_mut_obj_add_strcpy(doc, item, "reason", c->reason ? c->reason : "");
+    }
+}
+
+static const char *coverage_recommended_action(const char *status, const char *freshness) {
+    if (strcmp(status, "excluded") == 0) {
+        return "read_source_or_change_ignore_rules";
+    }
+    if (strcmp(status, "not_indexed") == 0 || strcmp(status, "coverage_unavailable") == 0) {
+        return "read_source_and_reindex";
+    }
+    if (!freshness || strcmp(freshness, "metadata_match") != 0) {
+        return "read_source_and_reindex";
+    }
+    if (strcmp(status, "partial") == 0) {
+        return "read_ranges_and_verify_scope";
+    }
+    if (strcmp(status, "skipped") == 0) {
+        return "read_source_directly";
+    }
+    return "use_graph_with_best_effort_caveat";
+}
+
+static bool coverage_in_scope(const char *path, const char *scope) {
+    size_t n = strlen(scope);
+    return n == 0 || (strncmp(path, scope, n) == 0 && (path[n] == '\0' || path[n] == '/'));
+}
+
+/* One exact path. rows/count is the File row for rel (0 or 1 rows). */
+static void coverage_add_path_json(yyjson_mut_doc *doc, yyjson_mut_val *item, const char *rel,
+                                   const cbm_zova_file_coverage_t *rows, int count,
+                                   const char *root_path, bool recorded,
+                                   const cbm_gitignore_t *gitignore,
+                                   const cbm_gitignore_t *cbmignore) {
+    yyjson_mut_obj_add_strcpy(doc, item, "path", rel);
+    if (count == 0) {
+        struct stat st;
+        int rc = root_path ? coverage_stat(root_path, rel, &st) : -1;
+        const char *excluded = rc == -2 ? NULL : coverage_exclusion(rel, gitignore, cbmignore);
+        const char *status = rc == -2 ? "outside_project"
+                             : excluded ? "excluded"
+                             : rc == 0  ? "not_indexed"
+                                        : "missing";
+        yyjson_mut_obj_add_str(doc, item, "status", status);
+        if (excluded) {
+            yyjson_mut_obj_add_str(doc, item, "reason", excluded);
+        }
+        yyjson_mut_obj_add_str(doc, item, "freshness", rc == 0 ? "not_tracked" : "missing");
+        yyjson_mut_obj_add_str(doc, item, "recommended_action",
+                               rc == 0 || excluded ? coverage_recommended_action(status, NULL)
+                                                   : "verify_path");
+        return;
+    }
+    coverage_file_t c;
+    coverage_file_parse(&rows[0], &c);
+    const char *status =
+        strcmp(c.status, "no_recorded_issue") == 0 && !recorded ? "coverage_unavailable"
+                                                                : c.status;
+    const char *freshness = coverage_freshness(root_path, &rows[0]);
+    yyjson_mut_obj_add_str(doc, item, "status", status);
+    yyjson_mut_obj_add_str(doc, item, "freshness", freshness);
+    yyjson_mut_obj_add_str(doc, item, "recommended_action",
+                           coverage_recommended_action(status, freshness));
+    coverage_add_detail(doc, item, &c);
+    coverage_file_clear(&c);
+}
+
+/* Scope counts and the paginated gap list. rows is the workspace's full
+ * sorted File list. */
+static void coverage_add_scope_json(yyjson_mut_doc *doc, yyjson_mut_val *item, const char *scope,
+                                    const cbm_zova_file_coverage_t *rows, int count, bool recorded,
+                                    int offset, int limit) {
+    yyjson_mut_obj_add_strcpy(doc, item, "scope", scope[0] ? scope : ".");
+    int files = 0;
+    int partial = 0;
+    int skipped = 0;
+    int gaps = 0;
+    yyjson_mut_val *entries = yyjson_mut_arr(doc);
+    for (int i = 0; i < count; i++) {
+        if (!coverage_in_scope(rows[i].file_path, scope)) {
+            continue;
+        }
+        files++;
+        coverage_file_t c;
+        coverage_file_parse(&rows[i], &c);
+        bool gap = strcmp(c.status, "no_recorded_issue") != 0;
+        if (gap) {
+            if (strcmp(c.status, "partial") == 0) {
+                partial++;
+            } else {
+                skipped++;
+            }
+            if (gaps >= offset && gaps < offset + limit) {
+                yyjson_mut_val *entry = yyjson_mut_obj(doc);
+                yyjson_mut_obj_add_strcpy(doc, entry, "path", rows[i].file_path);
+                yyjson_mut_obj_add_str(doc, entry, "status", c.status);
+                coverage_add_detail(doc, entry, &c);
+                yyjson_mut_arr_add_val(entries, entry);
+            }
+            gaps++;
+        }
+        coverage_file_clear(&c);
+    }
+    const char *status = gaps > 0     ? "known_gaps"
+                         : !recorded  ? "coverage_unavailable"
+                         : files == 0 ? "no_indexed_files"
+                                      : "no_recorded_issue";
+    yyjson_mut_obj_add_str(doc, item, "status", status);
+    yyjson_mut_obj_add_int(doc, item, "files", files);
+    yyjson_mut_obj_add_int(doc, item, "no_recorded_issue", files - partial - skipped);
+    yyjson_mut_obj_add_int(doc, item, "partial", partial);
+    yyjson_mut_obj_add_int(doc, item, "skipped", skipped);
+    yyjson_mut_obj_add_int(doc, item, "total_gaps", gaps);
+    int end = offset + limit < gaps ? offset + limit : gaps;
+    yyjson_mut_obj_add_bool(doc, item, "has_more", end < gaps);
+    if (end < gaps) {
+        yyjson_mut_obj_add_int(doc, item, "next_offset", end);
+    }
+    yyjson_mut_obj_add_val(doc, item, "gaps", entries);
+}
+
+static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args) {
+    (void)srv;
+    char *project = get_project_arg(args);
+    char db_path[CBM_SZ_1K];
+    cbm_zova_repository_t *repo = NULL;
+    if (!project || cbm_zova_user_database_path(db_path, sizeof(db_path)) != 0 ||
+        !(repo = cbm_zova_repository_open(db_path, project))) {
+        return project_not_found_result(project);
+    }
+
+    yyjson_doc *adoc = yyjson_read(args, strlen(args), 0);
+    yyjson_val *aroot = adoc ? yyjson_doc_get_root(adoc) : NULL;
+    yyjson_val *paths = yyjson_obj_get(aroot, "paths");
+    yyjson_val *scopes = yyjson_obj_get(aroot, "scopes");
+    size_t path_count = yyjson_is_arr(paths) ? yyjson_arr_size(paths) : 0U;
+    size_t scope_count = yyjson_is_arr(scopes) ? yyjson_arr_size(scopes) : 0U;
+    if (!aroot || (paths && !yyjson_is_arr(paths)) || (scopes && !yyjson_is_arr(scopes)) ||
+        (path_count == 0U && scope_count == 0U) || path_count > COVERAGE_PATH_MAX ||
+        scope_count > COVERAGE_SCOPE_MAX) {
+        yyjson_doc_free(adoc);
+        cbm_zova_repository_close(repo);
+        free(project);
+        return cbm_mcp_text_result(
+            "paths or scopes is required (arrays; max 128 paths and 32 scopes)", true);
+    }
+    int scope_limit = cbm_mcp_get_int_arg(args, "scope_limit", COVERAGE_SCOPE_DEFAULT_LIMIT);
+    int scope_offset = cbm_mcp_get_int_arg(args, "scope_offset", 0);
+    scope_limit = scope_limit < 1                          ? 1
+                  : scope_limit > COVERAGE_SCOPE_MAX_LIMIT ? COVERAGE_SCOPE_MAX_LIMIT
+                                                           : scope_limit;
+    scope_offset = scope_offset < 0 ? 0 : scope_offset;
+
+    const char *workspace_id = cbm_zova_repository_workspace_id(repo);
+    char *root_path = NULL;
+    int64_t generation = 0;
+    bool recorded = false;
+    cbm_zova_file_coverage_t *all = NULL;
+    int all_count = 0;
+    /* Scopes need the full list; exact paths read one row each. The first
+     * read also fetches the root, generation and marker. */
+    int rc = cbm_zova_repository_file_coverage(repo, workspace_id, scope_count ? NULL : "",
+                                               &all, &all_count, &root_path, &generation,
+                                               &recorded);
+
+    cbm_gitignore_t *gitignore = NULL;
+    cbm_gitignore_t *cbmignore = NULL;
+    if (rc == CBM_STORE_OK && root_path && path_count > 0U) {
+        char ignore_path[CBM_SZ_4K];
+        snprintf(ignore_path, sizeof(ignore_path), "%s/.gitignore", root_path);
+        gitignore = cbm_gitignore_load(ignore_path);
+        snprintf(ignore_path, sizeof(ignore_path), "%s/.cbmignore", root_path);
+        cbmignore = cbm_gitignore_load(ignore_path);
+    }
+
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_strcpy(doc, root, "project", project);
+    yyjson_mut_obj_add_str(doc, root, "signal", "best_effort");
+    yyjson_mut_obj_add_sint(doc, root, "generation", generation);
+    yyjson_mut_obj_add_bool(doc, root, "coverage_recorded", recorded);
+
+    yyjson_mut_val *path_results = yyjson_mut_arr(doc);
+    size_t idx;
+    size_t max;
+    yyjson_val *value;
+    yyjson_arr_foreach(paths, idx, max, value) {
+        if (rc != CBM_STORE_OK) {
+            break;
+        }
+        yyjson_mut_val *item = yyjson_mut_obj(doc);
+        const char *input = yyjson_get_str(value);
+        yyjson_mut_obj_add_strcpy(doc, item, "requested_path", input ? input : "");
+        char rel[CBM_SZ_4K];
+        coverage_path_result_t normalized = coverage_normalize_rel(input, false, rel, sizeof(rel));
+        if (normalized != COVERAGE_PATH_OK) {
+            yyjson_mut_obj_add_str(doc, item, "status",
+                                   normalized == COVERAGE_PATH_OUTSIDE ? "outside_project"
+                                                                       : "invalid_path");
+            yyjson_mut_obj_add_str(doc, item, "freshness", "unavailable");
+            yyjson_mut_obj_add_str(doc, item, "recommended_action", "use_project_relative_path");
+            yyjson_mut_arr_add_val(path_results, item);
+            continue;
+        }
+        cbm_zova_file_coverage_t *one = NULL;
+        int one_count = 0;
+        if (scope_count) {
+            /* The full list is sorted by path. */
+            int lo = 0;
+            int hi = all_count;
+            while (lo < hi) {
+                int mid = lo + ((hi - lo) / 2);
+                if (strcmp(all[mid].file_path, rel) < 0) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            if (lo < all_count && strcmp(all[lo].file_path, rel) == 0) {
+                coverage_add_path_json(doc, item, rel, &all[lo], 1, root_path, recorded,
+                                       gitignore, cbmignore);
+            } else {
+                coverage_add_path_json(doc, item, rel, NULL, 0, root_path, recorded, gitignore,
+                                       cbmignore);
+            }
+        } else if ((rc = cbm_zova_repository_file_coverage(repo, workspace_id, rel, &one,
+                                                           &one_count, NULL, NULL, NULL)) ==
+                   CBM_STORE_OK) {
+            coverage_add_path_json(doc, item, rel, one, one_count, root_path, recorded,
+                                   gitignore, cbmignore);
+            cbm_zova_file_coverage_free(one, one_count);
+        }
+        yyjson_mut_arr_add_val(path_results, item);
+    }
+    yyjson_mut_obj_add_val(doc, root, "paths", path_results);
+
+    yyjson_mut_val *scope_results = yyjson_mut_arr(doc);
+    yyjson_arr_foreach(scopes, idx, max, value) {
+        if (rc != CBM_STORE_OK) {
+            break;
+        }
+        yyjson_mut_val *item = yyjson_mut_obj(doc);
+        const char *input = yyjson_get_str(value);
+        yyjson_mut_obj_add_strcpy(doc, item, "requested_scope", input ? input : "");
+        char scope[CBM_SZ_4K];
+        coverage_path_result_t normalized =
+            coverage_normalize_rel(input, true, scope, sizeof(scope));
+        if (normalized != COVERAGE_PATH_OK) {
+            yyjson_mut_obj_add_str(doc, item, "status",
+                                   normalized == COVERAGE_PATH_OUTSIDE ? "outside_project"
+                                                                       : "invalid_path");
+        } else {
+            coverage_add_scope_json(doc, item, scope, all, all_count, recorded, scope_offset,
+                                    scope_limit);
+        }
+        yyjson_mut_arr_add_val(scope_results, item);
+    }
+    yyjson_mut_obj_add_val(doc, root, "scopes", scope_results);
+    if (scope_count) {
+        yyjson_mut_obj_add_str(doc, root, "scope_note",
+                               "Scopes list indexed files only. Files excluded by ignore rules "
+                               "or unsupported languages are not enumerable; check them as "
+                               "exact paths.");
+    }
+    yyjson_mut_obj_add_str(
+        doc, root, "caveat",
+        "Best-effort signal about extraction only. no_recorded_issue does not prove graph or "
+        "source completeness; read flagged source and qualify claims when freshness is not "
+        "metadata_match.");
+
+    cbm_gitignore_free(gitignore);
+    cbm_gitignore_free(cbmignore);
+    cbm_zova_file_coverage_free(all, all_count);
+    free(root_path);
+    cbm_zova_repository_close(repo);
+    yyjson_doc_free(adoc);
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    free(project);
+    if (rc != CBM_STORE_OK) {
+        free(json);
+        return cbm_mcp_text_result("shared cbm.zova coverage read failed", true);
+    }
+    char *result = cbm_mcp_text_result(json, false);
+    free(json);
+    return result;
+}
+
+/* index_status summary: counts over the active generation plus a few gap
+ * examples. Leaves root untouched when the read fails. */
+static void add_coverage_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                 cbm_zova_repository_t *repo, const char *workspace_id) {
+    cbm_zova_file_coverage_t *rows = NULL;
+    int count = 0;
+    int64_t generation = 0;
+    bool recorded = false;
+    if (cbm_zova_repository_file_coverage(repo, workspace_id, NULL, &rows, &count, NULL,
+                                          &generation, &recorded) != CBM_STORE_OK) {
+        return;
+    }
+    yyjson_mut_val *cov = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_sint(doc, cov, "generation", generation);
+    yyjson_mut_obj_add_bool(doc, cov, "recorded", recorded);
+    coverage_add_scope_json(doc, cov, "", rows, count, recorded, 0, COVERAGE_STATUS_EXAMPLES);
+    yyjson_mut_obj_remove_key(cov, "scope");
+    yyjson_mut_obj_add_str(doc, cov, "note",
+                           "Extraction completeness only. Use check_index_coverage for exact "
+                           "paths, scopes and paging.");
+    yyjson_mut_obj_add_val(doc, root, "coverage", cov);
+    cbm_zova_file_coverage_free(rows, count);
+}
+
+/* get_code_snippet: flag a partially parsed or skipped source file. NULL when
+ * the file has no recorded gap. Caller frees. */
+static char *coverage_snippet_note(cbm_zova_repository_t *repo, const char *workspace_id,
+                                   const char *file_path) {
+    cbm_zova_file_coverage_t *rows = NULL;
+    int count = 0;
+    if (!file_path || !file_path[0] ||
+        cbm_zova_repository_file_coverage(repo, workspace_id, file_path, &rows, &count, NULL,
+                                          NULL, NULL) != CBM_STORE_OK) {
+        return NULL;
+    }
+    char *note = NULL;
+    if (count > 0) {
+        coverage_file_t c;
+        coverage_file_parse(&rows[0], &c);
+        char buf[CBM_SZ_1K];
+        if (c.ranges) {
+            snprintf(buf, sizeof(buf),
+                     "The parser recovered from errors in this file (lines %s); the graph may "
+                     "miss definitions or calls there. Read the source directly.",
+                     c.ranges[0] ? c.ranges : "unknown");
+            note = heap_strdup(buf);
+        } else if (c.phase) {
+            snprintf(buf, sizeof(buf),
+                     "This file was not extracted (%s%s%s); the graph may miss its definitions. "
+                     "Read the source directly.",
+                     c.phase, c.reason && c.reason[0] ? ": " : "", c.reason ? c.reason : "");
+            note = heap_strdup(buf);
+        }
+        coverage_file_clear(&c);
+    }
+    cbm_zova_file_coverage_free(rows, count);
+    return note;
+}
+
 static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     char *project = get_project_arg(args);
     char path[CBM_SZ_1K];
@@ -2082,8 +2815,8 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     int rc = cbm_zova_repository_counts(repo, workspace_id, &nodes, &edges);
     if (rc == CBM_STORE_OK)
         rc = cbm_zova_repository_get_project(repo, workspace_id, &info);
-    cbm_zova_repository_close(repo);
     if (rc != CBM_STORE_OK) {
+        cbm_zova_repository_close(repo);
         free(project);
         return cbm_mcp_text_result("shared cbm.zova status read failed", true);
     }
@@ -2095,6 +2828,8 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     yyjson_mut_obj_add_int(doc, root, "edges", edges);
     yyjson_mut_obj_add_str(doc, root, "status", nodes > 0 ? "ready" : "empty");
     yyjson_mut_obj_add_strcpy(doc, root, "root_path", info.root_path ? info.root_path : "");
+    add_coverage_summary(doc, root, repo, workspace_id);
+    cbm_zova_repository_close(repo);
     add_git_context_json(doc, root, info.root_path);
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
@@ -3208,28 +3943,57 @@ enum { INDEX_SKIPPED_FILE_CAP = 50 };
  * When there are skips, also emits:
  *   "skipped": {"files":[{path,reason,phase}..(<=50)], "count":N, "truncated":bool}
  * and, if a per-run logfile was written, "logfile": "<path>".
+ * Files the parser only partly understood (phase "parse_partial") were still
+ * indexed, so they are reported apart as "parse_partial" with their error
+ * line ranges and do not count as skipped.
  * The run status stays "indexed" — a skipped file is the expected handled
  * outcome, not a failure. errs[] is borrowed (copied into doc). */
 static void add_skipped_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
                                 const cbm_file_error_t *errs, int count, const char *logfile) {
-    yyjson_mut_obj_add_int(doc, root, "skipped_count", count < 0 ? 0 : count);
+    int skipped_count = 0;
+    int partial_count = 0;
+    for (int i = 0; errs && i < count; i++) {
+        if (errs[i].phase && strcmp(errs[i].phase, "parse_partial") == 0) {
+            partial_count++;
+        } else {
+            skipped_count++;
+        }
+    }
+    yyjson_mut_obj_add_int(doc, root, "skipped_count", skipped_count);
     if (!errs || count <= 0) {
         return;
     }
-    yyjson_mut_val *skipped = yyjson_mut_obj(doc);
-    yyjson_mut_val *files = yyjson_mut_arr(doc);
-    int shown = count < INDEX_SKIPPED_FILE_CAP ? count : INDEX_SKIPPED_FILE_CAP;
-    for (int i = 0; i < shown; i++) {
-        yyjson_mut_val *fe = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_strcpy(doc, fe, "path", errs[i].path ? errs[i].path : "");
-        yyjson_mut_obj_add_strcpy(doc, fe, "reason", errs[i].reason ? errs[i].reason : "");
-        yyjson_mut_obj_add_strcpy(doc, fe, "phase", errs[i].phase ? errs[i].phase : "");
-        yyjson_mut_arr_add_val(files, fe);
+    for (int kind = 0; kind < 2; kind++) {
+        bool partial = kind == 1;
+        int total = partial ? partial_count : skipped_count;
+        if (total == 0) {
+            continue;
+        }
+        yyjson_mut_val *group = yyjson_mut_obj(doc);
+        yyjson_mut_val *files = yyjson_mut_arr(doc);
+        int shown = 0;
+        for (int i = 0; i < count && shown < INDEX_SKIPPED_FILE_CAP; i++) {
+            bool is_partial = errs[i].phase && strcmp(errs[i].phase, "parse_partial") == 0;
+            if (is_partial != partial) {
+                continue;
+            }
+            yyjson_mut_val *fe = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, fe, "path", errs[i].path ? errs[i].path : "");
+            if (partial) {
+                yyjson_mut_obj_add_strcpy(doc, fe, "error_ranges",
+                                          errs[i].reason ? errs[i].reason : "");
+            } else {
+                yyjson_mut_obj_add_strcpy(doc, fe, "reason", errs[i].reason ? errs[i].reason : "");
+                yyjson_mut_obj_add_strcpy(doc, fe, "phase", errs[i].phase ? errs[i].phase : "");
+            }
+            yyjson_mut_arr_add_val(files, fe);
+            shown++;
+        }
+        yyjson_mut_obj_add_val(doc, group, "files", files);
+        yyjson_mut_obj_add_int(doc, group, "count", total);
+        yyjson_mut_obj_add_bool(doc, group, "truncated", total > INDEX_SKIPPED_FILE_CAP);
+        yyjson_mut_obj_add_val(doc, root, partial ? "parse_partial" : "skipped", group);
     }
-    yyjson_mut_obj_add_val(doc, skipped, "files", files);
-    yyjson_mut_obj_add_int(doc, skipped, "count", count);
-    yyjson_mut_obj_add_bool(doc, skipped, "truncated", count > INDEX_SKIPPED_FILE_CAP);
-    yyjson_mut_obj_add_val(doc, root, "skipped", skipped);
     if (logfile && logfile[0]) {
         yyjson_mut_obj_add_strcpy(doc, root, "logfile", logfile);
     }
@@ -3318,6 +4082,10 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
             edges = 0;
             degraded = true;
         }
+        /* The published generation's coverage, not just this run's: an
+         * incremental run re-parses only changed files, so its own skip list
+         * would make older gaps look healed. */
+        add_coverage_summary(doc, root, repository, workspace_id);
         cbm_zova_repository_close(repository);
     }
     if (!degraded)
@@ -4331,6 +5099,21 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     /* match_method — omitted for exact matches */
     if (match_method) {
         yyjson_mut_obj_add_str(doc, root_obj, "match_method", match_method);
+    }
+
+    /* coverage_note — only when the source file has a recorded parse gap */
+    char *coverage_note = NULL;
+    char db_path[CBM_SZ_1K];
+    cbm_zova_repository_t *repo = NULL;
+    if (srv->current_project && cbm_zova_user_database_path(db_path, sizeof(db_path)) == 0 &&
+        (repo = cbm_zova_repository_open(db_path, srv->current_project))) {
+        coverage_note = coverage_snippet_note(repo, cbm_zova_repository_workspace_id(repo),
+                                              node->file_path);
+        cbm_zova_repository_close(repo);
+    }
+    if (coverage_note) {
+        yyjson_mut_obj_add_strcpy(doc, root_obj, "coverage_note", coverage_note);
+        free(coverage_note);
     }
 
     /* Enrich with node properties (freed AFTER serialization — zero-copy). */
@@ -5644,12 +6427,307 @@ static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
     return result;
 }
 
+/* ── Compact output ───────────────────────────────────────────────
+ * Opt-in format:"compact" for discovery tools. The JSON result is rendered as
+ * indented "key: value" lines; an array of flat objects becomes a table with
+ * one header of column names and one space-separated row per element, which
+ * is where most of the saving comes from. Strings are quoted (JSON escapes)
+ * whenever a bare word would be ambiguous, null prints as null and a cell an
+ * element lacks prints as "-", so the rendering is lossless. The compact
+ * result carries no structuredContent copy. */
+
+typedef struct {
+    char *buf;
+    size_t len;
+    size_t cap;
+} compact_buf_t;
+
+static void compact_put(compact_buf_t *b, const char *s, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : CBM_SZ_4K;
+        while (b->len + n + 1 > cap) {
+            cap *= 2;
+        }
+        char *grown = realloc(b->buf, cap);
+        if (!grown) {
+            return;
+        }
+        b->buf = grown;
+        b->cap = cap;
+    }
+    memcpy(b->buf + b->len, s, n);
+    b->len += n;
+    b->buf[b->len] = '\0';
+}
+
+static void compact_puts(compact_buf_t *b, const char *s) {
+    compact_put(b, s, strlen(s));
+}
+
+static void compact_indent(compact_buf_t *b, int depth) {
+    for (int i = 0; i < depth; i++) {
+        compact_put(b, "  ", 2);
+    }
+}
+
+static bool compact_bare_ok(const char *s) {
+    if (!s[0] || strcmp(s, "-") == 0 || strcmp(s, "null") == 0 || strcmp(s, "true") == 0 ||
+        strcmp(s, "false") == 0) {
+        return false;
+    }
+    char *end = NULL;
+    (void)strtod(s, &end);
+    if (end && *end == '\0') {
+        return false; /* would read back as a number */
+    }
+    for (const unsigned char *c = (const unsigned char *)s; *c; c++) {
+        if (*c <= ' ' || *c == '"' || *c == 0x7f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void compact_scalar(compact_buf_t *b, yyjson_val *v) {
+    if (yyjson_is_str(v) && compact_bare_ok(yyjson_get_str(v))) {
+        compact_puts(b, yyjson_get_str(v));
+        return;
+    }
+    char *text = yyjson_val_write(v, 0, NULL);
+    if (text) {
+        compact_puts(b, text);
+        free(text);
+    }
+}
+
+static bool compact_is_scalar(yyjson_val *v) {
+    return !yyjson_is_obj(v) && !yyjson_is_arr(v);
+}
+
+/* An array whose elements are all objects with only scalar values. */
+static bool compact_is_table(yyjson_val *arr) {
+    if (yyjson_arr_size(arr) == 0) {
+        return false;
+    }
+    size_t i;
+    size_t n;
+    yyjson_val *el;
+    yyjson_arr_foreach(arr, i, n, el) {
+        if (!yyjson_is_obj(el)) {
+            return false;
+        }
+        size_t k;
+        size_t m;
+        yyjson_val *key;
+        yyjson_val *val;
+        yyjson_obj_foreach(el, k, m, key, val) {
+            (void)key;
+            if (!compact_is_scalar(val)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static void compact_value(compact_buf_t *b, const char *key, yyjson_val *v, int depth);
+
+static void compact_table(compact_buf_t *b, yyjson_val *arr, int depth) {
+    enum { MAX_COLS = 64 };
+    const char *cols[MAX_COLS];
+    int ncols = 0;
+    size_t i;
+    size_t n;
+    yyjson_val *el;
+    yyjson_arr_foreach(arr, i, n, el) {
+        size_t k;
+        size_t m;
+        yyjson_val *key;
+        yyjson_val *val;
+        yyjson_obj_foreach(el, k, m, key, val) {
+            (void)val;
+            const char *name = yyjson_get_str(key);
+            bool seen = false;
+            for (int c = 0; c < ncols && !seen; c++) {
+                seen = strcmp(cols[c], name) == 0;
+            }
+            if (!seen && ncols < MAX_COLS) {
+                cols[ncols++] = name;
+            }
+        }
+    }
+    compact_puts(b, "  (");
+    for (int c = 0; c < ncols; c++) {
+        compact_puts(b, c ? " " : "");
+        compact_puts(b, cols[c]);
+    }
+    compact_puts(b, ")\n");
+    yyjson_arr_foreach(arr, i, n, el) {
+        compact_indent(b, depth + 1);
+        for (int c = 0; c < ncols; c++) {
+            compact_puts(b, c ? " " : "");
+            yyjson_val *cell = yyjson_obj_get(el, cols[c]);
+            if (cell) {
+                compact_scalar(b, cell);
+            } else {
+                compact_puts(b, "-");
+            }
+        }
+        compact_puts(b, "\n");
+    }
+}
+
+static void compact_value(compact_buf_t *b, const char *key, yyjson_val *v, int depth) {
+    compact_indent(b, depth);
+    if (key) {
+        compact_puts(b, key);
+    }
+    if (compact_is_scalar(v)) {
+        compact_puts(b, key ? ": " : "");
+        compact_scalar(b, v);
+        compact_puts(b, "\n");
+        return;
+    }
+    if (yyjson_is_obj(v)) {
+        compact_puts(b, key ? ":\n" : "{}\n");
+        size_t i;
+        size_t n;
+        yyjson_val *k;
+        yyjson_val *child;
+        yyjson_obj_foreach(v, i, n, k, child) {
+            compact_value(b, yyjson_get_str(k), child, depth + 1);
+        }
+        return;
+    }
+    char count[CBM_SZ_32];
+    snprintf(count, sizeof(count), "[%zu]", yyjson_arr_size(v));
+    compact_puts(b, count);
+    if (compact_is_table(v)) {
+        compact_table(b, v, depth);
+        return;
+    }
+    size_t i;
+    size_t n;
+    yyjson_val *el;
+    bool all_scalar = true;
+    yyjson_arr_foreach(v, i, n, el) {
+        all_scalar = all_scalar && compact_is_scalar(el);
+    }
+    if (all_scalar) {
+        compact_puts(b, ":");
+        yyjson_arr_foreach(v, i, n, el) {
+            compact_puts(b, " ");
+            compact_scalar(b, el);
+        }
+        compact_puts(b, "\n");
+        return;
+    }
+    compact_puts(b, ":\n");
+    yyjson_arr_foreach(v, i, n, el) {
+        if (yyjson_is_obj(el)) {
+            compact_indent(b, depth + 1);
+            compact_puts(b, "-\n");
+            size_t k;
+            size_t m;
+            yyjson_val *ck;
+            yyjson_val *cv;
+            yyjson_obj_foreach(el, k, m, ck, cv) {
+                compact_value(b, yyjson_get_str(ck), cv, depth + 2);
+            }
+        } else {
+            compact_value(b, "-", el, depth + 1);
+        }
+    }
+}
+
+/* Render a JSON object as compact text. NULL when json is not an object. */
+char *cbm_mcp_render_compact(const char *json) {
+    yyjson_doc *doc = json ? yyjson_read(json, strlen(json), 0) : NULL;
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    if (!yyjson_is_obj(root)) {
+        yyjson_doc_free(doc);
+        return NULL;
+    }
+    compact_buf_t b = {0};
+    size_t i;
+    size_t n;
+    yyjson_val *k;
+    yyjson_val *v;
+    yyjson_obj_foreach(root, i, n, k, v) {
+        compact_value(&b, yyjson_get_str(k), v, 0);
+    }
+    yyjson_doc_free(doc);
+    return b.buf ? b.buf : heap_strdup("");
+}
+
+/* Tools whose schema advertises format:"compact". */
+static bool tool_supports_compact(const char *tool_name) {
+    static const char *const names[] = {"search_graph",     "query_graph", "trace_path",
+                                        "trace_call_path",  "search_code", "get_architecture",
+                                        "list_projects",    "check_index_coverage"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (strcmp(tool_name, names[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Replace a successful JSON tool result with its compact rendering. Results
+ * that are errors or not JSON objects pass through unchanged. */
+static char *compact_tool_result(char *result) {
+    yyjson_doc *doc = result ? yyjson_read(result, strlen(result), 0) : NULL;
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *content = yyjson_arr_get_first(yyjson_obj_get(root, "content"));
+    const char *text = yyjson_get_str(yyjson_obj_get(content, "text"));
+    char *compact = yyjson_get_bool(yyjson_obj_get(root, "isError")) || !text
+                        ? NULL
+                        : cbm_mcp_render_compact(text);
+    yyjson_doc_free(doc);
+    if (!compact) {
+        return result;
+    }
+    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *mroot = yyjson_mut_obj(mdoc);
+    yyjson_mut_doc_set_root(mdoc, mroot);
+    yyjson_mut_val *items = yyjson_mut_arr(mdoc);
+    yyjson_mut_val *item = yyjson_mut_obj(mdoc);
+    yyjson_mut_obj_add_str(mdoc, item, "type", "text");
+    yyjson_mut_obj_add_str(mdoc, item, "text", compact);
+    yyjson_mut_arr_add_val(items, item);
+    yyjson_mut_obj_add_val(mdoc, mroot, "content", items);
+    yyjson_mut_obj_add_bool(mdoc, mroot, "isError", false);
+    char *out = yy_doc_to_str(mdoc);
+    yyjson_mut_doc_free(mdoc);
+    free(compact);
+    free(result);
+    return out;
+}
+
 /* ── Tool dispatch ────────────────────────────────────────────── */
+
+static char *dispatch_tool(cbm_mcp_server_t *srv, const char *tool_name, const char *args_json);
 
 char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const char *args_json) {
     if (!tool_name) {
         return cbm_mcp_text_result("missing tool name", true);
     }
+    char *format = args_json ? cbm_mcp_get_string_arg(args_json, "format") : NULL;
+    bool compact = false;
+    if (format && tool_supports_compact(tool_name)) {
+        if (strcmp(format, "compact") == 0) {
+            compact = true;
+        } else if (strcmp(format, "json") != 0) {
+            free(format);
+            return cbm_mcp_text_result("format must be \"json\" or \"compact\"", true);
+        }
+    }
+    free(format);
+    char *result = dispatch_tool(srv, tool_name, args_json);
+    return compact ? compact_tool_result(result) : result;
+}
+
+static char *dispatch_tool(cbm_mcp_server_t *srv, const char *tool_name, const char *args_json) {
 
     if (strcmp(tool_name, "list_projects") == 0) {
         return handle_list_projects(srv, args_json);
@@ -5665,6 +6743,9 @@ char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const ch
     }
     if (strcmp(tool_name, "index_status") == 0) {
         return handle_index_status(srv, args_json);
+    }
+    if (strcmp(tool_name, "check_index_coverage") == 0) {
+        return handle_check_index_coverage(srv, args_json);
     }
     if (strcmp(tool_name, "delete_project") == 0) {
         return handle_delete_project(srv, args_json);

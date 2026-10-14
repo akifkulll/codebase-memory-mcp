@@ -15,6 +15,7 @@
 #include "test_framework.h"
 #include "test_helpers.h"
 #include <cli/cli.h>
+#include <mcp/mcp.h>
 #include <foundation/yaml.h>
 #include <stdint.h>
 #include <string.h>
@@ -572,11 +573,135 @@ TEST(cli_skill_files_content) {
     /* Reference capabilities */
     ASSERT(strstr(sk[0].content, "query_graph") != NULL);
     ASSERT(strstr(sk[0].content, "Cypher") != NULL);
-    ASSERT(strstr(sk[0].content, "13 MCP Tools") != NULL);
+    char tools_header[64];
+    snprintf(tools_header, sizeof(tools_header), "## %d MCP Tools", cbm_mcp_tool_count());
+    ASSERT(strstr(sk[0].content, tools_header) != NULL);
+    /* Strict YAML parsers reject an unquoted description containing ": ". */
+    ASSERT(strstr(sk[0].content, "\ndescription: \"") != NULL);
 
     /* Gotchas section */
     ASSERT(strstr(sk[0].content, "Gotchas") != NULL);
 
+    PASS();
+}
+
+/* #19: every tool in TOOLS[] appears in the installed skill, the --help
+ * tool list and the README, and the skill's tool count is the registry's. */
+TEST(cli_tool_registry_matches_docs) {
+    FILE *f = fopen("README.md", "rb");
+    if (!f) {
+        FAIL("README.md not found (run from repo root)");
+    }
+    (void)fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    (void)fseek(f, 0, SEEK_SET);
+    char *readme = malloc((size_t)size + 1);
+    ASSERT_NOT_NULL(readme);
+    size_t n = fread(readme, 1, (size_t)size, f);
+    fclose(f);
+    readme[n] = '\0';
+
+    const cbm_skill_t *sk = cbm_get_skills();
+    char *help = cbm_cli_tools_help();
+    ASSERT_NOT_NULL(help);
+    int count = cbm_mcp_tool_count();
+    ASSERT(count > 0);
+    char header[64];
+    snprintf(header, sizeof(header), "## %d MCP Tools", count);
+    ASSERT(strstr(sk[0].content, header) != NULL);
+    for (int i = 0; i < count; i++) {
+        const char *name = cbm_mcp_tool_name(i);
+        char quoted[128];
+        snprintf(quoted, sizeof(quoted), "`%s`", name);
+        if (!strstr(sk[0].content, name) || !strstr(help, name) || !strstr(readme, quoted)) {
+            printf("  tool %s missing: skill=%d help=%d readme=%d\n", name,
+                   strstr(sk[0].content, name) != NULL, strstr(help, name) != NULL,
+                   strstr(readme, quoted) != NULL);
+            free(help);
+            free(readme);
+            FAIL("tool registry and docs disagree");
+        }
+    }
+    free(help);
+    free(readme);
+    PASS();
+}
+
+/* #19 (upstream 1e6825f9): an existing opencode.jsonc is the install target,
+ * not a second opencode.json. */
+TEST(cli_install_plan_targets_existing_opencode_jsonc) {
+    char tmpdir[512];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-ocjsonc-XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    char path[768];
+    snprintf(path, sizeof(path), "%s/.local/bin", tmpdir);
+    test_mkdirp(path);
+    snprintf(path, sizeof(path), "%s/.local/bin/opencode", tmpdir);
+    write_test_file(path, "#!/bin/sh\n");
+    chmod(path, 0755);
+    snprintf(path, sizeof(path), "%s/.config/opencode", tmpdir);
+    test_mkdirp(path);
+    snprintf(path, sizeof(path), "%s/.config/opencode/opencode.jsonc", tmpdir);
+    write_test_file(path, "// user config\n{\"theme\":\"dark\",}\n");
+
+    char *json = cbm_build_install_plan_json(tmpdir, "/usr/local/bin/codebase-memory-mcp");
+    ASSERT_NOT_NULL(json);
+    bool targets_jsonc = strstr(json, "opencode/opencode.jsonc") != NULL;
+    bool targets_json = strstr(json, "opencode/opencode.json\"") != NULL;
+    free(json);
+
+    /* The upsert accepts JSONC input and keeps the user's keys. */
+    ASSERT_EQ(cbm_upsert_opencode_mcp("/usr/local/bin/codebase-memory-mcp", path), 0);
+    const char *data = read_test_file(path);
+    bool kept = data && strstr(data, "\"theme\"") && strstr(data, "codebase-memory-mcp");
+    test_rmdir_r(tmpdir);
+    ASSERT_TRUE(targets_jsonc);
+    ASSERT_FALSE(targets_json);
+    ASSERT_TRUE(kept);
+    PASS();
+}
+
+/* #19 (upstream 33d1ecea): reinstalling replaces only the fields we own in
+ * our entry; client-added keys and other servers survive. */
+TEST(cli_upsert_keeps_client_keys_in_our_entry) {
+    char tmpdir[512];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-keepkeys-XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    char path[768];
+    snprintf(path, sizeof(path), "%s/mcp.json", tmpdir);
+    write_test_file(path, "{\"mcpServers\":{\"codebase-memory-mcp\":{\"command\":\"/old/cbm\","
+                          "\"disabled\":false,\"env\":{\"A\":\"1\"}},"
+                          "\"other\":{\"command\":\"/usr/bin/other\"}},\"keep\":1}");
+    ASSERT_EQ(cbm_install_editor_mcp("/new/cbm", path), 0);
+    const char *data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    bool ok = strstr(data, "/new/cbm") && !strstr(data, "/old/cbm") &&
+              strstr(data, "\"disabled\"") && strstr(data, "\"A\"") &&
+              strstr(data, "/usr/bin/other") && strstr(data, "\"keep\"");
+    test_rmdir_r(tmpdir);
+    ASSERT_TRUE(ok);
+    PASS();
+}
+
+/* #19 (upstream 33d1ecea): a config that exists but does not parse is left
+ * untouched instead of being replaced. */
+TEST(cli_upsert_refuses_malformed_config) {
+    char tmpdir[512];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-badcfg-XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    char path[768];
+    snprintf(path, sizeof(path), "%s/mcp.json", tmpdir);
+    const char *broken = "{\"mcpServers\": {\"other\": ";
+    write_test_file(path, broken);
+    int rc = cbm_install_editor_mcp("/new/cbm", path);
+    const char *data = read_test_file(path);
+    bool untouched = data && strcmp(data, broken) == 0;
+    test_rmdir_r(tmpdir);
+    ASSERT(rc != 0);
+    ASSERT_TRUE(untouched);
     PASS();
 }
 
@@ -2197,6 +2322,7 @@ TEST(cli_upsert_codex_mcp_fresh) {
     ASSERT_NOT_NULL(data);
     ASSERT(strstr(data, "[mcp_servers.codebase-memory-mcp]") != NULL);
     ASSERT(strstr(data, "/usr/local/bin/codebase-memory-mcp") != NULL);
+    ASSERT(strstr(data, "env_vars = [\"CBM_CACHE_DIR\"]") != NULL);
 
     test_rmdir_r(tmpdir);
     PASS();
@@ -3139,9 +3265,10 @@ TEST(cli_print_tool_help_issue680) {
     PASS();
 }
 
-/* #1359 (upstream 9ca108fc): a tool without arguments never reads stdin, so an
- * inherited pipe nobody closes cannot block it. Tools with arguments keep the
- * piped-JSON channel; a terminal or an unknown tool never reads. */
+/* #1359 (upstream 9ca108fc): a tool without required arguments never reads
+ * stdin, so an inherited pipe nobody closes cannot block it. Tools that require
+ * an argument keep the piped-JSON channel; a terminal or an unknown tool never
+ * reads. list_projects has only optional paging arguments. */
 TEST(cli_zero_argument_tool_never_reads_stdin_issue1359) {
     ASSERT_FALSE(cbm_cli_args_from_stdin_allowed("list_projects", false));
 
@@ -3419,6 +3546,10 @@ SUITE(cli) {
     RUN_TEST(cli_uninstall_removes_skills);
     RUN_TEST(cli_remove_old_monolithic_skill);
     RUN_TEST(cli_skill_files_content);
+    RUN_TEST(cli_tool_registry_matches_docs);
+    RUN_TEST(cli_install_plan_targets_existing_opencode_jsonc);
+    RUN_TEST(cli_upsert_keeps_client_keys_in_our_entry);
+    RUN_TEST(cli_upsert_refuses_malformed_config);
     RUN_TEST(cli_codex_instructions);
 
     /* Editor MCP: Cursor/Windsurf/Gemini (5 tests — install_test.go) */

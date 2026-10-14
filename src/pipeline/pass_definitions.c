@@ -585,6 +585,12 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
                                         result->error_msg ? result->error_msg : "extract failed",
                                         "extract");
             errors++;
+        } else if (result->parse_incomplete) {
+            /* Indexed, but with unrecovered ERROR/MISSING regions — see
+             * pass_parallel.c (keep in sync). */
+            cbm_pipeline_add_file_error(ctx->pipeline, rel,
+                                        result->error_ranges ? result->error_ranges : "",
+                                        "parse_partial");
         }
 
         /* Create nodes for each definition */

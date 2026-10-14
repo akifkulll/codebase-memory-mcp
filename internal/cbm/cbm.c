@@ -688,6 +688,262 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
                                             const char *rel_path, int64_t timeout_micros,
                                             const char **extra_defines, const char **include_paths);
 
+/* Best-effort parse-coverage collection (#963). Walks only the has_error paths
+ * of the tree and records the 1-based line ranges of the TOP-MOST ERROR/MISSING
+ * nodes (does not descend into an error subtree — one range per failed region).
+ * Bounded by CBM_MAX_ERROR_REGIONS so pathological input can't blow up the
+ * output. The ranges mark where constructs were dropped; they are a detection
+ * aid, never a completeness proof. */
+#define CBM_MAX_ERROR_REGIONS 64
+typedef struct {
+    uint32_t starts[CBM_MAX_ERROR_REGIONS];
+    uint32_t ends[CBM_MAX_ERROR_REGIONS];
+    int count;
+} cbm_error_regions_t;
+
+static void cbm_error_regions_push(cbm_error_regions_t *acc, TSNode n) {
+    if (acc->count >= CBM_MAX_ERROR_REGIONS) {
+        return;
+    }
+    acc->starts[acc->count] = ts_node_start_point(n).row + 1;
+    acc->ends[acc->count] = ts_node_end_point(n).row + 1;
+    acc->count++;
+}
+
+/* #1610: a file that does not end with a newline leaves the grammar's
+ * mandatory line terminator MISSING. That node is ZERO-WIDTH and sits at EOF.
+ *
+ * It is not a miss. The parser consumed no source for it — start_byte ==
+ * end_byte — so by construction nothing was dropped: no construct can live in
+ * a zero-byte span, and every real instruction above it parsed normally. This
+ * is a property of the grammar's terminator rule, not of the file.
+ *
+ * Flagging it made the verdict arbitrary. Grammars whose terminator token is
+ * VISIBLE (dockerfile, tcl, fish, gomod, hyprlang) reported parse_partial for
+ * a missing final newline; grammars whose terminator is HIDDEN (ini, fsharp,
+ * beancount, requirements, gitignore, sshconfig, kconfig) reported nothing for
+ * exactly the same omission, because a hidden node is invisible to
+ * ts_node_child(). Whether a user was told their file was partially parsed
+ * depended on a grammar-authoring accident.
+ *
+ * The cost was not cosmetic: a phantom parse_partial writes a
+ * "<project>::missed" shadow row, and until #1609 that row made the project
+ * fail cross-repo validation as both source and target.
+ *
+ * Deliberately narrow — ZERO-WIDTH AT EOF ONLY. A MISSING or ERROR node with
+ * WIDTH still counts even at EOF (a Makefile whose last recipe line is
+ * unterminated really does lose the recipe), and anything before EOF is
+ * untouched. */
+static bool cbm_is_eof_terminator_miss(TSNode n, int source_len) {
+    if (!ts_node_is_missing(n) || source_len < 0) {
+        return false;
+    }
+    uint32_t start = ts_node_start_byte(n);
+    uint32_t end = ts_node_end_byte(n);
+    return start == end && end == (uint32_t)source_len;
+}
+
+static void cbm_collect_error_regions(TSNode n, cbm_error_regions_t *acc, int source_len) {
+    if (acc->count >= CBM_MAX_ERROR_REGIONS) {
+        return;
+    }
+    uint32_t k = ts_node_child_count(n);
+    for (uint32_t i = 0; i < k && acc->count < CBM_MAX_ERROR_REGIONS; i++) {
+        TSNode c = ts_node_child(n, i);
+        if (ts_node_is_missing(c) || strcmp(ts_node_type(c), "ERROR") == 0) {
+            if (cbm_is_eof_terminator_miss(c, source_len)) {
+                continue; /* absent final newline only — nothing was dropped */
+            }
+            cbm_error_regions_push(acc, c); /* top-most region; do not descend */
+        } else if (ts_node_has_error(c)) {
+            cbm_collect_error_regions(c, acc, source_len);
+        }
+    }
+}
+
+/* Recovery subtraction (#963): tree-sitter error recovery plus the
+ * ERROR-descending def walker often still extract constructs INSIDE a failed
+ * region (verified: a function in an #ifdef-split ERROR region and even a
+ * `def broken(:` both came back as defs). A region whose every line is
+ * covered by definitions that START inside it is definitely recovered — its
+ * constructs ARE in the graph — so flagging it would be a false miss.
+ * Container defs (Module/Package) are ignored: a file-spanning Module node is
+ * not evidence the region's constructs survived. Conservative: partially
+ * covered regions stay flagged. */
+static bool cbm_region_is_recovered(uint32_t rs, uint32_t re, const CBMDefArray *defs) {
+    enum { MAX_COVER_DEFS = 256 };
+    uint32_t starts[MAX_COVER_DEFS];
+    uint32_t ends[MAX_COVER_DEFS];
+    int n = 0;
+    for (int i = 0; i < defs->count && n < MAX_COVER_DEFS; i++) {
+        const CBMDefinition *d = &defs->items[i];
+        if (!d->label || strcmp(d->label, "Module") == 0 || strcmp(d->label, "Package") == 0) {
+            continue;
+        }
+        if (d->start_line < rs || d->start_line > re) {
+            continue; /* recovery evidence must originate inside the region */
+        }
+        starts[n] = d->start_line;
+        ends[n] = d->end_line < d->start_line ? d->start_line : d->end_line;
+        n++;
+    }
+    if (n == 0) {
+        return false;
+    }
+    /* Insertion-sort by start, then sweep for gaps in [rs, re]. */
+    for (int i = 1; i < n; i++) {
+        uint32_t s = starts[i];
+        uint32_t e = ends[i];
+        int j = i - 1;
+        while (j >= 0 && starts[j] > s) {
+            starts[j + 1] = starts[j];
+            ends[j + 1] = ends[j];
+            j--;
+        }
+        starts[j + 1] = s;
+        ends[j + 1] = e;
+    }
+    uint32_t covered_to = rs - 1;
+    for (int i = 0; i < n; i++) {
+        if (starts[i] > covered_to + 1) {
+            return false; /* uncovered gap */
+        }
+        if (ends[i] > covered_to) {
+            covered_to = ends[i];
+        }
+    }
+    return covered_to >= re;
+}
+
+static bool cbm_identifier_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+static void cbm_subtract_recovered_regions(cbm_error_regions_t *regs, const CBMDefArray *defs) {
+    int kept = 0;
+    for (int i = 0; i < regs->count; i++) {
+        if (!cbm_region_is_recovered(regs->starts[i], regs->ends[i], defs)) {
+            regs->starts[kept] = regs->starts[i];
+            regs->ends[kept] = regs->ends[i];
+            kept++;
+        }
+    }
+    regs->count = kept;
+}
+
+/* #1071: a function-like macro invocation whose argument is a type token
+ * (e.g. ALLOC(int, n)) makes tree-sitter's C/C++ grammar emit an ERROR node — it
+ * parses `int` in expression position — which would be recorded as a parse_partial
+ * coverage gap. But the macro is #defined in THIS file, so nothing is actually
+ * missing from the graph; it's a benign call the grammar can't parse without the
+ * preprocessor. True if the [start_line, end_line] span contains a call `NAME(` to
+ * a file-defined function-like macro (Macro label + a parameter signature). */
+static bool cbm_span_is_macro_invocation(const char *src, int src_len, uint32_t start_line,
+                                         uint32_t end_line, const CBMDefArray *defs) {
+    if (!src || src_len <= 0 || !defs || start_line == 0 || end_line < start_line) {
+        return false;
+    }
+    int span_start = 0;
+    uint32_t line = 1;
+    while (span_start < src_len && line < start_line) {
+        if (src[span_start++] == '\n') {
+            line++;
+        }
+    }
+    if (line != start_line) {
+        return false;
+    }
+    int span_end = span_start;
+    while (span_end < src_len && line <= end_line) {
+        if (src[span_end++] == '\n') {
+            line++;
+        }
+    }
+    for (int di = 0; di < defs->count; di++) {
+        const CBMDefinition *d = &defs->items[di];
+        /* Function-like macros only: an object-like macro (#define PI 3.14) has no
+         * parameter signature and can't be mistaken for a call. */
+        if (!d->label || strcmp(d->label, "Macro") != 0 || !d->signature || !d->name ||
+            !d->name[0]) {
+            continue;
+        }
+        int nlen = (int)strlen(d->name);
+        for (int pos = span_start; pos + nlen <= span_end; pos++) {
+            if (strncmp(src + pos, d->name, (size_t)nlen) != 0 ||
+                (pos > 0 && cbm_identifier_char(src[pos - 1])) ||
+                (pos + nlen < src_len && cbm_identifier_char(src[pos + nlen]))) {
+                continue;
+            }
+            int open = pos + nlen;
+            while (open < span_end && isspace((unsigned char)src[open])) {
+                open++;
+            }
+            if (open < span_end && src[open] == '(') {
+                return true; /* NAME( ... ) — an invocation of this file's macro */
+            }
+        }
+    }
+    return false;
+}
+
+/* True if [rs, re] is fully enclosed by an extracted callable definition (a
+ * Function/Method body). A macro invocation INSIDE a real function body is an
+ * expression-level use where nothing is missing (#1071). A TOP-LEVEL invocation
+ * is different: the macro may itself expand to a definition that the original
+ * span doesn't contain (#949), which must stay flagged. Restricting the #1071
+ * suppression to in-body calls keeps that #949 gap honest and fails safe. */
+static bool cbm_region_inside_callable(uint32_t rs, uint32_t re, const CBMDefArray *defs) {
+    for (int i = 0; i < defs->count; i++) {
+        const CBMDefinition *d = &defs->items[i];
+        if (!d->label) {
+            continue;
+        }
+        if (strcmp(d->label, "Function") != 0 && strcmp(d->label, "Method") != 0 &&
+            strcmp(d->label, "Constructor") != 0 && strcmp(d->label, "Destructor") != 0) {
+            continue;
+        }
+        if (d->start_line <= rs && d->end_line >= re && d->end_line > d->start_line) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void cbm_subtract_macro_invocation_regions(cbm_error_regions_t *regs,
+                                                  const CBMDefArray *defs, const char *src,
+                                                  int src_len) {
+    int kept = 0;
+    for (int i = 0; i < regs->count; i++) {
+        bool benign =
+            cbm_span_is_macro_invocation(src, src_len, regs->starts[i], regs->ends[i], defs) &&
+            cbm_region_inside_callable(regs->starts[i], regs->ends[i], defs);
+        if (!benign) {
+            regs->starts[kept] = regs->starts[i];
+            regs->ends[kept] = regs->ends[i];
+            kept++;
+        }
+    }
+    regs->count = kept;
+}
+
+/* Serialize collected regions as "start-end,start-end,..." into the arena. */
+static const char *cbm_error_ranges_str(CBMArena *a, const cbm_error_regions_t *regs) {
+    if (regs->count <= 0) {
+        return NULL;
+    }
+    enum { RANGE_MAX = 24 }; /* "4294967295-4294967295," */
+    char *buf = (char *)cbm_arena_alloc(a, (size_t)regs->count * RANGE_MAX);
+    if (!buf) {
+        return NULL;
+    }
+    size_t off = 0;
+    for (int i = 0; i < regs->count; i++) {
+        off += (size_t)snprintf(buf + off, RANGE_MAX, "%s%u-%u", i ? "," : "", regs->starts[i],
+                                regs->ends[i]);
+    }
+    return buf;
+}
+
 /* Public entry: run the extraction and journal completion. The DONE mark on
  * every ordinary return (including error/timeout results) tells the crash
  * supervisor this file did NOT kill the worker — only a file whose S has no
@@ -1036,6 +1292,29 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
     free(has_guarded);
 
     uint64_t t2 = now_ns();
+
+    /* Best-effort parse-coverage signal (#963): flag files whose tree contains
+     * ERROR/MISSING regions. Computed AFTER extraction so definite recovery is
+     * subtracted first — a region fully re-extracted as definitions is not a
+     * miss, and a fully recovered file is not flagged at all. Detection aid
+     * only: the absence of this flag is NOT a completeness guarantee. */
+    if (ts_node_has_error(root)) {
+        cbm_error_regions_t regs = {{0}, {0}, 0};
+        if (strcmp(ts_node_type(root), "ERROR") == 0) {
+            cbm_error_regions_push(&regs, root); /* whole file unparseable */
+        } else {
+            cbm_collect_error_regions(root, &regs, source_len);
+        }
+        cbm_subtract_recovered_regions(&regs, &result->defs);
+        /* #1071: don't flag a benign function-like-macro call (defined in-file)
+         * that tree-sitter can't parse without the preprocessor. */
+        cbm_subtract_macro_invocation_regions(&regs, &result->defs, source, source_len);
+        if (regs.count > 0) {
+            result->parse_incomplete = true;
+            result->error_region_count = regs.count;
+            result->error_ranges = cbm_error_ranges_str(a, &regs);
+        }
+    }
 
     result->imports_count = result->imports.count;
 

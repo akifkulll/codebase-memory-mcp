@@ -67,6 +67,17 @@ char *cbm_mcp_tools_list(void);
  * NULL if the tool is unknown. Backs the CLI flag parser + per-tool --help. */
 const char *cbm_mcp_tool_input_schema(const char *tool_name);
 
+/* The tool registry, in tools/list order: count and the i-th tool's name and
+ * description (static; do not free; NULL when i is out of range). Agent
+ * instructions and --help are generated from these. */
+int cbm_mcp_tool_count(void);
+const char *cbm_mcp_tool_name(int i);
+const char *cbm_mcp_tool_description(int i);
+
+/* Render a JSON object as the compact text form used by format:"compact".
+ * Returns heap-allocated text, or NULL when json is not a JSON object. */
+char *cbm_mcp_render_compact(const char *json);
+
 /* Format the initialize response. params_json is the raw initialize params
  * (used for protocol version negotiation). Returns heap-allocated JSON. */
 char *cbm_mcp_initialize_response(const char *params_json);

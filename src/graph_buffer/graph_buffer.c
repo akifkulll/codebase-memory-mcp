@@ -837,6 +837,24 @@ const cbm_gbuf_node_t *cbm_gbuf_find_by_qn(const cbm_gbuf_t *gb, const char *qn)
     return cbm_ht_get(gb->node_by_qn, qn);
 }
 
+bool cbm_gbuf_set_node_props(cbm_gbuf_t *gb, const char *qualified_name,
+                             const char *properties_json) {
+    if (!gb || !qualified_name || !properties_json) {
+        return false;
+    }
+    cbm_gbuf_node_t *node = cbm_ht_get(gb->node_by_qn, qualified_name);
+    if (!node) {
+        return false;
+    }
+    char *new_props = heap_strdup(properties_json);
+    if (!new_props) {
+        return false;
+    }
+    free(node->properties_json);
+    node->properties_json = new_props;
+    return true;
+}
+
 const cbm_gbuf_node_t *cbm_gbuf_find_by_id(const cbm_gbuf_t *gb, int64_t id) {
     if (!gb || !gb->by_id || id < 0 || id >= gb->by_id_cap) {
         return NULL;

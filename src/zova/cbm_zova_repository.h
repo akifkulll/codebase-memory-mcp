@@ -199,6 +199,29 @@ int cbm_zova_repository_index_status(cbm_zova_repository_t *repo, const char *wo
                                       char **indexed_at);
 int cbm_zova_repository_counts(cbm_zova_repository_t *repo, const char *workspace_id,
                                int *nodes, int *edges);
+
+/* One indexed file of the active generation: its File node properties (NULL
+ * when the file has no File node) and its stored filesystem metadata. Parse
+ * coverage lives in those properties; see CBM_COVERAGE_* in pipeline.h. */
+typedef struct {
+    char *file_path;
+    char *properties;
+    bool has_hash;
+    int64_t mtime_ns;
+    int64_t size_bytes;
+} cbm_zova_file_coverage_t;
+
+/* Read the workspace's indexed files ordered by path, in one statement so the
+ * rows come from a single generation. exact_path limits the read to that file.
+ * out_recorded (optional) says whether the generation was stamped with
+ * coverage (Project node "coverage_version").
+ * out_root_path (optional) receives the workspace root, out_generation
+ * (optional) the generation the repository opened. */
+int cbm_zova_repository_file_coverage(cbm_zova_repository_t *repo, const char *workspace_id,
+                                      const char *exact_path, cbm_zova_file_coverage_t **out,
+                                      int *count, char **out_root_path, int64_t *out_generation,
+                                      bool *out_recorded);
+void cbm_zova_file_coverage_free(cbm_zova_file_coverage_t *rows, int count);
 int cbm_zova_repository_project_summary(cbm_zova_repository_t *repo,
                                         const char *workspace_id,
                                         cbm_project_summary_export_t *out);

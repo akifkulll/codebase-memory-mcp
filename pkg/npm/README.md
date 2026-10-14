@@ -30,7 +30,7 @@ Restart your agent. Say **"Index this project"** — done.
 - **159 languages** — vendored tree-sitter grammars compiled into the binary. Nothing to install, nothing that breaks.
 - **120x fewer tokens** — 5 structural queries: ~3,400 tokens vs ~412,000 via file-by-file search.
 - **11 agents, one command** — `install` auto-detects Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode, VS Code, OpenClaw, and Kiro.
-- **13 MCP tools** — search, trace, architecture, impact analysis, Cypher queries, dead code detection, cross-service HTTP linking, and more.
+- **14 MCP tools** — search, trace, architecture, impact analysis, Cypher queries, dead code detection, cross-service HTTP linking, and more.
 
 ## Supported Platforms
 
@@ -65,7 +65,7 @@ codebase-memory-mcp cli get_architecture '{}'
 
 | Category | Tools |
 |----------|-------|
-| **Indexing** | `index_repository`, `list_projects`, `delete_project`, `index_status` |
+| **Indexing** | `index_repository`, `list_projects`, `delete_project`, `index_status`, `check_index_coverage` |
 | **Querying** | `search_graph`, `trace_call_path`, `detect_changes`, `query_graph` |
 | **Analysis** | `get_architecture`, `get_graph_schema`, `get_code_snippet`, `search_code` |
 | **Advanced** | `ingest_traces` |

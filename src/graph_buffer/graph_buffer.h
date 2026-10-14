@@ -80,6 +80,12 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
                              const char *qualified_name, const char *file_path, int start_line,
                              int end_line, const char *properties_json);
 
+/* Replace an existing node's properties_json by qualified name (copied).
+ * Bypasses the upsert survivor rule; used to stamp parse coverage on File
+ * nodes. Returns true when the node was found and updated. */
+bool cbm_gbuf_set_node_props(cbm_gbuf_t *gb, const char *qualified_name,
+                             const char *properties_json);
+
 /* Find a node by qualified name. Returns NULL if not found. */
 const cbm_gbuf_node_t *cbm_gbuf_find_by_qn(const cbm_gbuf_t *gb, const char *qn);
 

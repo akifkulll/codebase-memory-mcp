@@ -546,6 +546,12 @@ void cbm_pipeline_extract_infra_routes(cbm_gbuf_t *gbuf, const cbm_file_info_t *
 void cbm_pipeline_process_infra_bindings(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
                                          CBMFileResult **result_cache, int file_count);
 
+/* Stamp parse coverage on the File nodes of every file this run recorded in
+ * file_errors. Call after extraction merged its per-file errors, on full and
+ * incremental runs alike, so a reindexed file's stale stamp cannot survive.
+ * Implementation: pipeline.c. */
+void cbm_pipeline_stamp_coverage(cbm_pipeline_t *p, cbm_gbuf_t *gbuf);
+
 /* ── Pass function prototypes ────────────────────────────────────── */
 
 int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,

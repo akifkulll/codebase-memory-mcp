@@ -196,8 +196,12 @@ bool cbm_pipeline_get_zova_publish_stats(
 typedef struct {
     char *path;   /* repo-relative path of the skipped file */
     char *reason; /* human-readable cause (e.g. "oversized (712 MB > 512 MB)",
-                   * "parse timeout", "read failed") */
-    char *phase;  /* "read" | "extract" | "oversized". "cross_lsp" is a RESERVED
+                   * "parse timeout", "read failed"). For phase "parse_partial"
+                   * this is the 1-based line-range list ("12-40,88-90"). */
+    char *phase;  /* "read" | "extract" | "oversized" | "crash" | "hang" |
+                   * "parse_partial". "parse_partial" is NOT a skip: the file
+                   * was indexed but has unrecovered parse-error regions; the
+                   * MCP layer reports it apart from skipped[]. "cross_lsp" is a RESERVED
                    * phase string for Track C's crash-attribution signal and is
                    * intentionally NOT emitted today (the cross-LSP passes are
                    * best-effort/void with no genuine per-file failure). */
@@ -215,6 +219,16 @@ void cbm_pipeline_add_file_error(cbm_pipeline_t *p, const char *path, const char
  * cbm_pipeline_free()). out and count are set to NULL and 0 when p is NULL or
  * nothing was skipped. Do not free. */
 void cbm_pipeline_get_file_errors(const cbm_pipeline_t *p, cbm_file_error_t **out, int *count);
+
+/* Parse coverage stamped on File node properties. A File node without a
+ * "coverage" key was parsed with no recorded gap; "partial" carries
+ * "parse_error_ranges"; "missed" carries "coverage_phase" and
+ * "coverage_reason". The Project node's "coverage_version" marks a generation
+ * whose File nodes were stamped. Best-effort: no flag is not a completeness
+ * proof. */
+#define CBM_COVERAGE_PARTIAL "partial"
+#define CBM_COVERAGE_MISSED "missed"
+#define CBM_COVERAGE_VERSION_STR "1"
 
 /* Runs share no process-global state, so several may run in one process.
  * Same-workspace exclusion is the workspace lease

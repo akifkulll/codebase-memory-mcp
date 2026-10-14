@@ -55,7 +55,7 @@ Full indexing remains the current tradeoff. Zova's advantage is strongest for re
 - **120x fewer tokens** — 5 structural queries: ~3,400 tokens vs ~412,000 via file-by-file search. One graph query replaces dozens of grep/read cycles.
 - **11 agents, one command** — `install` auto-detects Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode, VS Code, OpenClaw, and Kiro — configures MCP entries, instruction files, and pre-tool hooks for each.
 - **Infrastructure-as-code indexing** — Dockerfiles, Kubernetes manifests, and Kustomize overlays indexed as graph nodes with cross-references. `Resource` nodes for K8s kinds, `Module` nodes for Kustomize overlays with `IMPORTS` edges to referenced resources.
-- **13 MCP tools** — search, trace, architecture, impact analysis, Cypher queries, dead code detection, cross-service HTTP linking, and more.
+- **14 MCP tools** — search, trace, architecture, impact analysis, Cypher queries, dead code detection, cross-service HTTP linking, and more.
 
 ## Quick Start
 
@@ -309,7 +309,7 @@ Add to `~/.claude/.mcp.json` (global) or project `.mcp.json`:
 }
 ```
 
-Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` with 13 tools.
+Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` with 14 tools.
 
 </details>
 
@@ -467,9 +467,10 @@ promotion tests, not routine development tests.
 | Tool | Description |
 |------|-------------|
 | `index_repository` | Index a repository into the graph. Auto-sync keeps it fresh after that. |
-| `list_projects` | List all indexed projects with node/edge counts. |
+| `list_projects` | List indexed projects in selector order. Optional `offset`/`limit` paging; `catalog_token` reports a catalog that changed between pages; `include_details` adds node/edge counts. |
 | `delete_project` | Remove a project and all its graph data. |
-| `index_status` | Check indexing status of a project. |
+| `index_status` | Check indexing status of a project, including a parse-coverage summary. |
+| `check_index_coverage` | Per-path and per-directory extraction coverage for the active generation: partial parses with line ranges, skipped and excluded files, and freshness. A best-effort signal, not a completeness guarantee. |
 
 ### Querying
 
@@ -484,6 +485,11 @@ promotion tests, not routine development tests.
 | `get_architecture` | Codebase overview: languages, packages, routes, hotspots, clusters. |
 | `search_code` | Grep-like text search within indexed project files. |
 | `ingest_traces` | Ingest runtime traces to validate HTTP_CALLS edges. |
+
+`search_graph`, `query_graph`, `trace_path`, `search_code`, `get_architecture`, `list_projects` and
+`check_index_coverage` accept `format: "compact"`, which returns indented text with tabular rows and
+no duplicated `structuredContent`, instead of the default JSON. It is opt-in; the default output is
+unchanged.
 
 ### Cross-repository search with Zova
 
@@ -653,7 +659,7 @@ Also supported (not yet benchmarked): Ada, Agda, Apex, Assembly (NASM), Astro, A
 ```
 src/
   main.c              Entry point (MCP stdio server + CLI + install/update/config)
-  mcp/                MCP server (13 tools, JSON-RPC 2.0, session detection, auto-index)
+  mcp/                MCP server (14 tools, JSON-RPC 2.0, session detection, auto-index)
   cli/                Install/uninstall/update/config (10 agents, hooks, instructions)
   store/              Query/storage compatibility layer and cross-workspace search
   zova/               Shared database, native graph/vector publication, migration, and operations

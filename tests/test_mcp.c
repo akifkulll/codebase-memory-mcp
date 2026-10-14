@@ -971,6 +971,14 @@ TEST(tool_search_graph_searches_two_zova_projects_globally) {
     ASSERT_NOT_NULL(strstr(response, "ServiceHandler"));
     ASSERT_NOT_NULL(strstr(response, "\"project\":\"shared-project\""));
     free(response);
+
+    /* A generation published without the coverage marker must not read as
+     * clean. */
+    response = cbm_mcp_handle_tool(srv, "check_index_coverage",
+                                   "{\"project\":\"shared-project\",\"scopes\":[\".\"]}");
+    ASSERT_TRUE(response_contains_json_fragment(response, "\"coverage_recorded\":false"));
+    ASSERT_TRUE(response_contains_json_fragment(response, "\"status\":\"coverage_unavailable\""));
+    free(response);
     cbm_mcp_server_free(srv);
 
     if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
@@ -1060,6 +1068,366 @@ TEST(tool_index_repository_reports_zova_committed_counts) {
     ASSERT_TRUE(deleted);
     ASSERT_TRUE(gone);
     ASSERT_TRUE(repeated_not_found);
+    PASS();
+#endif
+}
+
+/* check_index_coverage: returns the field `key` of the paths[] entry whose
+ * requested_path is `requested`, or NULL. Caller frees. */
+static char *coverage_path_field(const char *response, const char *requested, const char *key) {
+    char *text = extract_text_content(response);
+    yyjson_doc *doc = text ? yyjson_read(text, strlen(text), 0) : NULL;
+    free(text);
+    yyjson_val *paths = yyjson_obj_get(yyjson_doc_get_root(doc), "paths");
+    char *out = NULL;
+    size_t idx;
+    size_t max;
+    yyjson_val *item;
+    yyjson_arr_foreach(paths, idx, max, item) {
+        const char *req = yyjson_get_str(yyjson_obj_get(item, "requested_path"));
+        if (req && strcmp(req, requested) == 0) {
+            yyjson_val *v = yyjson_obj_get(item, key);
+            if (yyjson_is_str(v)) {
+                out = strdup(yyjson_get_str(v));
+            } else if (v) {
+                out = yyjson_val_write(v, 0, NULL);
+            }
+            break;
+        }
+    }
+    yyjson_doc_free(doc);
+    return out;
+}
+
+static bool coverage_path_is(const char *response, const char *requested, const char *key,
+                             const char *expected) {
+    char *value = coverage_path_field(response, requested, key);
+    bool ok = value && strcmp(value, expected) == 0;
+    if (!ok) {
+        printf("  %s.%s = %s (want %s)\n", requested, key, value ? value : "(null)", expected);
+    }
+    free(value);
+    return ok;
+}
+
+#define COVERAGE_BROKEN_C(name)                                                                \
+    "int " name "(void) { return 1; }\n"                                                       \
+    "\n"                                                                                       \
+    "int broken( { @@ ### $$ ;;\n"                                                             \
+    "}}} )) ((\n"
+
+/* #12: per-file parse coverage is recorded with the generation, survives an
+ * incremental run for unchanged files, clears for fixed files, stays scoped
+ * to its workspace and is surfaced by check_index_coverage, index_status,
+ * index_repository and get_code_snippet. */
+TEST(tool_check_index_coverage_reports_recorded_gaps) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    char root[512];
+    char other[512];
+    char cache[512];
+    snprintf(root, sizeof(root), "%s/cbm-mcp-coverage-XXXXXX", cbm_tmpdir());
+    snprintf(other, sizeof(other), "%s/cbm-mcp-coverage-other-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-coverage-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    ASSERT_NOT_NULL(cbm_mkdtemp(other));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    ASSERT_EQ(th_write_file(TH_PATH(root, "good.c"), "int helper(void) { return 42; }\n"), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "broken.c"), COVERAGE_BROKEN_C("still_ok")), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "broken2.c"), COVERAGE_BROKEN_C("other_ok")), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "sub/inner.c"), "int inner(void) { return 0; }\n"), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "gen.c"), "int generated(void) { return 0; }\n"), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(root, ".gitignore"), "gen.c\n"), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(other, "clean.c"), "int clean(void) { return 0; }\n"), 0);
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"fast\",\"name\":\"cov-a\"}",
+             root);
+    char *indexed = cbm_mcp_handle_tool(srv, "index_repository", args);
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"fast\",\"name\":\"cov-b\"}",
+             other);
+    char *indexed_other = cbm_mcp_handle_tool(srv, "index_repository", args);
+    bool index_ok = response_contains_json_fragment(indexed, "\"status\":\"indexed\"") &&
+                    response_contains_json_fragment(indexed_other, "\"status\":\"indexed\"");
+    /* The index response groups partial parses apart from skipped files and
+     * carries the persisted coverage summary. */
+    bool index_reports_partial = indexed && strstr(indexed, "parse_partial") &&
+                                 strstr(indexed, "broken2.c") &&
+                                 response_contains_json_fragment(indexed, "\"partial\":2");
+
+    const char *paths_args =
+        "{\"project\":\"cov-a\",\"paths\":[\"good.c\",\"broken.c\",\"./sub/inner.c\",\"gen.c\","
+        "\"nope.c\",\"../x.c\",\"/etc/hosts\",\"\"]}";
+    char *cov = cbm_mcp_handle_tool(srv, "check_index_coverage", paths_args);
+    bool paths_ok =
+        response_contains_json_fragment(cov, "\"coverage_recorded\":true") &&
+        coverage_path_is(cov, "good.c", "status", "no_recorded_issue") &&
+        coverage_path_is(cov, "good.c", "freshness", "metadata_match") &&
+        coverage_path_is(cov, "broken.c", "status", "partial") &&
+        coverage_path_is(cov, "broken.c", "recommended_action", "read_ranges_and_verify_scope") &&
+        coverage_path_is(cov, "./sub/inner.c", "path", "sub/inner.c") &&
+        coverage_path_is(cov, "./sub/inner.c", "status", "no_recorded_issue") &&
+        coverage_path_is(cov, "gen.c", "status", "excluded") &&
+        coverage_path_is(cov, "gen.c", "reason", "gitignore") &&
+        coverage_path_is(cov, "nope.c", "status", "missing") &&
+        coverage_path_is(cov, "../x.c", "status", "outside_project") &&
+        coverage_path_is(cov, "/etc/hosts", "status", "outside_project") &&
+        coverage_path_is(cov, "", "status", "invalid_path");
+    char *ranges = coverage_path_field(cov, "broken.c", "parse_error_ranges");
+    bool ranges_ok = ranges && strstr(ranges, "\"start\":") && strstr(ranges, "\"end\":");
+    free(ranges);
+    free(cov);
+
+    cov = cbm_mcp_handle_tool(srv, "check_index_coverage",
+                              "{\"project\":\"cov-a\",\"scopes\":[\".\"],\"scope_limit\":1}");
+    bool scope_ok = response_contains_json_fragment(cov, "\"status\":\"known_gaps\"") &&
+                    response_contains_json_fragment(cov, "\"files\":4") &&
+                    response_contains_json_fragment(cov, "\"partial\":2") &&
+                    response_contains_json_fragment(cov, "\"total_gaps\":2") &&
+                    response_contains_json_fragment(cov, "\"has_more\":true") &&
+                    response_contains_json_fragment(cov, "\"next_offset\":1");
+    free(cov);
+
+    char *status = cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"cov-a\"}");
+    bool status_ok = response_contains_json_fragment(status, "\"recorded\":true") &&
+                     response_contains_json_fragment(status, "\"total_gaps\":2");
+    free(status);
+
+    char *snippet = cbm_mcp_handle_tool(srv, "get_code_snippet",
+                                        "{\"project\":\"cov-a\",\"qualified_name\":\"still_ok\"}");
+    bool snippet_ok = snippet && strstr(snippet, "coverage_note");
+    free(snippet);
+
+    /* Workspace isolation: cov-b never sees cov-a's rows. */
+    cov = cbm_mcp_handle_tool(srv, "check_index_coverage",
+                              "{\"project\":\"cov-b\",\"scopes\":[\".\"],\"paths\":[\"broken.c\"]}");
+    bool isolated = response_contains_json_fragment(cov, "\"status\":\"no_recorded_issue\"") &&
+                    response_contains_json_fragment(cov, "\"files\":1") &&
+                    coverage_path_is(cov, "broken.c", "status", "missing");
+    free(cov);
+
+    /* A changed file reports stale metadata until the next index run. */
+    ASSERT_EQ(th_write_file(TH_PATH(root, "good.c"),
+                            "int helper(void) { return 42; }\nint more(void) { return 1; }\n"),
+              0);
+    cov = cbm_mcp_handle_tool(srv, "check_index_coverage",
+                              "{\"project\":\"cov-a\",\"paths\":[\"good.c\"]}");
+    bool stale_ok = coverage_path_is(cov, "good.c", "freshness", "metadata_changed") &&
+                    coverage_path_is(cov, "good.c", "recommended_action",
+                                     "read_source_and_reindex");
+    free(cov);
+
+    /* Incremental run: broken.c is fixed, broken2.c is unchanged and keeps its
+     * stamp, and the response summary still reports the remaining gap. */
+    ASSERT_EQ(th_write_file(TH_PATH(root, "broken.c"), "int still_ok(void) { return 1; }\n"), 0);
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"fast\",\"name\":\"cov-a\"}",
+             root);
+    char *reindexed = cbm_mcp_handle_tool(srv, "index_repository", args);
+    bool reindex_ok = response_contains_json_fragment(reindexed, "\"status\":\"indexed\"") &&
+                      response_contains_json_fragment(reindexed, "\"total_gaps\":1");
+    cov = cbm_mcp_handle_tool(srv, "check_index_coverage",
+                              "{\"project\":\"cov-a\",\"paths\":[\"broken.c\",\"broken2.c\","
+                              "\"good.c\"]}");
+    bool incremental_ok = coverage_path_is(cov, "broken.c", "status", "no_recorded_issue") &&
+                          coverage_path_is(cov, "broken2.c", "status", "partial") &&
+                          coverage_path_is(cov, "good.c", "freshness", "metadata_match");
+    free(cov);
+
+    free(indexed);
+    free(indexed_other);
+    free(reindexed);
+    cbm_mcp_server_free(srv);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+    th_rmtree(root);
+    th_rmtree(other);
+    th_rmtree(cache);
+
+    ASSERT_TRUE(index_ok);
+    ASSERT_TRUE(index_reports_partial);
+    ASSERT_TRUE(paths_ok);
+    ASSERT_TRUE(ranges_ok);
+    ASSERT_TRUE(scope_ok);
+    ASSERT_TRUE(status_ok);
+    ASSERT_TRUE(snippet_ok);
+    ASSERT_TRUE(isolated);
+    ASSERT_TRUE(stale_ok);
+    ASSERT_TRUE(reindex_ok);
+    ASSERT_TRUE(incremental_ok);
+    PASS();
+#endif
+}
+
+/* #6: compact rendering is lossless for tables with missing cells and quotes
+ * strings that would read back as another type. */
+TEST(mcp_render_compact_tables_and_scalars) {
+    char *text = cbm_mcp_render_compact(
+        "{\"a\":1,\"rows\":[{\"x\":1,\"y\":\"two\"},{\"x\":2}],\"s\":\"null\",\"n\":null,"
+        "\"tags\":[\"p q\",\"r\"],\"o\":{\"k\":\"v\"}}");
+    ASSERT_NOT_NULL(text);
+    ASSERT_STR_EQ(text, "a: 1\n"
+                        "rows[2]  (x y)\n"
+                        "  1 two\n"
+                        "  2 -\n"
+                        "s: \"null\"\n"
+                        "n: null\n"
+                        "tags[2]: \"p q\" r\n"
+                        "o:\n"
+                        "  k: v\n");
+    free(text);
+    ASSERT_NULL(cbm_mcp_render_compact("[1,2]"));
+    PASS();
+}
+
+static char *lp_text(const char *response) {
+    return extract_text_content(response);
+}
+
+static char *lp_token(const char *response) {
+    char *text = lp_text(response);
+    yyjson_doc *doc = text ? yyjson_read(text, strlen(text), 0) : NULL;
+    free(text);
+    const char *token = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "catalog_token"));
+    char *out = token ? strdup(token) : NULL;
+    yyjson_doc_free(doc);
+    return out;
+}
+
+static int lp_publish(const char *path, const char *project, const char *root) {
+    char qn[128];
+    snprintf(qn, sizeof(qn), "%s.Fn", project);
+    const CBMDumpNode node = {.id = 1, .project = project, .label = "Function", .name = "Fn",
+                              .qualified_name = qn, .file_path = "src/fn.c", .start_line = 1,
+                              .end_line = 2, .properties = "{}"};
+    const cbm_zova_workspace_generation_input_t input = {
+        .root_path = root, .project = project, .indexed_at = "2026-10-15T00:00:00Z",
+        .model_fingerprint = CBM_ZOVA_MODEL_FINGERPRINT, .vector_dimensions = 768,
+        .nodes = &node, .node_count = 1};
+    cbm_zova_workspace_generation_result_t published = {0};
+    return cbm_zova_user_database_publish_workspace(path, &input, &published);
+}
+
+/* #6: list_projects pages in selector order, flags a catalog that changed
+ * between pages (but not a reindex), and compact output is opt-in. */
+TEST(tool_list_projects_pages_and_detects_catalog_changes) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    char cache[512];
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-list-pages-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    char path[512];
+    ASSERT_EQ(cbm_zova_user_database_path(path, sizeof(path)), 0);
+    ASSERT_EQ(lp_publish(path, "lp-gamma", "/tmp/lp/gamma"), 0);
+    ASSERT_EQ(lp_publish(path, "lp-alpha", "/tmp/lp/alpha"), 0);
+    ASSERT_EQ(lp_publish(path, "lp-beta", "/tmp/lp/beta"), 0);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+
+    /* Default output is unchanged: every project, plus paging fields. */
+    char *all = cbm_mcp_handle_tool(srv, "list_projects", "{}");
+    char *all_text = lp_text(all);
+    ASSERT_NOT_NULL(all_text);
+    ASSERT_NOT_NULL(strstr(all_text, "\"total\":3"));
+    ASSERT_NOT_NULL(strstr(all_text, "\"has_more\":false"));
+    ASSERT_NOT_NULL(strstr(all, "structuredContent"));
+    char *alpha = strstr(all_text, "\"name\":\"alpha\"");
+    char *beta = strstr(all_text, "\"name\":\"beta\"");
+    char *gamma = strstr(all_text, "\"name\":\"gamma\"");
+    ASSERT(alpha && beta && gamma && alpha < beta && beta < gamma);
+    ASSERT_NULL(strstr(all_text, "\"nodes\":"));
+    free(all_text);
+
+    char *page1 = cbm_mcp_handle_tool(srv, "list_projects", "{\"limit\":2}");
+    char *text = lp_text(page1);
+    ASSERT_NOT_NULL(strstr(text, "\"returned\":2"));
+    ASSERT_NOT_NULL(strstr(text, "\"has_more\":true"));
+    ASSERT_NOT_NULL(strstr(text, "\"next_offset\":2"));
+    ASSERT_NOT_NULL(strstr(text, "\"name\":\"beta\""));
+    ASSERT_NULL(strstr(text, "\"name\":\"gamma\""));
+    free(text);
+    char *token = lp_token(page1);
+    ASSERT_NOT_NULL(token);
+    free(page1);
+
+    /* A new generation of a listed workspace keeps the pages valid. */
+    ASSERT_EQ(lp_publish(path, "lp-alpha", "/tmp/lp/alpha"), 0);
+    char args[256];
+    snprintf(args, sizeof(args), "{\"offset\":2,\"limit\":2,\"catalog_token\":\"%s\"}", token);
+    char *page2 = cbm_mcp_handle_tool(srv, "list_projects", args);
+    text = lp_text(page2);
+    ASSERT_NOT_NULL(strstr(text, "\"name\":\"gamma\""));
+    ASSERT_NOT_NULL(strstr(text, "\"has_more\":false"));
+    ASSERT_NULL(strstr(text, "catalog_changed"));
+    free(text);
+    free(page2);
+
+    /* An added workspace shifts the offsets. */
+    ASSERT_EQ(lp_publish(path, "lp-aardvark", "/tmp/lp/aardvark"), 0);
+    page2 = cbm_mcp_handle_tool(srv, "list_projects", args);
+    text = lp_text(page2);
+    ASSERT_NOT_NULL(strstr(text, "\"catalog_changed\":true"));
+    free(text);
+    free(page2);
+    free(token);
+
+    char *details = cbm_mcp_handle_tool(srv, "list_projects",
+                                        "{\"limit\":1,\"include_details\":true}");
+    text = lp_text(details);
+    ASSERT_NOT_NULL(strstr(text, "\"name\":\"aardvark\""));
+    ASSERT_NOT_NULL(strstr(text, "\"nodes\":1"));
+    free(text);
+    free(details);
+
+    /* Compact output: same rows, no structuredContent copy, fewer bytes. */
+    char *json_list = cbm_mcp_handle_tool(srv, "list_projects", "{}");
+    char *compact_list = cbm_mcp_handle_tool(srv, "list_projects", "{\"format\":\"compact\"}");
+    ASSERT_NOT_NULL(compact_list);
+    ASSERT_NULL(strstr(compact_list, "structuredContent"));
+    text = lp_text(compact_list);
+    ASSERT_NOT_NULL(strstr(text, "projects[4]  (name project root_path"));
+    ASSERT_NOT_NULL(strstr(text, "gamma lp-gamma /tmp/lp/gamma"));
+    free(text);
+    printf("  list_projects bytes: json=%zu compact=%zu\n", strlen(json_list),
+           strlen(compact_list));
+    ASSERT(strlen(compact_list) < strlen(json_list));
+    free(json_list);
+    free(compact_list);
+
+    char *json_search = cbm_mcp_handle_tool(
+        srv, "search_graph", "{\"projects\":[\"*\"],\"name_pattern\":\".*\",\"limit\":10}");
+    char *compact_search = cbm_mcp_handle_tool(
+        srv, "search_graph",
+        "{\"projects\":[\"*\"],\"name_pattern\":\".*\",\"limit\":10,\"format\":\"compact\"}");
+    ASSERT_NOT_NULL(compact_search);
+    ASSERT_NULL(strstr(compact_search, "isError\":true"));
+    ASSERT_NOT_NULL(strstr(compact_search, "lp-gamma.Fn"));
+    printf("  search_graph bytes: json=%zu compact=%zu\n", strlen(json_search),
+           strlen(compact_search));
+    ASSERT(strlen(compact_search) < strlen(json_search));
+    free(json_search);
+    free(compact_search);
+
+    char *bad = cbm_mcp_handle_tool(srv, "list_projects", "{\"format\":\"xml\"}");
+    ASSERT_NOT_NULL(strstr(bad, "format must be"));
+    ASSERT_NOT_NULL(strstr(bad, "\"isError\":true"));
+    free(bad);
+
+    cbm_mcp_server_free(srv);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+    th_rmtree(cache);
     PASS();
 #endif
 }
@@ -5078,6 +5446,9 @@ SUITE(mcp) {
     RUN_TEST(tool_search_graph_rejects_empty_projects);
     RUN_TEST(tool_search_graph_searches_two_zova_projects_globally);
     RUN_TEST(tool_index_repository_reports_zova_committed_counts);
+    RUN_TEST(tool_check_index_coverage_reports_recorded_gaps);
+    RUN_TEST(mcp_render_compact_tables_and_scalars);
+    RUN_TEST(tool_list_projects_pages_and_detects_catalog_changes);
     RUN_TEST(tool_index_repository_refuses_while_workspace_lease_is_held);
     RUN_TEST(tool_search_graph_includes_node_properties);
     RUN_TEST(tool_search_graph_query_honors_file_pattern_issue552);

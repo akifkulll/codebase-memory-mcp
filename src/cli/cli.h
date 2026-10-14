@@ -93,8 +93,13 @@ typedef struct {
     const char *content; /* full SKILL.md content */
 } cbm_skill_t;
 
-/* Get the array of skill definitions. */
+/* Get the array of skill definitions. The tool list inside is generated from
+ * the MCP tool registry. */
 const cbm_skill_t *cbm_get_skills(void);
+
+/* The --help "Tools:" block, generated from the MCP tool registry. Caller
+ * frees. */
+char *cbm_cli_tools_help(void);
 
 /* Install skills to skills_dir (e.g. ~/.claude/skills/).
  * If force is true, overwrite existing skills.

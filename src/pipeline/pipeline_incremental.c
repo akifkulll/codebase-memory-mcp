@@ -1166,6 +1166,9 @@ static int run_incremental(cbm_pipeline_t *p, cbm_file_info_t *files, int file_c
     }
 
     run_extract_resolve(&ctx, changed_files, ci);
+    /* Changed files got fresh File props above, so a stale coverage stamp
+     * cannot survive; unchanged files keep theirs from the generation. */
+    cbm_pipeline_stamp_coverage(p, existing);
     cbm_pipeline_pass_k8s(&ctx, changed_files, ci);
 
     incr_rebuild_snapshot_callers(&ctx, &edge_cap, files, file_count);

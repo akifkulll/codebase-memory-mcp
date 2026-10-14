@@ -2842,6 +2842,69 @@ TEST(zova_operations_workspace_import_adds_rich_workspace_without_touching_resid
     PASS();
 }
 
+/* #12: parse coverage lives in File node properties and the Project node
+ * marker, so a workspace export/import carries it unchanged. */
+TEST(zova_operations_workspace_import_preserves_parse_coverage) {
+    char source[OPERATIONS_PATH_MAX], target[OPERATIONS_PATH_MAX];
+    char archive[OPERATIONS_PATH_MAX];
+    operations_path(source, sizeof(source), "coverage-source");
+    operations_path(target, sizeof(target), "coverage-target");
+    operations_archive_path(archive, sizeof(archive), "coverage-archive");
+    operations_archive_cleanup(archive);
+    const CBMDumpNode nodes[] = {
+        {.id = 1, .project = "covered", .label = "Project", .name = "covered",
+         .qualified_name = "covered", .file_path = "",
+         .properties = "{\"coverage_version\":1}"},
+        {.id = 2, .project = "covered", .label = "File", .name = "bad.c",
+         .qualified_name = "covered.bad.c", .file_path = "bad.c",
+         .properties = "{\"extension\":\".c\",\"coverage\":\"partial\","
+                       "\"parse_error_ranges\":\"3-4\"}"},
+        {.id = 3, .project = "covered", .label = "File", .name = "ok.c",
+         .qualified_name = "covered.ok.c", .file_path = "ok.c",
+         .properties = "{\"extension\":\".c\"}"},
+    };
+    const cbm_zova_file_hash_input_t hashes[] = {
+        {.file_path = "bad.c", .content_hash = "bad-hash", .mtime_ns = 1, .size_bytes = 2},
+        {.file_path = "ok.c", .content_hash = "ok-hash", .mtime_ns = 3, .size_bytes = 4},
+    };
+    const cbm_zova_workspace_generation_input_t input = {
+        .root_path = "/tmp/covered", .project = "covered",
+        .indexed_at = "2026-10-15T00:00:00Z", .model_fingerprint = CBM_ZOVA_MODEL_FINGERPRINT,
+        .vector_dimensions = 768, .nodes = nodes, .node_count = 3,
+        .file_hashes = hashes, .file_hash_count = 2};
+    cbm_zova_workspace_generation_result_t published = {0};
+    ASSERT_EQ(cbm_zova_user_database_publish_workspace(source, &input, &published), 0);
+    cbm_zova_operation_report_t report = {0};
+    ASSERT_EQ(cbm_zova_workspace_export(source, published.workspace_id, archive, &report),
+              CBM_ZOVA_OPERATION_OK);
+    ASSERT_EQ(cbm_zova_workspace_import(target, archive, false, &report),
+              CBM_ZOVA_OPERATION_OK);
+
+    cbm_zova_repository_t *repo = cbm_zova_repository_open(target, "covered");
+    ASSERT_NOT_NULL(repo);
+    cbm_zova_file_coverage_t *rows = NULL;
+    int count = 0;
+    bool recorded = false;
+    char *root_path = NULL;
+    int rc = cbm_zova_repository_file_coverage(repo, cbm_zova_repository_workspace_id(repo),
+                                               NULL, &rows, &count, &root_path, NULL,
+                                               &recorded);
+    cbm_zova_repository_close(repo);
+    bool ok = rc == 0 && recorded && count == 2 && root_path &&
+              strcmp(root_path, "/tmp/covered") == 0 && strcmp(rows[0].file_path, "bad.c") == 0 &&
+              rows[0].properties && strstr(rows[0].properties, "\"parse_error_ranges\":\"3-4\"") &&
+              rows[0].has_hash && rows[0].size_bytes == 2 &&
+              strcmp(rows[1].file_path, "ok.c") == 0 && rows[1].properties &&
+              !strstr(rows[1].properties, "coverage");
+    cbm_zova_file_coverage_free(rows, count);
+    free(root_path);
+    operations_archive_cleanup(archive);
+    cbm_unlink(source);
+    cbm_unlink(target);
+    ASSERT_TRUE(ok);
+    PASS();
+}
+
 /* Importing a workspace publishes it, so the import refuses (without creating
  * the target) while that workspace's lease or a database replacement is held. */
 TEST(zova_operations_workspace_import_refuses_while_index_coordination_is_held) {
@@ -3502,6 +3565,7 @@ SUITE(zova_operations) {
     RUN_TEST(zova_operations_workspace_manifest_binds_complete_inventory_and_escapes_identity);
     RUN_TEST(zova_operations_workspace_import_refuses_each_manifest_binding_without_target_writes);
     RUN_TEST(zova_operations_workspace_import_adds_rich_workspace_without_touching_resident);
+    RUN_TEST(zova_operations_workspace_import_preserves_parse_coverage);
     RUN_TEST(zova_operations_workspace_export_and_empty_import_publish_generation_three_once);
     RUN_TEST(zova_operations_workspace_import_refuses_while_index_coordination_is_held);
     RUN_TEST(zova_operations_workspace_replace_publishes_only_requested_generation_atomically);

@@ -1600,6 +1600,109 @@ error:
     return CBM_STORE_ERR;
 }
 
+int cbm_zova_repository_file_coverage(cbm_zova_repository_t *repo, const char *workspace_id,
+                                      const char *exact_path, cbm_zova_file_coverage_t **out,
+                                      int *count, char **out_root_path, int64_t *out_generation,
+                                      bool *out_recorded) {
+    if (!out || !count) return CBM_STORE_ERR;
+    *out = NULL;
+    *count = 0;
+    if (out_root_path) *out_root_path = NULL;
+    if (repo_workspace_required(repo, workspace_id) != CBM_STORE_OK) return CBM_STORE_ERR;
+    if (out_generation) *out_generation = repo->generation;
+    zova_statement *stmt = NULL;
+    cbm_zova_file_coverage_t *rows = NULL;
+    int n = 0;
+    int cap = 0;
+    if (out_recorded) {
+        /* Generations indexed before coverage stamps existed carry no marker. */
+        *out_recorded = false;
+        if (repo_prepare(repo,
+                         "SELECT properties FROM cbm_nodes_v1 WHERE workspace_key=?1 "
+                         "AND label='Project'",
+                         &stmt) != 0 ||
+            repo_bind_i64(stmt, 1, repo->workspace_key) != 0) goto error;
+        for (;;) {
+            zova_step_result step = ZOVA_STEP_DONE;
+            if (repo_step(stmt, &step) != 0) goto error;
+            if (step == ZOVA_STEP_DONE) break;
+            char *props = repo_column_text(stmt, 0);
+            if (props && strstr(props, "\"coverage_version\":")) *out_recorded = true;
+            free(props);
+        }
+        (void)zova_statement_finalize(stmt);
+        stmt = NULL;
+    }
+    if (out_root_path) {
+        if (repo_prepare(repo, "SELECT root_path FROM cbm_projects_v1 WHERE workspace_key=?1",
+                         &stmt) != 0 ||
+            repo_bind_i64(stmt, 1, repo->workspace_key) != 0) goto error;
+        zova_step_result step = ZOVA_STEP_DONE;
+        if (repo_step(stmt, &step) != 0 || step != ZOVA_STEP_ROW) goto error;
+        *out_root_path = repo_column_text(stmt, 0);
+        (void)zova_statement_finalize(stmt);
+        stmt = NULL;
+        if (!*out_root_path) goto error;
+    }
+    if (repo_prepare(repo,
+                     "SELECT f.file_path,n.properties,n.zova_node_key IS NOT NULL,"
+                     "h.file_key IS NOT NULL,COALESCE(h.mtime_ns,0),COALESCE(h.size_bytes,0) "
+                     "FROM cbm_files_v1 f "
+                     "LEFT JOIN cbm_nodes_v1 n ON n.workspace_key=f.workspace_key "
+                     "AND n.file_key=f.file_key AND n.label='File' "
+                     "LEFT JOIN cbm_file_hashes_v1 h ON h.file_key=f.file_key "
+                     "WHERE f.workspace_key=?1 AND (?2 IS NULL OR f.file_path=?2) "
+                     "AND (n.zova_node_key IS NOT NULL OR h.file_key IS NOT NULL) "
+                     "ORDER BY f.file_path",
+                     &stmt) != 0 ||
+        repo_bind_i64(stmt, 1, repo->workspace_key) != 0 ||
+        (exact_path && repo_bind_text(stmt, 2, exact_path) != 0)) goto error;
+    for (;;) {
+        zova_step_result step = ZOVA_STEP_DONE;
+        if (repo_step(stmt, &step) != 0) goto error;
+        if (step == ZOVA_STEP_DONE) break;
+        if (n == cap) {
+            if (cap > INT_MAX / 2) goto error;
+            int next = cap ? cap * 2 : 64;
+            cbm_zova_file_coverage_t *grown = realloc(rows, (size_t)next * sizeof(*rows));
+            if (!grown) goto error;
+            rows = grown;
+            cap = next;
+        }
+        cbm_zova_file_coverage_t *row = &rows[n];
+        memset(row, 0, sizeof(*row));
+        row->file_path = repo_column_text(stmt, 0);
+        bool has_node = repo_column_i64(stmt, 2) != 0;
+        row->properties = has_node ? repo_column_text(stmt, 1) : NULL;
+        row->has_hash = repo_column_i64(stmt, 3) != 0;
+        row->mtime_ns = repo_column_i64(stmt, 4);
+        row->size_bytes = repo_column_i64(stmt, 5);
+        n++;
+        if (!row->file_path || (has_node && !row->properties)) goto error;
+    }
+    (void)zova_statement_finalize(stmt);
+    *out = rows;
+    *count = n;
+    return CBM_STORE_OK;
+error:
+    if (stmt) (void)zova_statement_finalize(stmt);
+    cbm_zova_file_coverage_free(rows, n);
+    if (out_root_path) {
+        free(*out_root_path);
+        *out_root_path = NULL;
+    }
+    return CBM_STORE_ERR;
+}
+
+void cbm_zova_file_coverage_free(cbm_zova_file_coverage_t *rows, int count) {
+    if (!rows) return;
+    for (int i = 0; i < count; i++) {
+        free(rows[i].file_path);
+        free(rows[i].properties);
+    }
+    free(rows);
+}
+
 int cbm_zova_repository_project_summary(cbm_zova_repository_t *repo,
                                         const char *workspace_id,
                                         cbm_project_summary_export_t *out) {
@@ -3303,6 +3406,8 @@ int cbm_zova_repository_search(cbm_zova_repository_t*r,const char*w,const cbm_se
 int cbm_zova_repository_search_fts(cbm_zova_repository_t*r,const char*w,const char*q,const char*f,int l,int x,cbm_search_output_t*o){(void)r;(void)w;(void)q;(void)f;(void)l;(void)x;(void)o;return CBM_STORE_ERR;}
 int cbm_zova_repository_index_status(cbm_zova_repository_t*r,const char*w,int64_t*g,char**i){(void)r;(void)w;(void)g;(void)i;return CBM_STORE_ERR;}
 int cbm_zova_repository_counts(cbm_zova_repository_t*r,const char*w,int*n,int*e){(void)r;(void)w;(void)n;(void)e;return CBM_STORE_ERR;}
+int cbm_zova_repository_file_coverage(cbm_zova_repository_t*r,const char*w,const char*p,cbm_zova_file_coverage_t**o,int*c,char**rp,int64_t*g,bool*rec){(void)r;(void)w;(void)p;(void)g;if(rec)*rec=false;if(o)*o=NULL;if(c)*c=0;if(rp)*rp=NULL;return CBM_STORE_ERR;}
+void cbm_zova_file_coverage_free(cbm_zova_file_coverage_t*r,int c){(void)r;(void)c;}
 int cbm_zova_repository_project_summary(cbm_zova_repository_t*r,const char*w,cbm_project_summary_export_t*o){(void)r;(void)w;(void)o;return CBM_STORE_ERR;}
 int cbm_zova_repository_export_snapshot(const char*p,const char*w,cbm_zova_workspace_snapshot_t*o){(void)p;(void)w;if(o)memset(o,0,sizeof(*o));return -1;}
 int cbm_zova_repository_export_incremental_snapshot(const char*p,const char*w,cbm_zova_workspace_snapshot_t*o){(void)p;(void)w;if(o)memset(o,0,sizeof(*o));return -1;}

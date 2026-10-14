@@ -35,6 +35,7 @@ enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6 };
 #include "foundation/compat_thread.h"
 #include "foundation/profile.h"
 #include "foundation/mem.h"
+#include "yyjson/yyjson.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -285,6 +286,69 @@ void cbm_pipeline_get_file_errors(const cbm_pipeline_t *p, cbm_file_error_t **ou
     }
 }
 
+/* Rebuild a File node's properties with its coverage stamp. The extension
+ * key mirrors pass_structure / incr_add_changed_file_structure. */
+static bool stamp_file_coverage(cbm_pipeline_t *p, cbm_gbuf_t *gbuf, const cbm_file_error_t *e,
+                                bool partial) {
+    char *file_qn = cbm_pipeline_fqn_compute(p->project_name, e->path, "__file__");
+    if (!file_qn) {
+        return false;
+    }
+    const char *slash = strrchr(e->path, '/');
+    const char *basename = slash ? slash + SKIP_ONE : e->path;
+    const char *ext = strrchr(basename, '.');
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_str(doc, root, "extension", ext ? ext : "");
+    if (partial) {
+        yyjson_mut_obj_add_str(doc, root, "coverage", CBM_COVERAGE_PARTIAL);
+        yyjson_mut_obj_add_str(doc, root, "parse_error_ranges", e->reason ? e->reason : "");
+    } else {
+        yyjson_mut_obj_add_str(doc, root, "coverage", CBM_COVERAGE_MISSED);
+        yyjson_mut_obj_add_str(doc, root, "coverage_phase", e->phase);
+        yyjson_mut_obj_add_str(doc, root, "coverage_reason", e->reason ? e->reason : "");
+    }
+    char *props = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
+    bool stamped = props && cbm_gbuf_set_node_props(gbuf, file_qn, props);
+    free(props);
+    free(file_qn);
+    return stamped;
+}
+
+void cbm_pipeline_stamp_coverage(cbm_pipeline_t *p, cbm_gbuf_t *gbuf) {
+    if (!p || !gbuf) {
+        return;
+    }
+    int partial = 0;
+    int missed = 0;
+    /* Partial first, so a file recorded under both keeps the stronger
+     * "missed" stamp. */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < p->file_errors_count; i++) {
+            const cbm_file_error_t *e = &p->file_errors[i];
+            if (!e->path || !e->phase) {
+                continue;
+            }
+            bool is_partial = strcmp(e->phase, "parse_partial") == 0;
+            if (is_partial != (pass == 0)) {
+                continue;
+            }
+            if (stamp_file_coverage(p, gbuf, e, is_partial)) {
+                if (is_partial) {
+                    partial++;
+                } else {
+                    missed++;
+                }
+            }
+        }
+    }
+    if (partial > 0 || missed > 0) {
+        cbm_log_info("index.coverage", "partial", itoa_buf(partial), "missed", itoa_buf(missed));
+    }
+}
+
 void cbm_pipeline_get_committed_counts(const cbm_pipeline_t *p, int *nodes, int *edges) {
     if (nodes) {
         *nodes = p ? p->committed_nodes : -1;
@@ -379,7 +443,11 @@ static int pass_structure(cbm_pipeline_t *p, const cbm_file_info_t *files, int f
     cbm_log_info("pass.start", "pass", "structure", "files", itoa_buf(file_count));
 
     /* Project node */
-    cbm_gbuf_upsert_node(p->gbuf, "Project", p->project_name, p->project_name, NULL, 0, 0, "{}");
+    /* coverage_version marks a generation whose File nodes carry coverage
+     * stamps; incremental runs keep the node, so older generations stay
+     * unmarked until the next full index. */
+    cbm_gbuf_upsert_node(p->gbuf, "Project", p->project_name, p->project_name, NULL, 0, 0,
+                         "{\"coverage_version\":" CBM_COVERAGE_VERSION_STR "}");
     const char *branch_qn = p->branch_qn ? p->branch_qn : p->project_name;
     const char *branch_name = p->git_ctx.branch ? p->git_ctx.branch : "working-tree";
     char branch_props[CBM_SZ_2K];
@@ -1318,6 +1386,9 @@ static int run_extraction_phase(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     CBM_PROF_END_N("pipeline", "2_extraction_total", t_extract_total, file_count);
     if (check_cancel(p)) {
         return CBM_NOT_FOUND;
+    }
+    if (rc == 0) {
+        cbm_pipeline_stamp_coverage(p, p->gbuf);
     }
     return rc;
 }

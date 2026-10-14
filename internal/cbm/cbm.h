@@ -447,6 +447,15 @@ typedef struct {
 
     bool has_error;
     const char *error_msg;
+    /* Best-effort parse-coverage signal. parse_incomplete is true when the
+     * parse tree contains tree-sitter ERROR/MISSING regions that extraction did
+     * not recover — constructs in those regions may be absent from the graph.
+     * error_ranges is a compact "start-end,start-end" list of 1-based line
+     * ranges (arena-owned) or NULL. The absence of the flag is NOT a
+     * completeness guarantee. */
+    bool parse_incomplete;
+    const char *error_ranges;
+    int error_region_count;
     bool is_test_file;
     int imports_count;
     TSTree *cached_tree;     // retained parse tree (caller frees via cbm_free_tree)

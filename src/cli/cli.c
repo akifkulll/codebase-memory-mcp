@@ -453,16 +453,17 @@ int cbm_replace_binary(const char *path, const unsigned char *data, int len, int
 
 /* Consolidated from 4 separate skills into 1 with progressive disclosure.
  * This embedded version is the single source of truth for the CLI installer.
- * Based on PR #81 by @gdilla — factual corrections applied. */
-static const char skill_content[] =
+ * Based on PR #81 by @gdilla — factual corrections applied. The tool list
+ * between skill_head and skill_tail is generated from the MCP registry. */
+static const char skill_head[] =
     "---\n"
     "name: codebase-memory\n"
-    "description: Use the codebase knowledge graph for structural code queries. "
+    "description: \"Use the codebase knowledge graph for structural code queries. "
     "Triggers on: explore the codebase, understand the architecture, what functions exist, "
     "show me the structure, who calls this function, what does X call, trace the call chain, "
     "find callers of, show dependencies, impact analysis, dead code, unused functions, "
     "high fan-out, refactor candidates, code quality audit, graph query syntax, "
-    "Cypher query examples, edge types, how to use search_graph.\n"
+    "Cypher query examples, edge types, how to use search_graph.\"\n"
     "---\n"
     "\n"
     "# Codebase Memory — Knowledge Graph Tools\n"
@@ -479,9 +480,17 @@ static const char skill_content[] =
     "| Find by name pattern | `search_graph(name_pattern=\"...\")` |\n"
     "| Dead code | `search_graph(max_degree=0, exclude_entry_points=true)` |\n"
     "| Cross-service edges | `query_graph` with Cypher |\n"
-    "| Impact of local changes | `detect_changes()` |\n"
+    "| Impact of local changes | `detect_changes(project=...)` |\n"
     "| Risk-classified trace | `trace_path(risk_labels=true)` |\n"
     "| Text search | `search_code` or Grep |\n"
+    "| Was this file fully parsed? | `check_index_coverage(paths=[...])` |\n"
+    "\n"
+    "## Projects\n"
+    "Every indexed repository lives in one shared `cbm.zova` file; there is no per-project "
+    "database to open. Pass the selector `list_projects` reports as `project` to every "
+    "project-scoped tool. Colliding directory names get the shortest unique parent, e.g. "
+    "`AnotherFolder/codebase-memory-mcp`. `search_graph(projects=[...])` searches several "
+    "projects at once and every row names its owning project.\n"
     "\n"
     "## Exploration Workflow\n"
     "1. `list_projects` — check if project is indexed\n"
@@ -492,20 +501,15 @@ static const char skill_content[] =
     "## Tracing Workflow\n"
     "1. `search_graph(name_pattern=\".*FuncName.*\")` — discover exact name\n"
     "2. `trace_path(function_name=\"FuncName\", direction=\"both\", depth=3)` — trace\n"
-    "3. `detect_changes()` — map git diff to affected symbols\n"
+    "3. `detect_changes(project=...)` — map git diff to affected symbols\n"
     "\n"
     "## Quality Analysis\n"
     "- Dead code: `search_graph(max_degree=0, exclude_entry_points=true)`\n"
-    "- High fan-out: `search_graph(min_degree=10, relationship=\"CALLS\", "
-    "direction=\"outbound\")`\n"
-    "- High fan-in: `search_graph(min_degree=10, relationship=\"CALLS\", "
-    "direction=\"inbound\")`\n"
-    "\n"
-    "## 13 MCP Tools\n"
-    "`index_repository`, `index_status`, `list_projects`, `delete_project`,\n"
-    "`search_graph`, `search_code`, `trace_path`, `detect_changes`,\n"
-    "`query_graph`, `get_graph_schema`, `get_code_snippet`, `get_architecture`,\n"
-    "`ingest_traces`\n"
+    "- High fan-in/fan-out: `search_graph(min_degree=10, relationship=\"CALLS\")`, then "
+    "`trace_path` on a hit to see which side dominates\n"
+    "\n";
+
+static const char skill_tail[] =
     "\n"
     "## Edge Types\n"
     "CALLS, HTTP_CALLS, ASYNC_CALLS, IMPORTS, DEFINES, DEFINES_METHOD,\n"
@@ -523,26 +527,17 @@ static const char skill_content[] =
     "## Gotchas\n"
     "1. `search_graph(relationship=\"HTTP_CALLS\")` filters nodes by degree — "
     "use `query_graph` with Cypher to see actual edges.\n"
-    "2. `query_graph` has a 200-row cap — use `search_graph` with degree filters "
-    "for counting.\n"
+    "2. `query_graph` returns every row up to a 100k ceiling and has no offset — add "
+    "LIMIT or `max_rows`, or page with `search_graph`.\n"
     "3. `trace_path` needs exact names — use `search_graph(name_pattern=...)` first.\n"
     "4. `direction=\"outbound\"` misses cross-service callers — use "
     "`direction=\"both\"`.\n"
-    "5. Results default to 10 per page — check `has_more` and use `offset`.\n";
-
-static const char codex_instructions_content[] =
-    "# Codebase Knowledge Graph\n"
-    "\n"
-    "This project uses codebase-memory-mcp to maintain a knowledge graph of the codebase.\n"
-    "Use the MCP tools to explore and understand the code:\n"
-    "\n"
-    "- `search_graph` — find functions, classes, routes by pattern\n"
-    "- `trace_path` — trace who calls a function or what it calls\n"
-    "- `get_code_snippet` — read function source code\n"
-    "- `query_graph` — run Cypher queries for complex patterns\n"
-    "- `get_architecture` — high-level project summary\n"
-    "\n"
-    "Always prefer graph tools over grep for code discovery.\n";
+    "5. `search_graph` returns 200 results per page by default — check `has_more` and use "
+    "`offset`.\n"
+    "6. A file the parser skipped or only partly understood can be missing from graph "
+    "results — call `check_index_coverage` before negative or exhaustive claims.\n"
+    "7. Discovery tools accept `format=\"compact\"` for a smaller text rendering of the same "
+    "data.\n";
 
 /* Old skill names — cleaned up during install to remove stale directories. */
 static const char *old_skill_names[] = {
@@ -553,16 +548,55 @@ static const char *old_skill_names[] = {
 };
 enum { OLD_SKILL_COUNT = 4 };
 
-static const cbm_skill_t skills[CBM_SKILL_COUNT] = {
-    {"codebase-memory", skill_content},
-};
+/* Append the registry's tool names, comma-separated, wrapped at width
+ * columns with each line starting with indent. */
+static void append_tool_names(char *buf, size_t sz, size_t *off, const char *indent, int width,
+                              bool backticks) {
+    int count = cbm_mcp_tool_count();
+    size_t line = 0;
+    for (int i = 0; i < count; i++) {
+        char item[CLI_BUF_256];
+        snprintf(item, sizeof(item), backticks ? "`%s`%s" : "%s%s", cbm_mcp_tool_name(i),
+                 i + 1 < count ? "," : "");
+        size_t len = strlen(item);
+        if (line > 0 && line + 1 + len > (size_t)width) {
+            *off += (size_t)snprintf(buf + *off, *off < sz ? sz - *off : 0, "\n");
+            line = 0;
+        }
+        *off += (size_t)snprintf(buf + *off, *off < sz ? sz - *off : 0, "%s%s",
+                                 line == 0 ? indent : " ", item);
+        line += (line == 0 ? strlen(indent) : 1) + len;
+    }
+    *off += (size_t)snprintf(buf + *off, *off < sz ? sz - *off : 0, "\n");
+}
+
+enum { SKILL_TOOLS_SZ = 2048 };
 
 const cbm_skill_t *cbm_get_skills(void) {
+    /* Built once from the MCP registry so the installed tool list cannot
+     * drift from tools/list. */
+    static char content[sizeof(skill_head) + SKILL_TOOLS_SZ + sizeof(skill_tail)];
+    static cbm_skill_t skills[CBM_SKILL_COUNT];
+    if (!skills[0].content) {
+        size_t off = (size_t)snprintf(content, sizeof(content), "%s## %d MCP Tools\n",
+                                      skill_head, cbm_mcp_tool_count());
+        append_tool_names(content, sizeof(content), &off, "", 80, true);
+        snprintf(content + off, off < sizeof(content) ? sizeof(content) - off : 0, "%s",
+                 skill_tail);
+        skills[0] = (cbm_skill_t){"codebase-memory", content};
+    }
     return skills;
 }
 
+char *cbm_cli_tools_help(void) {
+    char buf[SKILL_TOOLS_SZ];
+    size_t off = (size_t)snprintf(buf, sizeof(buf), "Tools:\n");
+    append_tool_names(buf, sizeof(buf), &off, "  ", 72, false);
+    return strdup(buf);
+}
+
 const char *cbm_get_codex_instructions(void) {
-    return codex_instructions_content;
+    return cbm_get_agent_instructions();
 }
 
 /* ── Recursive mkdir (via compat_fs) ──────────────────────────── */
@@ -643,7 +677,7 @@ int cbm_install_skills(const char *skills_dir, bool force, bool dry_run) {
 
     for (int i = 0; i < CBM_SKILL_COUNT; i++) {
         char skill_path[CLI_BUF_1K];
-        snprintf(skill_path, sizeof(skill_path), "%s/%s", skills_dir, skills[i].name);
+        snprintf(skill_path, sizeof(skill_path), "%s/%s", skills_dir, cbm_get_skills()[i].name);
         char file_path[CLI_BUF_1K];
         snprintf(file_path, sizeof(file_path), "%s/SKILL.md", skill_path);
 
@@ -668,7 +702,7 @@ int cbm_install_skills(const char *skills_dir, bool force, bool dry_run) {
         if (!f) {
             continue;
         }
-        (void)fwrite(skills[i].content, CLI_ELEM_SIZE, strlen(skills[i].content), f);
+        (void)fwrite(cbm_get_skills()[i].content, CLI_ELEM_SIZE, strlen(cbm_get_skills()[i].content), f);
         (void)fclose(f);
         count++;
     }
@@ -683,7 +717,7 @@ int cbm_remove_skills(const char *skills_dir, bool dry_run) {
 
     for (int i = 0; i < CBM_SKILL_COUNT; i++) {
         char skill_path[CLI_BUF_1K];
-        snprintf(skill_path, sizeof(skill_path), "%s/%s", skills_dir, skills[i].name);
+        snprintf(skill_path, sizeof(skill_path), "%s/%s", skills_dir, cbm_get_skills()[i].name);
         struct stat st;
         if (stat(skill_path, &st) != 0) {
             continue;
@@ -790,6 +824,44 @@ static int write_json_file(const char *path, yyjson_mut_doc *doc) {
     return written == len ? 0 : CLI_ERR;
 }
 
+/* Load an agent config for an in-place edit. A missing or empty file starts a
+ * fresh object; a file that exists but does not parse is refused (NULL), so a
+ * config the user is mid-way through editing is never replaced wholesale. */
+static yyjson_mut_val *load_json_config(yyjson_mut_doc *mdoc, const char *config_path) {
+    yyjson_doc *doc = read_json_file(config_path);
+    if (doc) {
+        yyjson_mut_val *root = yyjson_val_mut_copy(mdoc, yyjson_doc_get_root(doc));
+        yyjson_doc_free(doc);
+        return yyjson_mut_is_obj(root) ? root : NULL;
+    }
+    struct stat st;
+    if (stat(config_path, &st) == 0 && st.st_size > 0) {
+        fprintf(stderr, "  skipped: %s exists but is not valid JSON; fix it and re-run install\n",
+                config_path);
+        return NULL;
+    }
+    return yyjson_mut_obj(mdoc);
+}
+
+/* Carry keys the client or user added to our previous entry (for example
+ * "enabled", "env", "timeout") into the replacement, so reinstalling only
+ * refreshes the fields we own. */
+static void keep_client_keys(yyjson_mut_doc *mdoc, yyjson_mut_val *entry,
+                             yyjson_mut_val *previous) {
+    if (!yyjson_mut_is_obj(previous)) {
+        return;
+    }
+    yyjson_mut_obj_iter iter = yyjson_mut_obj_iter_with(previous);
+    yyjson_mut_val *key;
+    while ((key = yyjson_mut_obj_iter_next(&iter)) != NULL) {
+        const char *name = yyjson_mut_get_str(key);
+        if (name && !yyjson_mut_obj_get(entry, name)) {
+            yyjson_mut_obj_add_val(mdoc, entry, name,
+                                   yyjson_mut_val_mut_copy(mdoc, yyjson_mut_obj_iter_get_val(key)));
+        }
+    }
+}
+
 /* ── Editor MCP: Cursor/Windsurf/Gemini (mcpServers key) ──────── */
 
 int cbm_install_editor_mcp(const char *binary_path, const char *config_path) {
@@ -803,14 +875,7 @@ int cbm_install_editor_mcp(const char *binary_path, const char *config_path) {
         return CLI_ERR;
     }
 
-    yyjson_doc *doc = read_json_file(config_path);
-    yyjson_mut_val *root;
-    if (doc) {
-        root = yyjson_val_mut_copy(mdoc, yyjson_doc_get_root(doc));
-        yyjson_doc_free(doc);
-    } else {
-        root = yyjson_mut_obj(mdoc);
-    }
+    yyjson_mut_val *root = load_json_config(mdoc, config_path);
     if (!root) {
         yyjson_mut_doc_free(mdoc);
         return CLI_ERR;
@@ -825,11 +890,12 @@ int cbm_install_editor_mcp(const char *binary_path, const char *config_path) {
     }
 
     /* Remove existing entry if present */
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_val *previous = yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
 
     /* Add our entry */
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_str(mdoc, entry, "command", binary_path);
+    keep_client_keys(mdoc, entry, previous);
     yyjson_mut_obj_add_val(mdoc, servers, "codebase-memory-mcp", entry);
 
     int rc = write_json_file(config_path, mdoc);
@@ -881,14 +947,7 @@ int cbm_install_openclaw_mcp(const char *binary_path, const char *config_path) {
         return CLI_ERR;
     }
 
-    yyjson_doc *doc = read_json_file(config_path);
-    yyjson_mut_val *root;
-    if (doc) {
-        root = yyjson_val_mut_copy(mdoc, yyjson_doc_get_root(doc));
-        yyjson_doc_free(doc);
-    } else {
-        root = yyjson_mut_obj(mdoc);
-    }
+    yyjson_mut_val *root = load_json_config(mdoc, config_path);
     if (!root) {
         yyjson_mut_doc_free(mdoc);
         return CLI_ERR;
@@ -907,13 +966,14 @@ int cbm_install_openclaw_mcp(const char *binary_path, const char *config_path) {
         yyjson_mut_obj_add_val(mdoc, mcp, "servers", servers);
     }
 
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_val *previous = yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_bool(mdoc, entry, "enabled", true);
     yyjson_mut_obj_add_str(mdoc, entry, "command", binary_path);
     yyjson_mut_val *args = yyjson_mut_arr(mdoc);
     yyjson_mut_obj_add_val(mdoc, entry, "args", args);
+    keep_client_keys(mdoc, entry, previous);
     yyjson_mut_obj_add_val(mdoc, servers, "codebase-memory-mcp", entry);
 
     int rc = write_json_file(config_path, mdoc);
@@ -971,14 +1031,7 @@ int cbm_install_vscode_mcp(const char *binary_path, const char *config_path) {
         return CLI_ERR;
     }
 
-    yyjson_doc *doc = read_json_file(config_path);
-    yyjson_mut_val *root;
-    if (doc) {
-        root = yyjson_val_mut_copy(mdoc, yyjson_doc_get_root(doc));
-        yyjson_doc_free(doc);
-    } else {
-        root = yyjson_mut_obj(mdoc);
-    }
+    yyjson_mut_val *root = load_json_config(mdoc, config_path);
     if (!root) {
         yyjson_mut_doc_free(mdoc);
         return CLI_ERR;
@@ -991,11 +1044,12 @@ int cbm_install_vscode_mcp(const char *binary_path, const char *config_path) {
         yyjson_mut_obj_add_val(mdoc, root, "servers", servers);
     }
 
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_val *previous = yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_str(mdoc, entry, "type", "stdio");
     yyjson_mut_obj_add_str(mdoc, entry, "command", binary_path);
+    keep_client_keys(mdoc, entry, previous);
     yyjson_mut_obj_add_val(mdoc, servers, "codebase-memory-mcp", entry);
 
     int rc = write_json_file(config_path, mdoc);
@@ -1047,14 +1101,7 @@ int cbm_install_zed_mcp(const char *binary_path, const char *config_path) {
         return CLI_ERR;
     }
 
-    yyjson_doc *doc = read_json_file(config_path);
-    yyjson_mut_val *root;
-    if (doc) {
-        root = yyjson_val_mut_copy(mdoc, yyjson_doc_get_root(doc));
-        yyjson_doc_free(doc);
-    } else {
-        root = yyjson_mut_obj(mdoc);
-    }
+    yyjson_mut_val *root = load_json_config(mdoc, config_path);
     if (!root) {
         yyjson_mut_doc_free(mdoc);
         return CLI_ERR;
@@ -1067,10 +1114,11 @@ int cbm_install_zed_mcp(const char *binary_path, const char *config_path) {
         yyjson_mut_obj_add_val(mdoc, root, "context_servers", servers);
     }
 
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_val *previous = yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_str(mdoc, entry, "command", binary_path);
+    keep_client_keys(mdoc, entry, previous);
     yyjson_mut_obj_add_val(mdoc, servers, "codebase-memory-mcp", entry);
 
     int rc = write_json_file(config_path, mdoc);
@@ -1252,6 +1300,8 @@ static const char agent_instructions_content[] =
     "ALWAYS prefer MCP graph tools over grep/glob/file-search for code discovery.\n"
     "Run `list_projects` to discover indexed project selectors. If the target repository is not "
     "indexed, run `index_repository` first.\n"
+    "All indexed projects live in one shared `cbm.zova` file; there is no per-project database "
+    "to open. Pass a selector from `list_projects` as `project` to project-scoped tools.\n"
     "\n"
     "## Priority Order\n"
     "1. `search_graph` — find functions, classes, routes, variables by pattern\n"
@@ -1264,6 +1314,8 @@ static const char agent_instructions_content[] =
     "- Searching for string literals, error messages, config values\n"
     "- Searching non-code files (Dockerfiles, shell scripts, configs)\n"
     "- When MCP tools return insufficient results\n"
+    "- When `check_index_coverage` reports a file as partial or skipped; check coverage before "
+    "negative or exhaustive claims\n"
     "\n"
     "## Cross-repository search\n"
     "- Use `search_graph(projects=[\"project-a\",\"project-b\"], query=\"...\")` to search "
@@ -1484,9 +1536,14 @@ int cbm_upsert_codex_mcp(const char *binary_path, const char *config_path) {
     size_t len = 0;
     char *content = read_file_str(config_path, &len);
 
-    /* Build our TOML section */
+    /* Build our TOML section. Codex passes only the names in env_vars into a
+     * stdio MCP subprocess; without CBM_CACHE_DIR a Codex-spawned server would
+     * open the default cache's cbm.zova instead of the configured one. Listed
+     * unconditionally: env_vars forwards a name only when it is set (upstream
+     * 63f26f4c). */
     char section[CLI_BUF_1K];
-    snprintf(section, sizeof(section), "%s\ncommand = \"%s\"\n", CODEX_CMM_SECTION, binary_path);
+    snprintf(section, sizeof(section), "%s\ncommand = \"%s\"\nenv_vars = [\"CBM_CACHE_DIR\"]\n",
+             CODEX_CMM_SECTION, binary_path);
 
     if (!content) {
         /* No file — create fresh */
@@ -1712,6 +1769,16 @@ int cbm_remove_codex_hooks(const char *config_path) {
 
 /* ── OpenCode MCP config (JSON with "mcp" key) ───────────────── */
 
+/* OpenCode reads opencode.json or opencode.jsonc. Target whichever exists,
+ * .jsonc first, so a .jsonc user does not get a second, ignored .json file;
+ * with neither present, create .json (upstream 1e6825f9). */
+static void opencode_config_path(const char *home, char *out, size_t out_sz) {
+    snprintf(out, out_sz, "%s/.config/opencode/opencode.jsonc", home);
+    if (!cbm_file_exists(out)) {
+        snprintf(out, out_sz, "%s/.config/opencode/opencode.json", home);
+    }
+}
+
 int cbm_upsert_opencode_mcp(const char *binary_path, const char *config_path) {
     if (!binary_path || !config_path) {
         return CLI_ERR;
@@ -1722,14 +1789,7 @@ int cbm_upsert_opencode_mcp(const char *binary_path, const char *config_path) {
         return CLI_ERR;
     }
 
-    yyjson_doc *doc = read_json_file(config_path);
-    yyjson_mut_val *root;
-    if (doc) {
-        root = yyjson_val_mut_copy(mdoc, yyjson_doc_get_root(doc));
-        yyjson_doc_free(doc);
-    } else {
-        root = yyjson_mut_obj(mdoc);
-    }
+    yyjson_mut_val *root = load_json_config(mdoc, config_path);
     if (!root) {
         yyjson_mut_doc_free(mdoc);
         return CLI_ERR;
@@ -1743,7 +1803,7 @@ int cbm_upsert_opencode_mcp(const char *binary_path, const char *config_path) {
         yyjson_mut_obj_add_val(mdoc, root, "mcp", mcp);
     }
 
-    yyjson_mut_obj_remove_key(mcp, "codebase-memory-mcp");
+    yyjson_mut_val *previous = yyjson_mut_obj_remove_key(mcp, "codebase-memory-mcp");
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_bool(mdoc, entry, "enabled", true);
@@ -1751,6 +1811,7 @@ int cbm_upsert_opencode_mcp(const char *binary_path, const char *config_path) {
     yyjson_mut_val *cmd_arr = yyjson_mut_arr(mdoc);
     yyjson_mut_arr_add_str(mdoc, cmd_arr, binary_path);
     yyjson_mut_obj_add_val(mdoc, entry, "command", cmd_arr);
+    keep_client_keys(mdoc, entry, previous);
     yyjson_mut_obj_add_val(mdoc, mcp, "codebase-memory-mcp", entry);
 
     int rc = write_json_file(config_path, mdoc);
@@ -1820,7 +1881,16 @@ int cbm_remove_junie_mcp(const char *config_path) {
 #define CMM_HOOK_MATCHER "Grep|Glob"
 /* Basename only; the full command path is resolved at install time via
  * cbm_resolve_hook_command so $CLAUDE_CONFIG_DIR is honored. */
+#ifdef _WIN32
+/* Extensionless bash shims under %USERPROFILE%\\.claude\\hooks open the
+ * "How do you want to open this file?" dialog when an editor scans the hooks
+ * dir, and cannot run without bash. Windows installs .cmd scripts and removes
+ * the extensionless twin (upstream b1502bf3). */
+#define CMM_HOOK_GATE_SCRIPT "cbm-code-discovery-gate.cmd"
+#else
 #define CMM_HOOK_GATE_SCRIPT "cbm-code-discovery-gate"
+#endif
+#define CMM_HOOK_GATE_SCRIPT_LEGACY "cbm-code-discovery-gate"
 /* Hard backstop in settings.json; the binary also self-bounds with an
  * in-process deadline well under this. */
 #define CMM_HOOK_TIMEOUT_SEC 5
@@ -2068,6 +2138,19 @@ int cbm_remove_claude_hooks(const char *settings_path) {
  * a missing/old/hung binary results in a silent exit 0 (issue #362/#288).
  * The legacy filename `cbm-code-discovery-gate` is retained so existing
  * settings.json entries and uninstall keep working with zero migration. */
+/* Windows: remove the pre-.cmd extensionless twin of a hook script. POSIX keeps
+ * the extensionless name, where legacy == current, so it never unlinks. */
+static void cbm_remove_legacy_hook_script(const char *hooks_dir, const char *legacy_name) {
+#ifdef _WIN32
+    char legacy_path[CLI_BUF_1K];
+    snprintf(legacy_path, sizeof(legacy_path), "%s/%s", hooks_dir, legacy_name);
+    cbm_unlink(legacy_path);
+#else
+    (void)hooks_dir;
+    (void)legacy_name;
+#endif
+}
+
 void cbm_install_hook_gate_script(const char *home, const char *binary_path) {
     if (!home || !binary_path) {
         return;
@@ -2088,6 +2171,7 @@ void cbm_install_hook_gate_script(const char *home, const char *binary_path) {
     snprintf(hooks_dir, sizeof(hooks_dir), "%s/hooks", config_dir);
     cbm_mkdir_p(hooks_dir, CLI_OCTAL_PERM);
 
+    cbm_remove_legacy_hook_script(hooks_dir, CMM_HOOK_GATE_SCRIPT_LEGACY);
     char script_path[CLI_BUF_1K];
     snprintf(script_path, sizeof(script_path), "%s/" CMM_HOOK_GATE_SCRIPT, hooks_dir);
 
@@ -2095,6 +2179,17 @@ void cbm_install_hook_gate_script(const char *home, const char *binary_path) {
     if (!f) {
         return;
     }
+#ifdef _WIN32
+    (void)fprintf(f,
+                  "@echo off\r\n"
+                  "REM codebase-memory-mcp search augmenter (Claude Code PreToolUse).\r\n"
+                  "REM Never blocks a tool call - it only adds graph context.\r\n"
+                  "REM Any failure is silent (exit 0, no output).\r\n"
+                  "if not exist \"%s\" exit /b 0\r\n"
+                  "\"%s\" hook-augment 2>NUL\r\n"
+                  "exit /b 0\r\n",
+                  binary_path, binary_path);
+#else
     (void)fprintf(f,
                   "#!/usr/bin/env bash\n"
                   "# codebase-memory-mcp search augmenter (Claude Code PreToolUse).\n"
@@ -2106,6 +2201,7 @@ void cbm_install_hook_gate_script(const char *home, const char *binary_path) {
                   "\"$BIN\" hook-augment 2>/dev/null\n"
                   "exit 0\n",
                   binary_path);
+#endif
     /* fchmod before close to avoid TOCTOU race (CodeQL cpp/toctou-race-condition) */
 #ifndef _WIN32
     fchmod(fileno(f), CLI_OCTAL_PERM);
@@ -2117,7 +2213,12 @@ void cbm_install_hook_gate_script(const char *home, const char *binary_path) {
 }
 
 /* SessionStart hook: remind agent to use MCP tools on every context reset. */
+#ifdef _WIN32
+#define CMM_SESSION_REMINDER_SCRIPT "cbm-session-reminder.cmd"
+#else
 #define CMM_SESSION_REMINDER_SCRIPT "cbm-session-reminder"
+#endif
+#define CMM_SESSION_REMINDER_SCRIPT_LEGACY "cbm-session-reminder"
 
 static void cbm_install_session_reminder_script(const char *home) {
     if (!home) {
@@ -2132,6 +2233,7 @@ static void cbm_install_session_reminder_script(const char *home) {
     snprintf(hooks_dir, sizeof(hooks_dir), "%s/hooks", config_dir);
     cbm_mkdir_p(hooks_dir, CLI_OCTAL_PERM);
 
+    cbm_remove_legacy_hook_script(hooks_dir, CMM_SESSION_REMINDER_SCRIPT_LEGACY);
     char script_path[CLI_BUF_1K];
     snprintf(script_path, sizeof(script_path), "%s/" CMM_SESSION_REMINDER_SCRIPT, hooks_dir);
 
@@ -2139,6 +2241,25 @@ static void cbm_install_session_reminder_script(const char *home) {
     if (!f) {
         return;
     }
+#ifdef _WIN32
+    /* cmd variant: one echo per line; `|` must be caret-escaped. */
+    (void)fprintf(
+        f,
+        "@echo off\r\n"
+        "REM SessionStart hook: remind agent to use codebase-memory-mcp tools.\r\n"
+        "echo CRITICAL - Code Discovery Protocol:\r\n"
+        "echo 1. ALWAYS use codebase-memory-mcp tools FIRST for ANY code exploration:\r\n"
+        "echo    - search_graph(name_pattern/label/qn_pattern) to find functions/classes/routes\r\n"
+        "echo    - trace_path(function_name, mode=calls^|data_flow^|cross_service) for call "
+        "chains\r\n"
+        "echo    - get_code_snippet(qualified_name) for exact symbol source (precise ranges)\r\n"
+        "echo    - query_graph(query) for complex Cypher patterns\r\n"
+        "echo    - get_architecture(aspects) for project structure\r\n"
+        "echo    - search_code(pattern) for text search (graph-augmented grep)\r\n"
+        "echo 2. Use Grep/Glob/Read freely for text, configs, non-code files, and\r\n"
+        "echo    always Read a file before editing it.\r\n"
+        "echo 3. If a project is not indexed yet, run index_repository FIRST.\r\n");
+#else
     (void)fprintf(
         f, "#!/usr/bin/env bash\n"
            "# SessionStart hook: remind agent to use codebase-memory-mcp tools.\n"
@@ -2156,6 +2277,7 @@ static void cbm_install_session_reminder_script(const char *home) {
            "   always Read a file before editing it.\n"
            "3. If a project is not indexed yet, run index_repository FIRST.\n"
            "REMINDER\n");
+#endif
 #ifndef _WIN32
     fchmod(fileno(f), CLI_OCTAL_PERM);
 #endif
@@ -2202,7 +2324,12 @@ static int cbm_remove_session_hooks(const char *settings_path) {
  * The text is a leaner variant of the SessionStart protocol: it omits the
  * "run index_repository first" step, since the parent session has already
  * indexed the project. Matcher "*" fires for every agent type. */
+#ifdef _WIN32
+#define CMM_SUBAGENT_REMINDER_SCRIPT "cbm-subagent-reminder.cmd"
+#else
 #define CMM_SUBAGENT_REMINDER_SCRIPT "cbm-subagent-reminder"
+#endif
+#define CMM_SUBAGENT_REMINDER_SCRIPT_LEGACY "cbm-subagent-reminder"
 
 static void cbm_install_subagent_reminder_script(const char *home) {
     if (!home) {
@@ -2217,6 +2344,7 @@ static void cbm_install_subagent_reminder_script(const char *home) {
     snprintf(hooks_dir, sizeof(hooks_dir), "%s/hooks", config_dir);
     cbm_mkdir_p(hooks_dir, CLI_OCTAL_PERM);
 
+    cbm_remove_legacy_hook_script(hooks_dir, CMM_SUBAGENT_REMINDER_SCRIPT_LEGACY);
     char script_path[CLI_BUF_1K];
     snprintf(script_path, sizeof(script_path), "%s/" CMM_SUBAGENT_REMINDER_SCRIPT, hooks_dir);
 
@@ -2227,6 +2355,16 @@ static void cbm_install_subagent_reminder_script(const char *home) {
     /* The additionalContext value is a single line with no embedded quotes,
      * backslashes, or newlines, so the JSON below is valid as written — no
      * runtime escaping (and no python3/jq dependency) is required. */
+#ifdef _WIN32
+    /* cmd variant: one echo with the JSON verbatim (no cmd metacharacters). */
+    (void)fprintf(f, "@echo off\r\n"
+                     "REM SubagentStart hook: tell subagents to use codebase-memory-mcp tools.\r\n"
+                     "echo {\"hookSpecificOutput\":{\"hookEventName\":\"SubagentStart\","
+                     "\"additionalContext\":\"Code discovery: prefer codebase-memory-mcp tools "
+                     "(search_graph, trace_path, get_code_snippet, query_graph, get_architecture, "
+                     "search_code) over grep/file-read for navigating code. Use Grep/Glob/Read for "
+                     "text, configs, and non-code files.\"}}\r\n");
+#else
     (void)fprintf(f,
                   "#!/usr/bin/env bash\n"
                   "# SubagentStart hook: tell subagents to use codebase-memory-mcp tools.\n"
@@ -2239,6 +2377,7 @@ static void cbm_install_subagent_reminder_script(const char *home) {
                   "search_code) over grep/file-read for navigating code. Use Grep/Glob/Read for "
                   "text, configs, and non-code files.\"}}\n"
                   "REMINDER\n");
+#endif
 #ifndef _WIN32
     fchmod(fileno(f), CLI_OCTAL_PERM);
 #endif
@@ -2259,7 +2398,7 @@ int cbm_upsert_claude_subagent_hooks(const char *settings_path) {
                               .hook_event = "SubagentStart",
                               .matcher_str = "*",
                               .command_str = command,
-                              .match_command_substr = CMM_SUBAGENT_REMINDER_SCRIPT});
+                              .match_command_substr = CMM_SUBAGENT_REMINDER_SCRIPT_LEGACY});
 }
 
 int cbm_remove_claude_subagent_hooks(const char *settings_path) {
@@ -2267,7 +2406,7 @@ int cbm_remove_claude_subagent_hooks(const char *settings_path) {
         (hooks_remove_args_t){.settings_path = settings_path,
                               .hook_event = "SubagentStart",
                               .matcher_str = "*",
-                              .match_command_substr = CMM_SUBAGENT_REMINDER_SCRIPT});
+                              .match_command_substr = CMM_SUBAGENT_REMINDER_SCRIPT_LEGACY});
 }
 
 /* Matcher excludes read_file for consistency with the Claude fix: the hook
@@ -3717,7 +3856,7 @@ static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const
     if (agents->opencode) {
         char cp[CLI_BUF_1K];
         char ip[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.config/opencode/opencode.json", home);
+        opencode_config_path(home, cp, sizeof(cp));
         snprintf(ip, sizeof(ip), "%s/.config/opencode/AGENTS.md", home);
         install_generic_agent_config("OpenCode", binary_path, cp, ip, dry_run,
                                      cbm_upsert_opencode_mcp);
@@ -4548,7 +4687,7 @@ static void uninstall_cli_agents(const cbm_detected_agents_t *agents, const char
     if (agents->opencode) {
         char cp[CLI_BUF_1K];
         char ip[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.config/opencode/opencode.json", home);
+        opencode_config_path(home, cp, sizeof(cp));
         snprintf(ip, sizeof(ip), "%s/.config/opencode/AGENTS.md", home);
         uninstall_agent_mcp_instr((mcp_uninstall_args_t){"OpenCode", cp, ip}, dry_run,
                                   cbm_remove_opencode_mcp);
@@ -5107,8 +5246,9 @@ bool cbm_cli_args_from_stdin_allowed(const char *tool_name, bool stdin_is_tty) {
     }
     /* Reading stdin waits for EOF, and a caller that never closes an inherited
      * pipe never sends one (upstream 9ca108fc, #1359). Only read it for a tool
-     * whose input_schema declares properties: a tool without any (list_projects)
-     * cannot take anything from stdin, and an unknown tool is rejected by name. */
+     * that requires an argument (top-level or in a oneOf/anyOf branch): a tool
+     * whose arguments are all optional (list_projects) runs bare and takes its
+     * options from flags or --args-file, and an unknown tool is rejected by name. */
     const char *schema_str = cbm_mcp_tool_input_schema(tool_name);
     if (!schema_str) {
         return false;
@@ -5117,10 +5257,20 @@ bool cbm_cli_args_from_stdin_allowed(const char *tool_name, bool stdin_is_tty) {
     if (!schema_doc) {
         return true; /* close the channel only on positive evidence */
     }
-    yyjson_val *props = yyjson_obj_get(yyjson_doc_get_root(schema_doc), "properties");
-    bool accepts_arguments = props && yyjson_is_obj(props) && yyjson_obj_size(props) > 0;
+    yyjson_val *root = yyjson_doc_get_root(schema_doc);
+    bool requires_argument = yyjson_arr_size(yyjson_obj_get(root, "required")) > 0;
+    const char *const branches[] = {"oneOf", "anyOf"};
+    for (size_t b = 0; b < sizeof(branches) / sizeof(branches[0]) && !requires_argument; b++) {
+        size_t idx;
+        size_t max;
+        yyjson_val *branch;
+        yyjson_arr_foreach(yyjson_obj_get(root, branches[b]), idx, max, branch) {
+            requires_argument =
+                requires_argument || yyjson_arr_size(yyjson_obj_get(branch, "required")) > 0;
+        }
+    }
     yyjson_doc_free(schema_doc);
-    return accepts_arguments;
+    return requires_argument;
 }
 
 char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char **err_out) {

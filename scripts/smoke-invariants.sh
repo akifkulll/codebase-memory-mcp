@@ -471,9 +471,9 @@ inv_mcp_initialize() {
 }
 
 # ── Invariant 4: tools/list returns all expected tools ─────────────────────
-# Cross-check against the canonical 13-tool list (TOOLS[] in src/mcp/mcp.c).
-EXPECTED_TOOLS="index_repository search_graph query_graph trace_path get_code_snippet get_graph_schema get_architecture search_code list_projects delete_project index_status detect_changes ingest_traces"
-EXPECTED_TOOL_COUNT=13
+# Cross-check against the canonical 14-tool list (TOOLS[] in src/mcp/mcp.c).
+EXPECTED_TOOLS="index_repository search_graph query_graph trace_path get_code_snippet get_graph_schema get_architecture search_code list_projects delete_project index_status check_index_coverage detect_changes ingest_traces"
+EXPECTED_TOOL_COUNT=14
 inv_tools_list() {
     if ! mcp_alive; then
         fail "tools-list" "server not alive"
@@ -576,7 +576,7 @@ inv_every_tool() {
         return
     fi
 
-    # name|minimal-args (JSON object) for the remaining 13 tools.
+    # name|minimal-args (JSON object) for the remaining tools.
     # Args chosen to be minimally valid per TOOLS[] required fields.
     local p="$PROJ_NAME"
     local -a CALLS
@@ -590,6 +590,7 @@ inv_every_tool() {
         "search_code|{\"project\":\"$p\",\"pattern\":\"def \"}"
         "list_projects|{}"
         "index_status|{\"project\":\"$p\"}"
+        "check_index_coverage|{\"project\":\"$p\",\"scopes\":[\".\"]}"
         "detect_changes|{\"project\":\"$p\"}"
         "ingest_traces|{\"project\":\"$p\",\"traces\":[]}"
         "delete_project|{\"project\":\"__cbm_smoke_nonexistent__\"}"

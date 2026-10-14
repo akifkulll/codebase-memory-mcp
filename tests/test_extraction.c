@@ -70,6 +70,31 @@ static CBMFileResult *extract(const char *src, CBMLanguage lang, const char *pro
  * Group A: OOP Languages
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* --- Parse coverage: unrecovered ERROR regions are reported with line ranges --- */
+TEST(extract_parse_incomplete_reports_error_ranges) {
+    CBMFileResult *clean = extract("int ok(void) { return 1; }\n", CBM_LANG_C, "t", "ok.c");
+    ASSERT_NOT_NULL(clean);
+    ASSERT_FALSE(clean->parse_incomplete);
+    ASSERT_NULL(clean->error_ranges);
+    ASSERT_EQ(clean->error_region_count, 0);
+    cbm_free_result(clean);
+
+    CBMFileResult *r = extract("int ok(void) { return 1; }\n"
+                               "\n"
+                               "int broken( { @@ ### $$ ;;\n"
+                               "}}} )) ((\n",
+                               CBM_LANG_C, "t", "broken.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT(r->error_region_count > 0);
+    /* Line 1 parses cleanly; the reported damage starts at or after line 3. */
+    ASSERT(r->error_ranges[0] != '1' || r->error_ranges[1] != '-');
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- R: box::use imports (#218) + module$fn calls (#219) --- */
 TEST(extract_r_box_use_imports_issue218) {
     CBMFileResult *r = extract("box::use(\n"
@@ -3825,6 +3850,7 @@ SUITE(extraction) {
     RUN_TEST(extract_js_member_call_flags_is_method);
 
     /* R box-module imports + member calls */
+    RUN_TEST(extract_parse_incomplete_reports_error_ranges);
     RUN_TEST(extract_r_box_use_imports_issue218);
     RUN_TEST(extract_r_dollar_call_issue219);
     RUN_TEST(extract_ts_factory_object_methods_issue341);
