@@ -3108,9 +3108,6 @@ TEST(search_code_scoped_path_with_spaces_issue687) {
     PASS();
 }
 
-/* Upstream 7a1e069b: the scoped scan must not depend on GNU grep's --include
- * (BusyBox grep in the static Alpine/musl runtime has none). A fake grep that
- * rejects --include stands in for BusyBox; file_pattern is applied in C. */
 /* Upstream cc9c2f4c: the scoped scan list is the canonical File-node set —
  * Folder directories and synthetic paths such as <python-builtins> are graph
  * identities, not scannable files. */
@@ -3153,6 +3150,9 @@ TEST(store_list_files_prefers_canonical_file_nodes) {
     PASS();
 }
 
+/* Upstream 7a1e069b: the scoped scan must not depend on GNU grep's --include
+ * (BusyBox grep in the static Alpine/musl runtime has none). A fake grep that
+ * rejects --include stands in for BusyBox; file_pattern is applied in C. */
 TEST(search_code_scoped_file_pattern_is_busybox_portable) {
 #ifdef _WIN32
     SKIP_PLATFORM("POSIX BusyBox-compatible grep contract");
