@@ -17,6 +17,7 @@
 #include <cli/cli.h>
 #include <mcp/mcp.h>
 #include <foundation/yaml.h>
+#include <yyjson/yyjson.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -24,6 +25,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/wait.h> /* fork/waitpid: hook-augment arms a process-wide SIGALRM */
+#endif
 #include <sqlite3.h>
 #include <zlib.h>
 
@@ -2691,6 +2696,158 @@ TEST(cli_upsert_claude_hook_fresh) {
     PASS();
 }
 
+/* Count our exec-form hooks ({command: binary, args: ["hook-augment"]}) and
+ * foreign hooks under one settings.json hook event. */
+static void exec_hook_counts(yyjson_val *hooks, const char *event, const char *binary,
+                             int *exec_out, int *other_out) {
+    *exec_out = 0;
+    *other_out = 0;
+    yyjson_val *arr = yyjson_obj_get(hooks, event);
+    size_t i, n, j, m;
+    yyjson_val *entry, *h;
+    yyjson_arr_foreach(arr, i, n, entry) {
+        yyjson_arr_foreach(yyjson_obj_get(entry, "hooks"), j, m, h) {
+            yyjson_val *args = yyjson_obj_get(h, "args");
+            const char *cmd = yyjson_get_str(yyjson_obj_get(h, "command"));
+            if (cmd && strcmp(cmd, binary) == 0 && yyjson_arr_size(args) == 1 &&
+                strcmp(yyjson_get_str(yyjson_arr_get(args, 0)), "hook-augment") == 0) {
+                (*exec_out)++;
+            } else {
+                (*other_out)++;
+            }
+        }
+    }
+}
+
+/* Install registers every Claude hook as the shell-free exec form
+ * `<binary> hook-augment` (upstream 7d20ff93), converges earlier shell-form
+ * entries onto it, stays idempotent, and leaves a user's own hooks alone. */
+TEST(cli_claude_exec_hooks_replace_shell_form) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-exechook-XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    char cfg[512];
+    snprintf(cfg, sizeof(cfg), "%s/settings.json", tmpdir);
+    const char *bin = "/opt/cbm/bin/codebase-memory-mcp";
+
+    write_test_file(
+        cfg, "{\"hooks\":{\"SubagentStart\":[{\"matcher\":\"*\","
+             "\"hooks\":[{\"type\":\"command\",\"command\":\"echo user-subagent-hook\"}]}]}}");
+    /* Earlier releases registered the shell-form scripts. */
+    ASSERT_EQ(cbm_upsert_claude_hooks(cfg), 0);
+    ASSERT_EQ(cbm_upsert_claude_subagent_hooks(cfg), 0);
+    ASSERT_NOT_NULL(strstr(read_test_file(cfg), "cbm-code-discovery-gate"));
+
+    for (int pass = 0; pass < 2; pass++) {
+        ASSERT_EQ(cbm_upsert_claude_exec_hooks(cfg, bin), 0);
+        const char *d = read_test_file(cfg);
+        ASSERT_NOT_NULL(d);
+        ASSERT_NULL(strstr(d, "cbm-code-discovery-gate"));
+        ASSERT_NULL(strstr(d, "cbm-subagent-reminder"));
+        yyjson_doc *doc = yyjson_read(d, strlen(d), 0);
+        ASSERT_NOT_NULL(doc);
+        yyjson_val *hooks = yyjson_obj_get(yyjson_doc_get_root(doc), "hooks");
+        int exec_n, other_n;
+        exec_hook_counts(hooks, "PreToolUse", bin, &exec_n, &other_n);
+        ASSERT_EQ(exec_n, 1);
+        ASSERT_EQ(other_n, 0);
+        exec_hook_counts(hooks, "SessionStart", bin, &exec_n, &other_n);
+        ASSERT_EQ(exec_n, 4); /* startup, resume, clear, compact */
+        ASSERT_EQ(other_n, 0);
+        exec_hook_counts(hooks, "SubagentStart", bin, &exec_n, &other_n);
+        ASSERT_EQ(exec_n, 1);
+        ASSERT_EQ(other_n, 1); /* the user's "*" hook survives */
+        yyjson_doc_free(doc);
+    }
+
+    /* Uninstall recognizes the exec form and still spares the user's hook. */
+    ASSERT_EQ(cbm_remove_claude_hooks(cfg), 0);
+    ASSERT_EQ(cbm_remove_claude_subagent_hooks(cfg), 0);
+    const char *d = read_test_file(cfg);
+    ASSERT_NOT_NULL(d);
+    ASSERT_NULL(strstr(d, "PreToolUse"));
+    ASSERT_NOT_NULL(strstr(d, "echo user-subagent-hook"));
+    yyjson_doc *doc = yyjson_read(d, strlen(d), 0);
+    ASSERT_NOT_NULL(doc);
+    int exec_n, other_n;
+    exec_hook_counts(yyjson_obj_get(yyjson_doc_get_root(doc), "hooks"), "SubagentStart", bin,
+                     &exec_n, &other_n);
+    ASSERT_EQ(exec_n, 0);
+    ASSERT_EQ(other_n, 1);
+    yyjson_doc_free(doc);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+#ifndef _WIN32
+/* Run `hook-augment` on a payload in a child (it arms a process-wide SIGALRM
+ * deadline) and return its stdout in a static buffer. */
+static const char *run_hook_augment(const char *dir, const char *payload) {
+    char in_path[512], out_path[512];
+    snprintf(in_path, sizeof(in_path), "%s/hook-in.json", dir);
+    snprintf(out_path, sizeof(out_path), "%s/hook-out.txt", dir);
+    if (write_test_file(in_path, payload) != 0) {
+        return NULL;
+    }
+    (void)fflush(stdout);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int in_fd = open(in_path, O_RDONLY);
+        int out_fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (in_fd < 0 || out_fd < 0 || dup2(in_fd, STDIN_FILENO) < 0 ||
+            dup2(out_fd, STDOUT_FILENO) < 0) {
+            _exit(2);
+        }
+        int rc = cbm_cmd_hook_augment();
+        (void)fflush(stdout);
+        _exit(rc == 0 ? 0 : 1);
+    }
+    int status = 0;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        return NULL;
+    }
+    return read_test_file(out_path);
+}
+
+/* The exec-form SessionStart/SubagentStart hooks run `hook-augment`, so it
+ * must emit each event's reminder in the shape Claude injects. */
+TEST(cli_hook_augment_lifecycle_reminders) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-hookaug-XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    const char *out = run_hook_augment(tmpdir, "{\"hook_event_name\":\"SessionStart\","
+                                               "\"source\":\"startup\"}");
+    ASSERT_NOT_NULL(out);
+    ASSERT_NOT_NULL(strstr(out, "CRITICAL - Code Discovery Protocol:"));
+    ASSERT_NOT_NULL(strstr(out, "run index_repository FIRST"));
+
+    out = run_hook_augment(tmpdir, "{\"hook_event_name\":\"SubagentStart\","
+                                   "\"agent_type\":\"Explore\"}");
+    ASSERT_NOT_NULL(out);
+    yyjson_doc *doc = yyjson_read(out, strlen(out), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *hso = yyjson_obj_get(yyjson_doc_get_root(doc), "hookSpecificOutput");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(hso, "hookEventName")), "SubagentStart");
+    ASSERT_NOT_NULL(strstr(yyjson_get_str(yyjson_obj_get(hso, "additionalContext")),
+                           "codebase-memory-mcp tools"));
+    yyjson_doc_free(doc);
+
+    /* Other tools still pass through silently. */
+    out = run_hook_augment(tmpdir, "{\"hook_event_name\":\"PreToolUse\","
+                                   "\"tool_name\":\"Read\",\"tool_input\":{}}");
+    ASSERT_NOT_NULL(out);
+    ASSERT_STR_EQ(out, "");
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+#endif
+
 /* issue #384: the PreToolUse gate shim must never use a predictable /tmp
  * filename (the old `/tmp/cbm-code-discovery-gate-$PPID` was a symlink-attack
  * vector). The shim is now a stateless wrapper around the compiled augmenter. */
@@ -3657,6 +3814,10 @@ SUITE(cli) {
     RUN_TEST(cli_gemini_session_hook_parity);
     RUN_TEST(cli_claude_subagent_hook);
     RUN_TEST(cli_claude_subagent_hook_preserves_user_entry);
+    RUN_TEST(cli_claude_exec_hooks_replace_shell_form);
+#ifndef _WIN32
+    RUN_TEST(cli_hook_augment_lifecycle_reminders);
+#endif
     RUN_TEST(cli_detect_agents_finds_gemini);
     RUN_TEST(cli_detect_agents_finds_zed);
     RUN_TEST(cli_detect_agents_finds_antigravity);

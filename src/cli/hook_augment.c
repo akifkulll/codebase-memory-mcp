@@ -4,7 +4,8 @@
  * A non-blocking Claude Code PreToolUse augmenter. Reads the hook JSON from
  * stdin, and for Grep/Glob calls injects matching graph symbols as
  * `additionalContext` so the agent gets structured context alongside its
- * normal search results.
+ * normal search results. SessionStart and SubagentStart payloads get the
+ * codebase-memory-mcp usage reminder instead.
  *
  * Cardinal rule: this NEVER blocks a tool call. Every error, timeout, missing
  * project, or short/odd pattern path results in `exit 0` with NO stdout
@@ -41,6 +42,28 @@
 #define HA_MAX_WALKUP 8    /* cwd may be a subdir of the indexed root  */
 #define HA_DEADLINE_MS 300 /* hard in-process budget (see also: the    */
                            /* settings.json "timeout" backstop)        */
+
+/* Lifecycle reminders, kept in sync with the cbm-session-reminder and
+ * cbm-subagent-reminder scripts in cli.c. SessionStart injects plain stdout
+ * as context; SubagentStart injects only JSON additionalContext. */
+#define HA_SESSION_REMINDER                                                               \
+    "CRITICAL - Code Discovery Protocol:\n"                                               \
+    "1. ALWAYS use codebase-memory-mcp tools FIRST for ANY code exploration:\n"           \
+    "   - search_graph(name_pattern/label/qn_pattern) to find functions/classes/routes\n" \
+    "   - trace_path(function_name, mode=calls|data_flow|cross_service) for call chains\n" \
+    "   - get_code_snippet(qualified_name) for exact symbol source (precise ranges)\n"     \
+    "   - query_graph(query) for complex Cypher patterns\n"                                \
+    "   - get_architecture(aspects) for project structure\n"                               \
+    "   - search_code(pattern) for text search (graph-augmented grep)\n"                   \
+    "2. Use Grep/Glob/Read freely for text, configs, non-code files, and\n"                \
+    "   always Read a file before editing it.\n"                                           \
+    "3. If a project is not indexed yet, run index_repository FIRST.\n"
+#define HA_SUBAGENT_REMINDER                                                                  \
+    "{\"hookSpecificOutput\":{\"hookEventName\":\"SubagentStart\","                          \
+    "\"additionalContext\":\"Code discovery: prefer codebase-memory-mcp tools "               \
+    "(search_graph, trace_path, get_code_snippet, query_graph, get_architecture, "            \
+    "search_code) over grep/file-read for navigating code. Use Grep/Glob/Read for "           \
+    "text, configs, and non-code files.\"}}\n"
 
 /* ── Hard deadline ────────────────────────────────────────────────
  * A slow SQLite open or query must never stall the agent. When the timer
@@ -312,6 +335,23 @@ int cbm_cmd_hook_augment(void) {
         return 0;
     }
     yyjson_val *root = yyjson_doc_get_root(doc);
+
+    /* Claude registers the SessionStart/SubagentStart reminders as this same
+     * shell-free exec-form command, so answer them from the payload's event. */
+    const char *event = ha_obj_str(root, "hook_event_name");
+    const char *reminder = NULL;
+    if (event && strcmp(event, "SessionStart") == 0) {
+        reminder = HA_SESSION_REMINDER;
+    } else if (event && strcmp(event, "SubagentStart") == 0) {
+        reminder = HA_SUBAGENT_REMINDER;
+    }
+    if (reminder) {
+        (void)fputs(reminder, stdout);
+        (void)fflush(stdout);
+        yyjson_doc_free(doc);
+        free(input);
+        return 0;
+    }
 
     const char *tool = ha_obj_str(root, "tool_name");
     if (!tool || (strcmp(tool, "Grep") != 0 && strcmp(tool, "Glob") != 0)) {

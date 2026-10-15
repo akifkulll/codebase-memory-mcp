@@ -259,6 +259,12 @@ int cbm_remove_gemini_session_hooks(const char *settings_path);
 int cbm_upsert_claude_subagent_hooks(const char *settings_path);
 int cbm_remove_claude_subagent_hooks(const char *settings_path);
 
+/* Install-time registration of all three Claude Code hooks (PreToolUse,
+ * SessionStart, SubagentStart) in the shell-free exec form
+ * {"command":"<binary_path>","args":["hook-augment"]}. Replaces our earlier
+ * shell-form entries and leaves foreign entries alone. Returns 0 on success. */
+int cbm_upsert_claude_exec_hooks(const char *settings_path, const char *binary_path);
+
 /* ── PATH management ──────────────────────────────────────────── */
 
 /* Append an export PATH line to the given rc file.

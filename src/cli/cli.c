@@ -1894,6 +1894,9 @@ int cbm_remove_junie_mcp(const char *config_path) {
 /* Hard backstop in settings.json; the binary also self-bounds with an
  * in-process deadline well under this. */
 #define CMM_HOOK_TIMEOUT_SEC 5
+/* Claude hooks run the binary directly (no shell) as `<binary> hook-augment`;
+ * hook-augment dispatches on the payload's hook_event_name (upstream 7d20ff93). */
+#define CMM_HOOK_EXEC_ARG "hook-augment"
 
 /* Old matcher values from previous versions — recognized during upgrade so
  * upsert/remove can clean them up before inserting the current matcher.
@@ -1908,9 +1911,20 @@ static const char *const cmm_gemini_old_matchers[] = {
     NULL,
 };
 
+/* True when a hook object is our exec form: "args" is exactly [CMM_HOOK_EXEC_ARG]. */
+static bool is_cmm_exec_hook(yyjson_mut_val *hook) {
+    yyjson_mut_val *args = yyjson_mut_is_obj(hook) ? yyjson_mut_obj_get(hook, "args") : NULL;
+    if (!args || !yyjson_mut_is_arr(args) || yyjson_mut_arr_size(args) != 1) {
+        return false;
+    }
+    yyjson_mut_val *arg = yyjson_mut_arr_get(args, 0);
+    return arg && yyjson_mut_is_str(arg) && strcmp(yyjson_mut_get_str(arg), CMM_HOOK_EXEC_ARG) == 0;
+}
+
 /* Check if a hook array entry is ours (current matcher or a known old one).
  * When require_command_substr is non-NULL, the matcher match is not sufficient:
- * the entry must ALSO carry a hooks[].command containing that substring. This
+ * the entry must ALSO carry a hooks[].command containing that substring, or be
+ * our exec form (see is_cmm_exec_hook). This
  * disambiguates our entry from a user's own hook that happens to share the same
  * matcher (notably "*", which a user is likely to pick for a catch-all hook), so
  * upsert/remove never clobber a foreign entry. NULL preserves matcher-only
@@ -1944,6 +1958,9 @@ static bool is_cmm_hook_entry(yyjson_mut_val *entry, const char *matcher_str,
         size_t max;
         yyjson_mut_val *h;
         yyjson_mut_arr_foreach(hooks, idx, max, h) {
+            if (is_cmm_exec_hook(h)) {
+                return true;
+            }
             yyjson_mut_val *cmd = yyjson_mut_obj_get(h, "command");
             if (cmd && yyjson_mut_is_str(cmd)) {
                 const char *cs = yyjson_mut_get_str(cmd);
@@ -1964,6 +1981,7 @@ typedef struct {
     const char *hook_event;
     const char *matcher_str;
     const char *command_str;
+    const char *command_arg;          /* non-NULL: exec form, adds "args":[command_arg] */
     const char *const *old_matchers;  /* NULL-terminated; may be NULL */
     int timeout_sec;                  /* >0 adds "timeout" to the hook entry */
     const char *match_command_substr; /* non-NULL: also require this in the
@@ -2031,6 +2049,11 @@ static int upsert_hooks_json(hooks_upsert_args_t args) {
     yyjson_mut_val *hook_obj = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_str(mdoc, hook_obj, "type", "command");
     yyjson_mut_obj_add_str(mdoc, hook_obj, "command", command_str);
+    if (args.command_arg) {
+        yyjson_mut_val *command_args = yyjson_mut_arr(mdoc);
+        yyjson_mut_arr_add_str(mdoc, command_args, args.command_arg);
+        yyjson_mut_obj_add_val(mdoc, hook_obj, "args", command_args);
+    }
     if (args.timeout_sec > 0) {
         yyjson_mut_obj_add_int(mdoc, hook_obj, "timeout", args.timeout_sec);
     }
@@ -2110,17 +2133,39 @@ static int remove_hooks_json(hooks_remove_args_t args) {
     return rc;
 }
 
-int cbm_upsert_claude_hooks(const char *settings_path) {
-    char command[CLI_BUF_1K];
-    cbm_resolve_hook_command(CMM_HOOK_GATE_SCRIPT, command, sizeof(command));
+/* Claude hook command: the exec form `<binary_path> hook-augment` when a binary
+ * is known (install), else the shell-form script path. Sets *arg_out to the exec
+ * argument, or NULL for the shell form. */
+static const char *cbm_claude_hook_command(const char *binary_path, const char *script,
+                                           char *buf, size_t bufsz, const char **arg_out) {
+    if (binary_path && binary_path[0]) {
+        *arg_out = CMM_HOOK_EXEC_ARG;
+        return binary_path;
+    }
+    *arg_out = NULL;
+    cbm_resolve_hook_command(script, buf, bufsz);
+    return buf;
+}
+
+static int cbm_upsert_claude_hooks_with_binary(const char *settings_path,
+                                               const char *binary_path) {
+    char buf[CLI_BUF_1K];
+    const char *arg;
+    const char *command =
+        cbm_claude_hook_command(binary_path, CMM_HOOK_GATE_SCRIPT, buf, sizeof(buf), &arg);
     return upsert_hooks_json((hooks_upsert_args_t){
         .settings_path = settings_path,
         .hook_event = "PreToolUse",
         .matcher_str = CMM_HOOK_MATCHER,
         .command_str = command,
+        .command_arg = arg,
         .old_matchers = cmm_claude_old_matchers,
         .timeout_sec = CMM_HOOK_TIMEOUT_SEC,
     });
+}
+
+int cbm_upsert_claude_hooks(const char *settings_path) {
+    return cbm_upsert_claude_hooks_with_binary(settings_path, NULL);
 }
 
 int cbm_remove_claude_hooks(const char *settings_path) {
@@ -2287,16 +2332,19 @@ static void cbm_install_session_reminder_script(const char *home) {
 #endif
 }
 
-static int cbm_upsert_session_hooks(const char *settings_path) {
+static int cbm_upsert_session_hooks(const char *settings_path, const char *binary_path) {
     static const char *matchers[] = {"startup", "resume", "clear", "compact"};
-    char command[CLI_BUF_1K];
-    cbm_resolve_hook_command(CMM_SESSION_REMINDER_SCRIPT, command, sizeof(command));
+    char buf[CLI_BUF_1K];
+    const char *arg;
+    const char *command =
+        cbm_claude_hook_command(binary_path, CMM_SESSION_REMINDER_SCRIPT, buf, sizeof(buf), &arg);
     int rc = 0;
     for (int i = 0; i < NUM_DIRS; i++) {
         if (upsert_hooks_json((hooks_upsert_args_t){.settings_path = settings_path,
                                                     .hook_event = "SessionStart",
                                                     .matcher_str = matchers[i],
-                                                    .command_str = command}) != 0) {
+                                                    .command_str = command,
+                                                    .command_arg = arg}) != 0) {
             rc = CLI_ERR;
         }
     }
@@ -2387,9 +2435,12 @@ static void cbm_install_subagent_reminder_script(const char *home) {
 #endif
 }
 
-int cbm_upsert_claude_subagent_hooks(const char *settings_path) {
-    char command[CLI_BUF_1K];
-    cbm_resolve_hook_command(CMM_SUBAGENT_REMINDER_SCRIPT, command, sizeof(command));
+static int cbm_upsert_claude_subagent_hooks_with_binary(const char *settings_path,
+                                                        const char *binary_path) {
+    char buf[CLI_BUF_1K];
+    const char *arg;
+    const char *command =
+        cbm_claude_hook_command(binary_path, CMM_SUBAGENT_REMINDER_SCRIPT, buf, sizeof(buf), &arg);
     /* matcher "*" is the natural choice a user would also pick for their own
      * catch-all SubagentStart hook, so claim ownership by command too — never
      * clobber or remove a foreign "*" entry. */
@@ -2398,7 +2449,29 @@ int cbm_upsert_claude_subagent_hooks(const char *settings_path) {
                               .hook_event = "SubagentStart",
                               .matcher_str = "*",
                               .command_str = command,
+                              .command_arg = arg,
                               .match_command_substr = CMM_SUBAGENT_REMINDER_SCRIPT_LEGACY});
+}
+
+int cbm_upsert_claude_subagent_hooks(const char *settings_path) {
+    return cbm_upsert_claude_subagent_hooks_with_binary(settings_path, NULL);
+}
+
+int cbm_upsert_claude_exec_hooks(const char *settings_path, const char *binary_path) {
+    if (!binary_path || !binary_path[0]) {
+        return CLI_ERR;
+    }
+    int rc = 0;
+    if (cbm_upsert_claude_hooks_with_binary(settings_path, binary_path) != 0) {
+        rc = CLI_ERR;
+    }
+    if (cbm_upsert_session_hooks(settings_path, binary_path) != 0) {
+        rc = CLI_ERR;
+    }
+    if (cbm_upsert_claude_subagent_hooks_with_binary(settings_path, binary_path) != 0) {
+        rc = CLI_ERR;
+    }
+    return rc;
 }
 
 int cbm_remove_claude_subagent_hooks(const char *settings_path) {
@@ -3741,12 +3814,10 @@ static void install_claude_code_config(const char *home, const char *binary_path
     char settings_path[CLI_BUF_1K];
     snprintf(settings_path, sizeof(settings_path), "%s/settings.json", config_dir);
     if (!dry_run) {
-        cbm_upsert_claude_hooks(settings_path);
         cbm_install_hook_gate_script(home, binary_path);
         cbm_install_session_reminder_script(home);
-        cbm_upsert_session_hooks(settings_path);
         cbm_install_subagent_reminder_script(home);
-        cbm_upsert_claude_subagent_hooks(settings_path);
+        cbm_upsert_claude_exec_hooks(settings_path, binary_path);
     }
     printf("  hooks: PreToolUse (Grep/Glob search-graph augmenter, non-blocking)\n");
     printf("  hooks: SessionStart (MCP usage reminder on startup/resume/clear/compact)\n");

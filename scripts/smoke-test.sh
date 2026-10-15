@@ -932,14 +932,16 @@ if ! cat "$FAKE_HOME/.claude/settings.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 hooks = d.get('hooks', {}).get('PreToolUse', [])
-ok = any(h.get('matcher') == 'Grep|Glob' for h in hooks)
+ok = any(h.get('matcher') == 'Grep|Glob' and
+         any(x.get('args') == ['hook-augment'] for x in h.get('hooks', []))
+         for h in hooks)
 bad = any('Read' in str(h.get('matcher', '')) for h in hooks)
 sys.exit(0 if (ok and not bad) else 1)
 " 2>/dev/null; then
-  echo "FAIL 8d: PreToolUse hook matcher is not exactly 'Grep|Glob' (or still contains Read)"
+  echo "FAIL 8d: PreToolUse hook is not the exec-form 'Grep|Glob' hook-augment entry (or matches Read)"
   exit 1
 fi
-echo "OK 8d: Claude Code PreToolUse hook (matcher=Grep|Glob, Read excluded)"
+echo "OK 8d: Claude Code PreToolUse hook (matcher=Grep|Glob, exec-form hook-augment, Read excluded)"
 
 # 8e: Claude Code shim script — must be non-blocking augmenter, not a gate.
 if [ "$(uname -s)" != "MINGW64_NT" ] 2>/dev/null; then
@@ -1177,7 +1179,7 @@ if cat "$FAKE_HOME/.claude/settings.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 hooks = d.get('hooks', {}).get('PreToolUse', [])
-found = any('cbm-code-discovery-gate' in str(h) for h in hooks)
+found = any('cbm-code-discovery-gate' in str(h) or 'hook-augment' in str(h) for h in hooks)
 sys.exit(1 if found else 0)
 " 2>/dev/null; then
   echo "OK 9d: PreToolUse hook removed"
