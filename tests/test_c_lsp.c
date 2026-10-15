@@ -15354,6 +15354,85 @@ TEST(clsp_tier2_shared_registry_readonly_cpp) {
     PASS();
 }
 
+/* B2 (upstream 7b77fd48 overlay contract): the counts above miss in-place
+ * writes. With registry_shared the C++ walk still refined EXISTING shared
+ * entries — a class's template type_param_names, a declared method's return
+ * signature, a function's default-arg min_params — storing pointers into the
+ * worker's arena in a registry other workers read concurrently. Every entry
+ * must come out of a shared-mode walk exactly as it went in. */
+TEST(clsp_tier2_shared_registry_entries_unchanged_cpp) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMLSPDef defs[3];
+    memset(defs, 0, sizeof(defs));
+    defs[0].qualified_name = "test.mod.Holder";
+    defs[0].short_name = "Holder";
+    defs[0].label = "Class";
+    defs[1].qualified_name = "test.mod.Holder.get";
+    defs[1].short_name = "get";
+    defs[1].label = "Method";
+    defs[1].receiver_type = "test.mod.Holder";
+    defs[1].return_types = "Value";
+    defs[2].qualified_name = "test.mod.with_default";
+    defs[2].short_name = "with_default";
+    defs[2].label = "Function";
+    for (int i = 0; i < 3; i++) {
+        defs[i].def_module_qn = "test.mod";
+        defs[i].lang = CBM_LANG_CPP;
+    }
+    CBMTypeRegistry *reg = cbm_c_build_cross_registry(&arena, defs, 3);
+    ASSERT_NOT_NULL(reg);
+    int func_count = reg->func_count;
+    int type_count = reg->type_count;
+    const CBMType **sigs = malloc((size_t)func_count * sizeof(*sigs));
+    const char ***func_tpn = malloc((size_t)func_count * sizeof(*func_tpn));
+    int *min_params = malloc((size_t)func_count * sizeof(*min_params));
+    const char ***type_tpn = malloc((size_t)type_count * sizeof(*type_tpn));
+    ASSERT_TRUE(sigs && func_tpn && min_params && type_tpn);
+    for (int i = 0; i < func_count; i++) {
+        sigs[i] = reg->funcs[i].signature;
+        func_tpn[i] = reg->funcs[i].type_param_names;
+        min_params[i] = reg->funcs[i].min_params;
+    }
+    for (int i = 0; i < type_count; i++)
+        type_tpn[i] = reg->types[i].type_param_names;
+
+    const char *src = "template <typename T> struct Holder { T &get(); };\n"
+                      "int with_default(int a, int b = 2) { return a + b; }\n"
+                      "int caller(void) { return with_default(1); }\n";
+    CBMResolvedCallArray out = {0};
+    cbm_run_c_lsp_cross_with_registry(&arena, src, (int)strlen(src), "test.mod",
+                                      /*cpp_mode=*/true, reg, /*include_paths=*/NULL,
+                                      /*include_ns_qns=*/NULL, /*include_count=*/0,
+                                      /*cached_tree=*/NULL, &out);
+    ASSERT_EQ(reg->func_count, func_count);
+    ASSERT_EQ(reg->type_count, type_count);
+    int changed = 0;
+    for (int i = 0; i < func_count; i++) {
+        const CBMRegisteredFunc *f = &reg->funcs[i];
+        if (f->signature != sigs[i] || f->type_param_names != func_tpn[i] ||
+            f->min_params != min_params[i]) {
+            fprintf(stderr, "  shared func changed: %s (sig %d tpn %d min_params %d->%d)\n",
+                    f->qualified_name, f->signature != sigs[i],
+                    f->type_param_names != func_tpn[i], min_params[i], f->min_params);
+            changed++;
+        }
+    }
+    for (int i = 0; i < type_count; i++) {
+        if (reg->types[i].type_param_names != type_tpn[i]) {
+            fprintf(stderr, "  shared type changed: %s (tpn)\n", reg->types[i].qualified_name);
+            changed++;
+        }
+    }
+    free(sigs);
+    free(func_tpn);
+    free(min_params);
+    free(type_tpn);
+    cbm_arena_destroy(&arena);
+    ASSERT_EQ(changed, 0);
+    PASS();
+}
+
 /* Cross-language check of the same Tier-2 shared-registry read-only invariant for
  * the other languages that build a shared cross-registry (py, c#, ts, go). The
  * registry-level seal (type_registry.c: add_func/_type no-op when reg->read_only)
@@ -15505,6 +15584,7 @@ TEST(seal_go_shared_registry_readonly) {
 SUITE(c_lsp) {
     RUN_TEST(clsp_tier2_shared_registry_readonly_c);
     RUN_TEST(clsp_tier2_shared_registry_readonly_cpp);
+    RUN_TEST(clsp_tier2_shared_registry_entries_unchanged_cpp);
     RUN_TEST(seal_py_shared_registry_readonly);
     RUN_TEST(seal_py_shared_registry_readonly_fields);
     RUN_TEST(seal_cs_shared_registry_readonly);

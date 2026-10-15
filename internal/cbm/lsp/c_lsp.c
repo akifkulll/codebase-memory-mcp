@@ -4498,8 +4498,9 @@ static void c_process_function(CLSPContext *ctx, TSNode func_node) {
             }
         }
     }
-    // Set min_params on the registered function (for default-arg overload matching)
-    if (total_params > 0 && defaulted_params > 0) {
+    // Set min_params on the registered function (for default-arg overload matching).
+    // Never on the shared Tier-2 registry: other resolve workers read it.
+    if (total_params > 0 && defaulted_params > 0 && !ctx->registry_shared) {
         for (int ri = 0; ri < ((CBMTypeRegistry *)ctx->registry)->func_count; ri++) {
             CBMRegisteredFunc *rf = &((CBMTypeRegistry *)ctx->registry)->funcs[ri];
             if (strcmp(rf->qualified_name, func_qn) == 0 && rf->min_params < 0) {
@@ -4729,8 +4730,10 @@ static void c_process_class(CLSPContext *ctx, TSNode class_node) {
             }
             ctx->enclosing_class_qn = class_qn;
 
-            // Store template param names on the registered type (for substitution)
-            if (ctx->in_template && ctx->template_param_names && ctx->template_param_count > 0) {
+            // Store template param names on the registered type (for substitution).
+            // Not on the shared Tier-2 registry: tpn lives in this worker's arena.
+            if (ctx->in_template && ctx->template_param_names && ctx->template_param_count > 0 &&
+                !ctx->registry_shared) {
                 CBMRegisteredType *rt = NULL;
                 for (int ri = 0; ri < ((CBMTypeRegistry *)ctx->registry)->type_count; ri++) {
                     if (strcmp(((CBMTypeRegistry *)ctx->registry)->types[ri].qualified_name,
@@ -4910,7 +4913,9 @@ static void c_process_class(CLSPContext *ctx, TSNode class_node) {
                                          nk2 == CBM_TYPE_POINTER || nk2 == CBM_TYPE_REFERENCE))
                                         should_upgrade = true;
                                 }
-                                if (should_upgrade) {
+                                // The shared Tier-2 registry is read-only: the new
+                                // signature would live in this worker's arena.
+                                if (should_upgrade && !ctx->registry_shared) {
                                     // Update existing entry's signature return type
                                     const CBMType **new_rets = (const CBMType **)cbm_arena_alloc(
                                         ctx->arena, 2 * sizeof(const CBMType *));
