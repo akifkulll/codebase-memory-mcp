@@ -8476,22 +8476,32 @@ TEST(pipeline_committed_counts_match_persisted) {
  * MIN_FILES_FOR_PARALLEL (50) — else the run routes sequential, the gate never
  * fires, and the test would pass vacuously (cycles==0). The engagement assert
  * below (cycles >= 1) is a hard guard against that regressing silently. */
-TEST(pipeline_backpressure_futile_nap_disengages) {
-    /* 64 tiny files: > MIN_FILES_FOR_PARALLEL (50) so the parallel path (and its
-     * back-pressure gate) actually runs; old-code cycles (~64) >> the bound. */
-    snprintf(g_tmpdir, sizeof(g_tmpdir), "/tmp/cbm_test_XXXXXX");
+/* Shared fixture for the back-pressure tests: 64 tiny Go files, above
+ * MIN_FILES_FOR_PARALLEL (50) so the parallel extract path — the only phase
+ * with a memory gate — is the one that runs. */
+static bool write_backpressure_fixture(void) {
+    snprintf(g_tmpdir, sizeof(g_tmpdir), "%s/cbm_test_XXXXXX", cbm_tmpdir());
     if (!cbm_mkdtemp(g_tmpdir)) {
-        FAIL("failed to create temp dir");
+        return false;
     }
     for (int i = 0; i < 64; i++) {
         char path[512];
         snprintf(path, sizeof(path), "%s/f%02d.go", g_tmpdir, i);
         FILE *f = fopen(path, "w");
         if (!f) {
-            FAIL("failed to create fixture file");
+            return false;
         }
         fprintf(f, "package main\n\nfunc F%02d() int {\n\treturn %d\n}\n", i, i);
         fclose(f);
+    }
+    return true;
+}
+
+TEST(pipeline_backpressure_futile_nap_disengages) {
+    /* 64 tiny files: > MIN_FILES_FOR_PARALLEL (50) so the parallel path (and its
+     * back-pressure gate) actually runs; old-code cycles (~64) >> the bound. */
+    if (!write_backpressure_fixture()) {
+        FAIL("failed to create fixture");
     }
 
     /* 1 MB budget: over-budget on every pull, unreclaimable by napping.
@@ -8518,7 +8528,10 @@ TEST(pipeline_backpressure_futile_nap_disengages) {
     cbm_pipeline_free(p);
     teardown_test_repo();
 
-    ASSERT_EQ(rc, 0);
+    /* A budget that never drains is not a soft overshoot any more: after the
+     * latch and ONE confirmation cycle the attempt fails whole with the named
+     * code (rc==0 was the advisory era). */
+    ASSERT_EQ(rc, CBM_PIPELINE_ABORT_OVER_BUDGET);
     /* Engagement guard (anti-vacuous): the gate must have actually run — the
      * parallel path taken and the 1 MB budget exceeded on every pull. cycles==0
      * means the fixture routed sequential (or the gate was compiled out) and
@@ -8527,8 +8540,9 @@ TEST(pipeline_backpressure_futile_nap_disengages) {
         FAIL("back-pressure gate never engaged (cycles==0) — fixture routed sequential?");
     }
     /* Futile napping must disengage: at most one in-flight cycle per worker
-     * plus a small margin, never one per file (64). */
-    long bound = (long)cbm_system_info().total_cores + 2;
+     * plus the single confirmation cycle and a small margin, never one per
+     * file (64). */
+    long bound = (long)cbm_system_info().total_cores + 3;
     if (cycles > bound) {
         char msg[128];
         snprintf(msg, sizeof(msg), "nap cycles %ld > bound %ld (gate re-paid per pull)", cycles,
@@ -8536,6 +8550,123 @@ TEST(pipeline_backpressure_futile_nap_disengages) {
         FAIL(msg);
     }
     PASS();
+}
+
+#if CBM_WITH_ZOVA
+/* Node and edge digests of a published workspace (the fixture has no main, so
+ * pipeline_zova_project_info's CALLS walk does not apply). */
+static int pipeline_zova_graph_digest(const char *project, pipeline_sql_digest_t *nodes,
+                                      pipeline_sql_digest_t *edges) {
+    static const char *nodes_sql =
+        "SELECT label,name,qualified_name,file_path,start_line,end_line,properties "
+        "FROM nodes WHERE project=?1 "
+        "ORDER BY label,name,qualified_name,file_path,start_line,end_line,properties";
+    cbm_store_t *store = th_open_project_store(project);
+    if (!store) {
+        return -1;
+    }
+    /* Counting nodes builds the store's nodes view over the workspace. */
+    bool ok = cbm_store_count_nodes(store, project) >= 0 &&
+              pipeline_digest_project_rows(cbm_store_get_db(store), project, nodes_sql, nodes) ==
+                  0 &&
+              pipeline_digest_project_edges(store, project, edges) == 0;
+    cbm_store_close(store);
+    return ok ? 0 : -1;
+}
+#endif
+
+/* Over budget after futility and one confirmation cycle, the attempt fails
+ * WHOLE with a named code: nothing is published and the served Zova
+ * generation is unchanged. The second run re-extracts all 64 changed files
+ * through the incremental route, so the code must survive that path too. */
+TEST(pipeline_over_budget_after_futility_fails_whole_and_preserves_generation) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    if (!write_backpressure_fixture()) {
+        FAIL("failed to create fixture");
+    }
+    const char *old_workers = getenv("CBM_WORKERS");
+    char *saved_workers = old_workers ? strdup(old_workers) : NULL;
+    if ((old_workers && !saved_workers) || cbm_setenv("CBM_WORKERS", "4", 1) != 0) {
+        free(saved_workers);
+        teardown_test_repo();
+        FAIL("failed to pin CBM_WORKERS");
+    }
+
+    /* Generation 1 at the process budget: publishes normally. */
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
+    int rc_first = p ? cbm_pipeline_run(p) : -1;
+    char *project = p ? strdup(cbm_pipeline_project_name(p)) : NULL;
+    cbm_pipeline_free(p);
+    pipeline_sql_digest_t nodes_before = {0};
+    pipeline_sql_digest_t edges_before = {0};
+    int info_before_rc =
+        project ? pipeline_zova_graph_digest(project, &nodes_before, &edges_before) : -1;
+
+    /* Generation 2 at a 1 MiB budget over a changed repo: every file gains a
+     * definition, so the run re-extracts all 64. Over budget on every probe
+     * and unreclaimable by napping, so futility latches and the confirmation
+     * cycle still ends over budget. */
+    bool mutated = true;
+    for (int i = 0; i < 64 && mutated; i++) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/f%02d.go", g_tmpdir, i);
+        FILE *f = fopen(path, "w");
+        mutated = f != NULL;
+        if (f) {
+            fprintf(f,
+                    "package main\n\nfunc F%02d() int {\n\treturn %d\n}\n\n"
+                    "func G%02d() int {\n\treturn F%02d() + 1\n}\n",
+                    i, i, i, i);
+            fclose(f);
+        }
+    }
+    size_t saved_budget = cbm_mem_budget();
+    cbm_mem_set_budget_for_tests((size_t)1024 * 1024);
+    bool over_at_start = cbm_mem_over_budget();
+    cbm_pp_bp_nap_cycles_reset();
+    p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
+    int rc_second = p ? cbm_pipeline_run(p) : -1;
+    cbm_pipeline_route_t route_second =
+        p ? cbm_pipeline_get_last_route(p) : CBM_PIPELINE_ROUTE_UNKNOWN;
+    long cycles = cbm_pp_bp_nap_cycles();
+    /* Restore the caller-visible budget BEFORE any assertion. */
+    cbm_mem_set_budget_for_tests(saved_budget);
+    cbm_pipeline_free(p);
+
+    pipeline_sql_digest_t nodes_after = {0};
+    pipeline_sql_digest_t edges_after = {0};
+    int info_after_rc =
+        project ? pipeline_zova_graph_digest(project, &nodes_after, &edges_after) : -1;
+    free(project);
+    int restore_workers_rc =
+        saved_workers ? cbm_setenv("CBM_WORKERS", saved_workers, 1) : cbm_unsetenv("CBM_WORKERS");
+    free(saved_workers);
+    teardown_test_repo();
+
+    ASSERT_EQ(restore_workers_rc, 0);
+    ASSERT_EQ(rc_first, 0);
+    ASSERT_EQ(info_before_rc, 0);
+    ASSERT_GT(nodes_before.rows, 0);
+    ASSERT_TRUE(mutated);
+    ASSERT_TRUE(over_at_start);
+    ASSERT_EQ(route_second, CBM_PIPELINE_ROUTE_INCREMENTAL);
+    /* The named failure — not the cancel sentinel, not success. */
+    ASSERT_EQ(rc_second, CBM_PIPELINE_ABORT_OVER_BUDGET);
+    /* Engagement guard: fail-whole needs the latching cycle AND the
+     * confirmation cycle; fewer means the gate never decided anything. */
+    if (cycles < 2) {
+        FAIL("back-pressure gate never confirmed futility (cycles<2) — fixture routed sequential?");
+    }
+    /* The served generation is untouched. */
+    ASSERT_EQ(info_after_rc, 0);
+    ASSERT_EQ(nodes_after.rows, nodes_before.rows);
+    ASSERT_TRUE(nodes_after.hash == nodes_before.hash);
+    ASSERT_EQ(edges_after.rows, edges_before.rows);
+    ASSERT_TRUE(edges_after.hash == edges_before.hash);
+    PASS();
+#endif
 }
 
 /* TS cross-registry test hooks (ts_lsp.c) — extern to avoid pulling the
@@ -8617,9 +8748,10 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_cancel_null);
     RUN_TEST(pipeline_run_null);
     /* Extraction back-pressure */
-    /* Passive diagnostic only: its forced 1 MiB process budget can make the
-     * unrelated database dump fail on constrained hosts. Keep the fixture for
-     * targeted debugging, but do not run it as part of the default suite. */
+    /* Fail-whole stops the 1 MiB-budget runs at extraction, before any
+     * database dump, so these run in the default suite again. */
+    RUN_TEST(pipeline_backpressure_futile_nap_disengages);
+    RUN_TEST(pipeline_over_budget_after_futility_fails_whole_and_preserves_generation);
     /* Sequential cross-LSP shared registry (ms-typescript quadratic) */
     RUN_TEST(pipeline_seq_ts_cross_uses_shared_registry);
     /* File persistence */

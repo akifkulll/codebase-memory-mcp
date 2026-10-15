@@ -57,8 +57,13 @@ cbm_pipeline_t *cbm_pipeline_new(const char *repo_path, const char *db_path, cbm
 /* Free a pipeline and all its internal state. NULL-safe. */
 void cbm_pipeline_free(cbm_pipeline_t *p);
 
-/* Run the full indexing pipeline. Returns 0 on success, -1 on error.
+/* Run the full indexing pipeline. Returns 0 on success, non-zero on error.
  * Discovers files, extracts, resolves, and dumps to SQLite. */
+/* Resident memory stayed above the budget after back-pressure and one
+ * confirmation cycle: the run stops before publication, no partial graph is
+ * written and the previous generation still serves (upstream #1997 #832).
+ * Distinct from the cancel sentinel so callers can name the cause. */
+#define CBM_PIPELINE_ABORT_OVER_BUDGET (-5)
 int cbm_pipeline_run(cbm_pipeline_t *p);
 
 /* Request cancellation of a running pipeline (thread-safe). */

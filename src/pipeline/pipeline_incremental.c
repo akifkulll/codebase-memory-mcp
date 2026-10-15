@@ -740,7 +740,7 @@ static void registry_visitor(const cbm_gbuf_node_t *node, void *userdata) {
 }
 
 /* Run parallel or sequential extract+resolve for changed files. */
-static void run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_files, int ci) {
+static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_files, int ci) {
     struct timespec t;
 
     /* Per-file LSP always runs (every mode). Cross-file LSP stays disabled in
@@ -761,7 +761,18 @@ static void run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *change
         CBMFileResult **cache = (CBMFileResult **)calloc(ci, sizeof(CBMFileResult *));
         if (cache) {
             cbm_clock_gettime(CLOCK_MONOTONIC, &t);
-            cbm_parallel_extract(ctx, changed_files, ci, cache, &shared_ids, worker_count);
+            int rc = cbm_parallel_extract(ctx, changed_files, ci, cache, &shared_ids, worker_count);
+            if (rc == CBM_PIPELINE_ABORT_OVER_BUDGET) {
+                /* Over the memory budget: stop before publication so the
+                 * served generation stays as it was. */
+                for (int j = 0; j < ci; j++) {
+                    if (cache[j]) {
+                        cbm_free_result(cache[j]);
+                    }
+                }
+                free(cache);
+                return rc;
+            }
             cbm_gbuf_set_next_id(ctx->gbuf, atomic_load(&shared_ids));
             cbm_log_info("pass.timing", "pass", "incr_extract", "elapsed_ms",
                          itoa_buf((int)elapsed_ms(t)));
@@ -817,6 +828,7 @@ static void run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *change
             free(cache);
         }
     }
+    return 0;
 }
 
 /* Infra Route nodes are keyed by URL across config files: a URL becomes a
@@ -1173,7 +1185,17 @@ static int run_incremental(cbm_pipeline_t *p, cbm_file_info_t *files, int file_c
         incr_add_changed_file_structure(existing, project, &changed_files[i]);
     }
 
-    run_extract_resolve(&ctx, changed_files, ci);
+    int extract_rc = run_extract_resolve(&ctx, changed_files, ci);
+    if (extract_rc != 0) {
+        incr_free_edge_capture(&edge_cap);
+        free(changed_files);
+        cbm_registry_free(registry);
+        cbm_path_alias_collection_free(path_aliases);
+        cbm_pkgmap_free(ctx.pkgmap);
+        free_mode_skipped(mode_skipped, mode_skipped_count);
+        cbm_gbuf_free(existing);
+        return extract_rc;
+    }
     /* Changed files got fresh File props above, so a stale coverage stamp
      * cannot survive; unchanged files keep theirs from the generation. */
     cbm_pipeline_stamp_coverage(p, existing);

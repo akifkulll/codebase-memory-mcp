@@ -8,6 +8,7 @@
 #include "../src/foundation/constants.h"
 #include "../src/foundation/compat_thread.h"
 #include "../src/foundation/log.h"
+#include "../src/foundation/mem.h" /* cbm_mem_set_budget_for_tests: over-budget seam */
 #include "../src/foundation/sha256.h"
 #include "test_framework.h"
 #include "test_helpers.h"
@@ -3150,6 +3151,125 @@ TEST(store_list_files_prefers_canonical_file_nodes) {
     PASS();
 }
 
+/* Write the 64-file Go fixture (above MIN_FILES_FOR_PARALLEL, so the gated
+ * parallel extract runs). Generation 2 gives every file a second definition,
+ * so a re-run must re-extract all of them. */
+static bool budget_fixture_write(const char *repo, int generation) {
+    for (int i = 0; i < 64; i++) {
+        char name[16];
+        char body[256];
+        snprintf(name, sizeof(name), "f%02d.go", i);
+        if (generation == 1) {
+            snprintf(body, sizeof(body), "package main\n\nfunc F%02d() int {\n\treturn %d\n}\n", i,
+                     i);
+        } else {
+            snprintf(body, sizeof(body),
+                     "package main\n\nfunc F%02d() int {\n\treturn %d\n}\n\n"
+                     "func G%02d() int {\n\treturn F%02d() + 1\n}\n",
+                     i, i, i, i);
+        }
+        if (th_write_file(TH_PATH(repo, name), body) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Integer field of the JSON object inside an MCP tool result. */
+static int budget_result_int(const char *result, const char *key) {
+    char *text = extract_text_content(result);
+    yyjson_doc *doc = text ? yyjson_read(text, strlen(text), 0) : NULL;
+    yyjson_val *val = doc ? yyjson_obj_get(yyjson_doc_get_root(doc), key) : NULL;
+    int out = val && yyjson_is_int(val) ? (int)yyjson_get_int(val) : -1;
+    yyjson_doc_free(doc);
+    free(text);
+    return out;
+}
+
+/* Upstream d72250a9 (#1997 #832): an attempt that stays over the memory
+ * budget after back-pressure fails whole and the response names the cause,
+ * the numbers and that the previous index still serves, instead of the
+ * generic "check repo_path" error. The budget seam stands in for a 1 MiB
+ * machine. */
+TEST(index_repository_over_budget_reports_named_reason) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    char repo[512];
+    char cache[512];
+    snprintf(repo, sizeof(repo), "%s/cbm-mcp-budget-repo-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-budget-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    const char *saved_workers = getenv("CBM_WORKERS");
+    char *saved_workers_copy = saved_workers ? strdup(saved_workers) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    cbm_setenv("CBM_WORKERS", "4", 1);
+
+    bool files_ok = budget_fixture_write(repo, 1);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"name\":\"budget\"}", repo);
+
+    /* Generation 1 at the process budget publishes. */
+    char *first = srv && files_ok ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    bool first_indexed = response_contains_json_fragment(first, "\"status\":\"indexed\"");
+    int nodes_first = budget_result_int(first, "nodes");
+    free(first);
+
+    /* Generation 2 at 1 MiB over a changed repo fails whole. */
+    files_ok = files_ok && budget_fixture_write(repo, 2);
+    size_t saved_budget = cbm_mem_budget();
+    cbm_mem_set_budget_for_tests((size_t)1024 * 1024);
+    char *second = srv && files_ok ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    cbm_mem_set_budget_for_tests(saved_budget);
+    bool named = response_contains_json_fragment(second, "\"status\":\"error\"") &&
+                 response_contains_json_fragment(second, "\"reason\":\"over_memory_budget\"") &&
+                 response_contains_json_fragment(second, "\"previous_index\":\"preserved\"") &&
+                 second && strstr(second, "CBM_MEM_BUDGET_MB") != NULL;
+    int budget_mb = budget_result_int(second, "budget_mb");
+    int peak_rss_mb = budget_result_int(second, "peak_rss_mb");
+    if (!named) {
+        printf("    over-budget response: %.400s\n", second ? second : "(null)");
+    }
+    free(second);
+
+    /* The previous generation still answers with its full graph. */
+    char *status =
+        srv ? cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"budget\"}") : NULL;
+    int nodes_after = budget_result_int(status, "nodes");
+    free(status);
+
+    cbm_mcp_server_free(srv);
+    if (saved_cache_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    if (saved_workers_copy) {
+        cbm_setenv("CBM_WORKERS", saved_workers_copy, 1);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    free(saved_cache_copy);
+    free(saved_workers_copy);
+    th_rmtree(repo);
+    th_rmtree(cache);
+
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(files_ok);
+    ASSERT_TRUE(first_indexed);
+    ASSERT_GT(nodes_first, 0);
+    ASSERT_TRUE(named);
+    ASSERT_EQ(budget_mb, 1);
+    ASSERT_TRUE(peak_rss_mb > 0);
+    ASSERT_EQ(nodes_after, nodes_first);
+    PASS();
+#endif
+}
+
 /* Upstream 7a1e069b: the scoped scan must not depend on GNU grep's --include
  * (BusyBox grep in the static Alpine/musl runtime has none). A fake grep that
  * rejects --include stands in for BusyBox; file_pattern is applied in C. */
@@ -5843,6 +5963,7 @@ SUITE(mcp) {
     RUN_TEST(search_code_scoped_path_with_spaces_issue687);
     RUN_TEST(search_code_scoped_file_pattern_is_busybox_portable);
     RUN_TEST(store_list_files_prefers_canonical_file_nodes);
+    RUN_TEST(index_repository_over_budget_reports_named_reason);
     RUN_TEST(search_code_path_filter_prefilter_keeps_matches);
     RUN_TEST(search_code_path_filter_matches_nothing);
     RUN_TEST(search_code_invalid_regex_errors_issue283);

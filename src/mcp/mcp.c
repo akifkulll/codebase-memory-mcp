@@ -4869,6 +4869,29 @@ static char *index_repository_run(cbm_mcp_server_t *srv, const char *args) {
         if (cbm_pipeline_had_format_migration(p)) {
             yyjson_mut_obj_add_bool(doc, root, "format_migration", true);
         }
+    } else if (rc == CBM_PIPELINE_ABORT_OVER_BUDGET) {
+        /* Resident memory stayed above the budget after back-pressure and one
+         * confirmation cycle, so the run stopped before publication. Name the
+         * cause, the numbers and the fact that the previous index still
+         * serves; the generic "check repo_path" hint below would mislead. */
+        int budget_mb = (int)(cbm_mem_budget() / (1024 * 1024));
+        int peak_rss_mb = (int)(cbm_mem_peak_rss() / (1024 * 1024));
+        char budget_text[CBM_SZ_32];
+        char peak_text[CBM_SZ_32];
+        (void)snprintf(budget_text, sizeof(budget_text), "%d", budget_mb);
+        (void)snprintf(peak_text, sizeof(peak_text), "%d", peak_rss_mb);
+        cbm_log_error("index.abort", "reason", "over_memory_budget", "project", project_name,
+                      "budget_mb", budget_text, "peak_rss_mb", peak_text);
+        yyjson_mut_obj_add_str(doc, root, "status", "error");
+        yyjson_mut_obj_add_str(doc, root, "reason", "over_memory_budget");
+        yyjson_mut_obj_add_str(doc, root, "previous_index", "preserved");
+        yyjson_mut_obj_add_int(doc, root, "budget_mb", budget_mb);
+        yyjson_mut_obj_add_int(doc, root, "peak_rss_mb", peak_rss_mb);
+        yyjson_mut_obj_add_str(doc, root, "hint",
+                               "Indexing stopped: resident memory stayed above the budget after "
+                               "backpressure; no partial graph was published and the previous "
+                               "index still serves. Raise CBM_MEM_BUDGET_MB, lower CBM_WORKERS, "
+                               "or exclude large subtrees.");
     } else {
         yyjson_mut_obj_add_str(doc, root, "status", "error");
         yyjson_mut_obj_add_str(doc, root, "hint",

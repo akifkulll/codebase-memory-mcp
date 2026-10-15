@@ -1044,7 +1044,7 @@ static bool stored_index_format_current(const cbm_gbuf_t *stored, const char *pr
 
 /* Try the incremental pipeline against the project's committed cbm.zova
  * workspace. Returns >= 0 if incremental was used (the return code), or -1 to
- * proceed with full. */
+ * proceed with full. CBM_PIPELINE_ABORT_OVER_BUDGET passes through unchanged. */
 static int try_incremental(cbm_pipeline_t *p, cbm_file_info_t *files, int file_count) {
     char zova_path[CBM_SZ_1K];
     if (cbm_zova_user_database_path(zova_path, sizeof(zova_path)) == 0) {
@@ -1082,6 +1082,9 @@ static int try_incremental(cbm_pipeline_t *p, cbm_file_info_t *files, int file_c
                                                                &snapshot, preloaded);
                     preloaded = NULL;
                     cbm_zova_workspace_snapshot_free(&snapshot);
+                    if (rc == CBM_PIPELINE_ABORT_OVER_BUDGET) {
+                        return rc;
+                    }
                     return rc == 0 ? 0 : PIPELINE_INCREMENTAL_FATAL;
                 }
                 if (hash_count > 0 && !p->format_migration) {
@@ -1487,6 +1490,11 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     if (rc == PIPELINE_INCREMENTAL_FATAL) {
         cbm_discover_free(files, file_count);
         return CBM_NOT_FOUND;
+    }
+    if (rc == CBM_PIPELINE_ABORT_OVER_BUDGET) {
+        /* A full run would hit the same budget; the served generation stays. */
+        cbm_discover_free(files, file_count);
+        return rc;
     }
     if (rc >= 0) {
         cbm_discover_free(files, file_count);
