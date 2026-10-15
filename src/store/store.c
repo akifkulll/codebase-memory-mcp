@@ -3589,8 +3589,9 @@ static int store_zova_workspace_bfs_typed(cbm_store_t *s, int64_t start_id,
     return rc;
 }
 
-int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const char **edge_types,
-                  int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out) {
+static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
+                     const char **edge_types, int edge_type_count, int max_depth,
+                     int max_results, bool need_edges, cbm_traverse_result_t *out) {
     memset(out, 0, sizeof(*out));
     if (s && s->backend) {
         return s->backend->bfs(s->backend_ctx, start_id, direction, edge_types, edge_type_count,
@@ -3607,8 +3608,11 @@ int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const
     }
     out->root = root;
 
-    rc = store_zova_workspace_bfs(s, start_id, direction, edge_types, edge_type_count,
-                                  max_depth, max_results, out);
+    /* The native walk returns nodes only; a caller that reads edge
+     * properties takes the typed walk instead. */
+    rc = need_edges ? CBM_STORE_NOT_FOUND
+                    : store_zova_workspace_bfs(s, start_id, direction, edge_types,
+                                               edge_type_count, max_depth, max_results, out);
     if (rc == CBM_STORE_OK) return rc;
     if (s->zova_workspace_query && rc == CBM_STORE_NOT_FOUND)
         return store_zova_workspace_bfs_typed(s, start_id, direction, edge_types,
@@ -3707,6 +3711,19 @@ int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const
     }
 
     return CBM_STORE_OK;
+}
+
+int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const char **edge_types,
+                  int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out) {
+    return store_bfs(s, start_id, direction, edge_types, edge_type_count, max_depth, max_results,
+                     false, out);
+}
+
+int cbm_store_bfs_with_edges(cbm_store_t *s, int64_t start_id, const char *direction,
+                             const char **edge_types, int edge_type_count, int max_depth,
+                             int max_results, cbm_traverse_result_t *out) {
+    return store_bfs(s, start_id, direction, edge_types, edge_type_count, max_depth, max_results,
+                     true, out);
 }
 
 void cbm_store_traverse_free(cbm_traverse_result_t *out) {

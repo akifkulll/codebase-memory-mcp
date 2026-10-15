@@ -3663,13 +3663,13 @@ static int bfs_visit_compare(const void *left, const void *right) {
  * transfers into *out, freed by cbm_store_traverse_free. */
 static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int node_count,
                                 const char *direction, const char **edge_types, int edge_type_count,
-                                int depth, cbm_traverse_result_t *out) {
+                                int depth, bool need_edges, cbm_traverse_result_t *out) {
     memset(out, 0, sizeof(*out));
     int vcap = 0, ecap = 0;
     for (int k = 0; k < node_count; k++) {
         cbm_traverse_result_t tr = {0};
-        cbm_store_bfs(store, nodes[k].id, direction, edge_types, edge_type_count, depth,
-                      MCP_BFS_LIMIT, &tr);
+        (need_edges ? cbm_store_bfs_with_edges : cbm_store_bfs)(
+            store, nodes[k].id, direction, edge_types, edge_type_count, depth, MCP_BFS_LIMIT, &tr);
         for (int i = 0; i < tr.visited_count; i++) {
             int duplicate_index = -1;
             for (int j = 0; j < out->visited_count; j++) {
@@ -3856,14 +3856,14 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
 
     if (do_outbound) {
         bfs_union_same_name(store, nodes, node_count, "outbound", edge_types, edge_type_count,
-                            depth, &tr_out);
+                            depth, data_flow || include_evidence, &tr_out);
         yyjson_mut_obj_add_val(doc, root, "callees",
                                bfs_to_json_array(doc, &tr_out, risk_labels, include_tests,
                                                  data_flow, include_evidence));
     }
     if (do_inbound) {
         bfs_union_same_name(store, nodes, node_count, "inbound", edge_types, edge_type_count,
-                            depth, &tr_in);
+                            depth, data_flow || include_evidence, &tr_in);
         yyjson_mut_obj_add_val(doc, root, "callers",
                                bfs_to_json_array(doc, &tr_in, risk_labels, include_tests,
                                                  data_flow, include_evidence));

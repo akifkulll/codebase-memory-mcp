@@ -408,6 +408,30 @@ TEST(callref_trace_path_include_evidence) {
     PASS();
 }
 
+/* A CALLS-only trace takes the native workspace walk, which has no edges;
+ * include_evidence must still report the CALLS edge's provenance. */
+TEST(callref_trace_calls_only_include_evidence) {
+    RProj lp;
+    cbm_store_t *store = crf_index1(&lp, "main.ts",
+                                    "function helper(): void {}\n"
+                                    "function caller(): void { helper(); }\n");
+    ASSERT_NOT_NULL(store);
+    char args[700];
+    snprintf(args, sizeof(args),
+             "{\"function_name\":\"caller\",\"project\":\"%s\",\"direction\":\"outbound\","
+             "\"edge_types\":[\"CALLS\"],\"include_evidence\":true}",
+             lp.project);
+    char *resp = cbm_mcp_handle_tool(lp.srv, "trace_path", args);
+    bool ok = resp && strstr(resp, "helper") && strstr(resp, "\\\"strategy\\\":\\\"lsp\\\"") &&
+              strstr(resp, "\\\"confidence\\\":");
+    if (!ok)
+        fprintf(stderr, "  [callref] calls evidence response: %s\n", resp ? resp : "(null)");
+    free(resp);
+    rh_cleanup(&lp, store);
+    ASSERT_TRUE(ok);
+    PASS();
+}
+
 /* Copy every `type` edge of the published graph, with its endpoints, into a
  * SQLite store. ids[] maps published node ids to SQLite ids. */
 static void crf_copy_edges(cbm_store_t *from, const char *project, const char *type,
@@ -546,6 +570,7 @@ SUITE(call_reference) {
     RUN_TEST(callref_incremental_drops_reference_to_noncallable);
     RUN_TEST(callref_incremental_keeps_reference_on_unrelated_edit);
     RUN_TEST(callref_trace_path_include_evidence);
+    RUN_TEST(callref_trace_calls_only_include_evidence);
     RUN_TEST(callref_bfs_workspace_matches_sqlite);
     RUN_TEST(callref_strategy_class_vocabulary);
 }
