@@ -180,7 +180,7 @@ fn slugFromBranch(branch: [*c]const u8, detached: bool) ?[*:0]u8 {
     return @ptrCast(slug);
 }
 
-export fn cbm_git_context_free(ctx: ?*c.cbm_git_context_t) void {
+pub export fn cbm_git_context_free(ctx: ?*c.cbm_git_context_t) void {
     const g = ctx orelse return;
     c.free(g.input_path);
     c.free(g.worktree_root);
@@ -199,7 +199,7 @@ fn captureOrEmpty(path: [*:0]const u8, args: []const u8, out: *[*c]u8) void {
     if (gitCapture(path, args, out) != 0) out.* = gitStrdup("");
 }
 
-export fn cbm_git_context_resolve(path_c: ?[*:0]const u8, out_c: ?*c.cbm_git_context_t) c_int {
+pub export fn cbm_git_context_resolve(path_c: ?[*:0]const u8, out_c: ?*c.cbm_git_context_t) c_int {
     const out = out_c orelse return c.CBM_NOT_FOUND;
     out.* = std.mem.zeroes(c.cbm_git_context_t);
     const path = path_c orelse return c.CBM_NOT_FOUND;
@@ -248,7 +248,7 @@ export fn cbm_git_context_resolve(path_c: ?[*:0]const u8, out_c: ?*c.cbm_git_con
     return 0;
 }
 
-export fn cbm_git_context_branch_qn(
+pub export fn cbm_git_context_branch_qn(
     project_name: [*c]const u8,
     ctx_c: ?*const c.cbm_git_context_t,
 ) ?[*:0]u8 {
@@ -321,7 +321,7 @@ fn jsonEscapedLen(src: []const u8) usize {
     return len;
 }
 
-export fn cbm_git_context_props_json(
+pub export fn cbm_git_context_props_json(
     ctx_c: ?*const c.cbm_git_context_t,
     buf: ?[*]u8,
     buf_size: c_int,

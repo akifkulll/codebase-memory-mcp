@@ -200,7 +200,7 @@ fn hashTrigrams(tokens: []const Token, out: *c.cbm_minhash_t) u32 {
     return uniq.count;
 }
 
-export fn cbm_minhash_compute(
+pub export fn cbm_minhash_compute(
     func_body: c.TSNode,
     source: [*c]const u8,
     language: c_int,
@@ -219,7 +219,7 @@ export fn cbm_minhash_compute(
 
 // ── Jaccard similarity ──────────────────────────────────────────────
 
-export fn cbm_minhash_jaccard(a_c: ?*const c.cbm_minhash_t, b_c: ?*const c.cbm_minhash_t) f64 {
+pub export fn cbm_minhash_jaccard(a_c: ?*const c.cbm_minhash_t, b_c: ?*const c.cbm_minhash_t) f64 {
     const a = a_c orelse return 0.0;
     const b = b_c orelse return 0.0;
     var matching: u32 = 0;
@@ -231,7 +231,7 @@ export fn cbm_minhash_jaccard(a_c: ?*const c.cbm_minhash_t, b_c: ?*const c.cbm_m
 
 // ── Hex encoding/decoding ───────────────────────────────────────────
 
-export fn cbm_minhash_to_hex(fp_c: ?*const c.cbm_minhash_t, buf_c: ?[*]u8, bufsize: c_int) void {
+pub export fn cbm_minhash_to_hex(fp_c: ?*const c.cbm_minhash_t, buf_c: ?[*]u8, bufsize: c_int) void {
     const buf = buf_c orelse return;
     const fp = fp_c orelse {
         if (bufsize > 0) buf[0] = 0;
@@ -247,7 +247,7 @@ export fn cbm_minhash_to_hex(fp_c: ?*const c.cbm_minhash_t, buf_c: ?[*]u8, bufsi
     buf[K * 8] = 0;
 }
 
-export fn cbm_minhash_from_hex(hex_c: ?[*:0]const u8, out_c: ?*c.cbm_minhash_t) bool {
+pub export fn cbm_minhash_from_hex(hex_c: ?[*:0]const u8, out_c: ?*c.cbm_minhash_t) bool {
     const hex = hex_c orelse return false;
     const out = out_c orelse return false;
     if (std.mem.len(hex) != c.CBM_MINHASH_HEX_LEN) return false;
@@ -306,12 +306,12 @@ fn bucketPush(bucket: *Bucket, entry_index: c_int) void {
     bucket.count += 1;
 }
 
-export fn cbm_lsh_new() ?*LshIndex {
+pub export fn cbm_lsh_new() ?*LshIndex {
     // calloc keeps the 32 MB band table lazily zeroed by the OS.
     return @ptrCast(@alignCast(c.calloc(1, @sizeOf(LshIndex))));
 }
 
-export fn cbm_lsh_insert(idx_c: ?*LshIndex, entry_c: ?*const c.cbm_lsh_entry_t) void {
+pub export fn cbm_lsh_insert(idx_c: ?*LshIndex, entry_c: ?*const c.cbm_lsh_entry_t) void {
     const idx = idx_c orelse return;
     const entry = entry_c orelse return;
     const fp = entry.fingerprint orelse return;
@@ -390,7 +390,7 @@ fn forEachCandidate(
     }
 }
 
-export fn cbm_lsh_query(
+pub export fn cbm_lsh_query(
     idx_c: ?*const LshIndex,
     fp_c: ?*const c.cbm_minhash_t,
     out: *?[*]?*const c.cbm_lsh_entry_t,
@@ -419,7 +419,7 @@ const IntoBuf = struct {
     }
 };
 
-export fn cbm_lsh_query_into(
+pub export fn cbm_lsh_query_into(
     idx_c: ?*const LshIndex,
     fp_c: ?*const c.cbm_minhash_t,
     out_buf: ?[*]?*const c.cbm_lsh_entry_t,
@@ -436,7 +436,7 @@ export fn cbm_lsh_query_into(
     return @intCast(into.count);
 }
 
-export fn cbm_lsh_free(idx_c: ?*LshIndex) void {
+pub export fn cbm_lsh_free(idx_c: ?*LshIndex) void {
     const idx = idx_c orelse return;
     for (&idx.bands) |*band| {
         for (band) |bucket| c.free(bucket.items);

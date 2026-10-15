@@ -173,7 +173,7 @@ fn popenGit(cmd: *[CMD_MAX]u8, comptime fmt: []const u8, args: anytype) ?*c.FILE
 
 // ── Adaptive interval ──────────────────────────────────────────────
 
-export fn cbm_watcher_poll_interval_ms(file_count: c_int) c_int {
+pub export fn cbm_watcher_poll_interval_ms(file_count: c_int) c_int {
     const ms = POLL_BASE_MS +% @divTrunc(file_count, POLL_FILE_STEP) *% MSEC_PER_SEC;
     return @min(ms, POLL_MAX_MS);
 }
@@ -386,7 +386,7 @@ fn drainPendingFree(w: *Watcher) void {
 
 // ── Stale-root pruning (#286) ──────────────────────────────────────
 
-export fn cbm_watcher_root_missing_errno(err: c_int) bool {
+pub export fn cbm_watcher_root_missing_errno(err: c_int) bool {
     // Only ENOENT/ENOTDIR mean the root itself is gone. Anything else
     // (EACCES, EIO, ELOOP, a transient network mount, macOS TCC permission
     // revocation) is uncertainty: the directory may still exist even though
@@ -474,7 +474,7 @@ fn freeStateEntry(key: [*c]const u8, val: ?*anyopaque, ud: ?*anyopaque) callconv
 
 // ── Watcher lifecycle ──────────────────────────────────────────────
 
-export fn cbm_watcher_new(store: ?*c.cbm_store_t, index_fn: c.cbm_index_fn, user_data: ?*anyopaque) ?*Watcher {
+pub export fn cbm_watcher_new(store: ?*c.cbm_store_t, index_fn: c.cbm_index_fn, user_data: ?*anyopaque) ?*Watcher {
     const w: *Watcher = @ptrCast(@alignCast(c.calloc(1, @sizeOf(Watcher)) orelse return null));
     w.store = store;
     w.index_fn = index_fn;
@@ -488,7 +488,7 @@ export fn cbm_watcher_new(store: ?*c.cbm_store_t, index_fn: c.cbm_index_fn, user
     return w;
 }
 
-export fn cbm_watcher_free(w_c: ?*Watcher) void {
+pub export fn cbm_watcher_free(w_c: ?*Watcher) void {
     const w = w_c orelse return;
     // Safety net: ensure stopped is set before draining pending_free.
     // In production the caller should cbm_watcher_stop() + join first.
@@ -505,7 +505,7 @@ export fn cbm_watcher_free(w_c: ?*Watcher) void {
 
 // ── Watch list management ──────────────────────────────────────────
 
-export fn cbm_watcher_watch(w_c: ?*Watcher, project_name_c: ?Str, root_path_c: ?Str) void {
+pub export fn cbm_watcher_watch(w_c: ?*Watcher, project_name_c: ?Str, root_path_c: ?Str) void {
     const w = w_c orelse return;
     const project_name = project_name_c orelse return;
     const root_path = root_path_c orelse return;
@@ -533,7 +533,7 @@ export fn cbm_watcher_watch(w_c: ?*Watcher, project_name_c: ?Str, root_path_c: ?
     logInfo("watcher.watch", .{ "project", project_name, "path", root_path });
 }
 
-export fn cbm_watcher_unwatch(w_c: ?*Watcher, project_name_c: ?Str) void {
+pub export fn cbm_watcher_unwatch(w_c: ?*Watcher, project_name_c: ?Str) void {
     const w = w_c orelse return;
     const project_name = project_name_c orelse return;
     var removed = false;
@@ -550,7 +550,7 @@ export fn cbm_watcher_unwatch(w_c: ?*Watcher, project_name_c: ?Str) void {
     if (removed) logInfo("watcher.unwatch", .{ "project", project_name });
 }
 
-export fn cbm_watcher_touch(w_c: ?*Watcher, project_name_c: ?Str) void {
+pub export fn cbm_watcher_touch(w_c: ?*Watcher, project_name_c: ?Str) void {
     const w = w_c orelse return;
     const project_name = project_name_c orelse return;
     w.lock();
@@ -559,7 +559,7 @@ export fn cbm_watcher_touch(w_c: ?*Watcher, project_name_c: ?Str) void {
     w.unlock();
 }
 
-export fn cbm_watcher_watch_count(w_c: ?*Watcher) c_int {
+pub export fn cbm_watcher_watch_count(w_c: ?*Watcher) c_int {
     const w = w_c orelse return 0;
     w.lock();
     const count: c_int = @intCast(c.cbm_ht_count(w.projects));
@@ -771,7 +771,7 @@ const Snapshot = struct {
     }
 };
 
-export fn cbm_watcher_poll_once(w_c: ?*Watcher) c_int {
+pub export fn cbm_watcher_poll_once(w_c: ?*Watcher) c_int {
     const w = w_c orelse return 0;
 
     // Snapshot project pointers under lock, then poll without holding it.
@@ -804,11 +804,11 @@ export fn cbm_watcher_poll_once(w_c: ?*Watcher) c_int {
 
 // ── Blocking run loop ──────────────────────────────────────────────
 
-export fn cbm_watcher_stop(w_c: ?*Watcher) void {
+pub export fn cbm_watcher_stop(w_c: ?*Watcher) void {
     if (w_c) |w| w.stopped.store(1, .seq_cst);
 }
 
-export fn cbm_watcher_run(w_c: ?*Watcher, base_interval_ms_arg: c_int) c_int {
+pub export fn cbm_watcher_run(w_c: ?*Watcher, base_interval_ms_arg: c_int) c_int {
     const w = w_c orelse return c.CBM_NOT_FOUND;
     const base_interval_ms: c_int = if (base_interval_ms_arg <= 0) POLL_BASE_MS else base_interval_ms_arg;
 
