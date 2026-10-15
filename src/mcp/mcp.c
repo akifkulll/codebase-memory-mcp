@@ -33,6 +33,10 @@ enum {
 };
 #define MCP_MS_TO_US 1000LL
 #define MCP_S_TO_US 1000000LL
+/* search_code scan bounds (upstream 31bdd4d6): a pathological pattern or a huge
+ * indexed tree must not pin the request forever or fill the scratch disk. */
+#define MCP_SEARCH_SCAN_TIMEOUT_MS 30000
+#define MCP_SEARCH_OUTPUT_MAX (64L * 1024L * 1024L)
 
 #define SLEN(s) (sizeof(s) - 1)
 #include "mcp/mcp.h"
@@ -52,6 +56,7 @@ enum {
 #include "foundation/log.h"
 #include "foundation/limits.h"
 #include "mcp/index_supervisor.h"
+#include "foundation/subprocess.h"
 #include "foundation/str_util.h"
 #include "foundation/dump_verify.h"
 #include "foundation/compat_regex.h"
@@ -67,6 +72,7 @@ enum {
 #include <process.h>
 #define getpid _getpid
 #else
+#include <fnmatch.h>
 #include <unistd.h>
 #include <poll.h>
 #include <fcntl.h>
@@ -5495,16 +5501,13 @@ static void build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped
 #else
     const char *flag = use_regex ? "-E" : "-F";
     if (scoped) {
-        if (file_pattern) {
-            /* -0: read NUL-separated paths from the filelist so paths containing
-             * spaces stay one argument (issue #687). Pairs with the NUL separator
-             * written by write_scoped_filelist. */
-            snprintf(cmd, cmd_sz, "xargs -0 grep -Hn %s --include='%s' -f '%s' < '%s' 2>/dev/null",
-                     flag, file_pattern, tmpfile, filelist);
-        } else {
-            snprintf(cmd, cmd_sz, "xargs -0 grep -Hn %s -f '%s' < '%s' 2>/dev/null", flag, tmpfile,
-                     filelist);
-        }
+        /* -0: read NUL-separated paths from the filelist so paths containing
+         * spaces stay one argument (issue #687). Pairs with the NUL separator
+         * written by write_scoped_filelist. file_pattern was already applied to
+         * that list in C (upstream 7a1e069b): BusyBox grep — the static
+         * Alpine/musl runtime — has no GNU --include option. */
+        snprintf(cmd, cmd_sz, "xargs -0 grep -Hn %s -f '%s' < '%s' 2>/dev/null", flag, tmpfile,
+                 filelist);
     } else {
         if (file_pattern) {
             snprintf(cmd, cmd_sz, "grep -rn %s --include='%s' -f '%s' '%s' 2>/dev/null", flag,
@@ -5923,7 +5926,8 @@ static void classify_all_grep_hits(grep_match_t *gm, int gm_count, cbm_store_t *
  * excluded every indexed file). */
 static bool write_scoped_filelist(cbm_mcp_server_t *srv, const char *project, const char *root_path,
                                   const char *filelist, bool has_path_filter,
-                                  cbm_regex_t *path_regex, int *out_written) {
+                                  cbm_regex_t *path_regex, const char *file_pattern,
+                                  int *out_written) {
     *out_written = 0;
     cbm_store_t *pre_store = resolve_store(srv, project);
     if (!pre_store) {
@@ -5933,8 +5937,15 @@ static bool write_scoped_filelist(cbm_mcp_server_t *srv, const char *project, co
     int indexed_count = 0;
     if (cbm_store_list_files(pre_store, project, &indexed_files, &indexed_count) != CBM_STORE_OK ||
         indexed_count == 0) {
+        for (int fi = 0; fi < indexed_count; fi++) {
+            free(indexed_files[fi]);
+        }
+        free(indexed_files);
         return false;
     }
+#ifdef _WIN32
+    (void)file_pattern; /* Windows keeps its PowerShell -like filter */
+#endif
     FILE *fl = fopen(filelist, "wb");
     bool ok = false;
     int written = 0;
@@ -5956,6 +5967,14 @@ static bool write_scoped_filelist(cbm_mcp_server_t *srv, const char *project, co
                     continue;
                 }
             }
+#ifndef _WIN32
+            /* grep --include semantics: a basename glob. */
+            const char *base = strrchr(indexed_files[fi], '/');
+            base = base ? base + 1 : indexed_files[fi];
+            if (file_pattern && fnmatch(file_pattern, base, 0) != 0) {
+                continue;
+            }
+#endif
             /* Write "<root>/<file>" piece-by-piece (no fixed-size buffer, so an
              * arbitrarily long absolute path cannot overflow). Forward slash join
              * so xargs doesn't treat Windows backslashes as escapes; binary mode
@@ -6208,13 +6227,14 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
     int scoped_written = 0;
 
     scoped = write_scoped_filelist(srv, project, root_path, filelist, has_path_filter,
-                                   has_path_filter ? &path_regex : NULL, &scoped_written);
+                                   has_path_filter ? &path_regex : NULL, file_pattern,
+                                   &scoped_written);
 
     /* Collect grep matches into array */
     int gm_count = 0;
     grep_match_t *gm = NULL;
     if (scoped && scoped_written == 0) {
-        /* The path_filter excluded every indexed file — nothing to scan.
+        /* The path_filter (or POSIX file_pattern) excluded every indexed file — nothing to scan.
          * Skip the grep subprocess: xargs on an empty filelist is
          * platform-dependent (GNU execs grep once with no operands, BSD
          * skips), and the post-grep filter would drop every hit anyway. */
@@ -6226,6 +6246,57 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         build_grep_cmd(cmd, sizeof(cmd), use_regex, scoped, file_pattern, tmpfile, filelist,
                        root_path);
 
+#ifndef _WIN32
+        /* Run the scan supervised instead of through popen: a wall-clock
+         * deadline and an output cap, with the kill taking the whole
+         * sh/xargs/grep group. Either bound fails the request closed rather
+         * than returning a silently partial match set. grep's own exit status
+         * stays ignored, as with popen (1 = no match, 2 = unreadable file). */
+        char outfile[CBM_SZ_256 + 8];
+        snprintf(outfile, sizeof(outfile), "%s.out", tmpfile);
+        const char *const scan_argv[] = {"/bin/sh", "-c", cmd, NULL};
+        cbm_proc_opts_t scan_opts = {0};
+        scan_opts.bin = "/bin/sh";
+        scan_opts.argv = scan_argv;
+        scan_opts.log_file = outfile;
+        scan_opts.deadline_ms = MCP_SEARCH_SCAN_TIMEOUT_MS;
+        scan_opts.max_log_bytes = MCP_SEARCH_OUTPUT_MAX;
+        scan_opts.own_process_group = true;
+        cbm_proc_result_t scan_result;
+        int scan_rc = cbm_subprocess_run(&scan_opts, &scan_result);
+        const char *scan_err = NULL;
+        if (scan_rc != 0) {
+            scan_err = "search failed";
+        } else if (scan_result.outcome == CBM_PROC_HANG) {
+            scan_err = "search_code scan exceeded its execution deadline";
+        } else if (scan_result.outcome == CBM_PROC_OUTPUT_LIMIT) {
+            scan_err = "search failed: output exceeded the 67108864-byte safety limit";
+        } else if (scan_result.outcome == CBM_PROC_CRASH ||
+                   scan_result.outcome == CBM_PROC_KILLED) {
+            scan_err = "search failed: the scan command did not complete";
+        }
+        FILE *fp = scan_err ? NULL : fopen(outfile, "r");
+        if (!fp) {
+            (void)cbm_unlink(outfile);
+            cbm_unlink(tmpfile);
+            if (scoped) {
+                cbm_unlink(filelist);
+            }
+            if (has_path_filter) {
+                cbm_regfree(&path_regex);
+            }
+            free(root_path);
+            free(pattern);
+            free(project);
+            free(file_pattern);
+            return cbm_mcp_text_result(scan_err ? scan_err : "search failed", true);
+        }
+
+        gm = collect_grep_matches(fp, root_path, strlen(root_path), has_path_filter, &path_regex,
+                                  grep_limit, &gm_count);
+        (void)fclose(fp);
+        (void)cbm_unlink(outfile);
+#else
         FILE *fp = cbm_popen(cmd, "r");
         if (!fp) {
             cbm_unlink(tmpfile);
@@ -6242,6 +6313,7 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         gm = collect_grep_matches(fp, root_path, strlen(root_path), has_path_filter, &path_regex,
                                   grep_limit, &gm_count);
         cbm_pclose(fp);
+#endif
         cbm_unlink(tmpfile);
         if (scoped) {
             cbm_unlink(filelist);

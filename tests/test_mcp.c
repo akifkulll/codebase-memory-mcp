@@ -3108,6 +3108,90 @@ TEST(search_code_scoped_path_with_spaces_issue687) {
     PASS();
 }
 
+/* Upstream 7a1e069b: the scoped scan must not depend on GNU grep's --include
+ * (BusyBox grep in the static Alpine/musl runtime has none). A fake grep that
+ * rejects --include stands in for BusyBox; file_pattern is applied in C. */
+TEST(search_code_scoped_file_pattern_is_busybox_portable) {
+#ifdef _WIN32
+    SKIP_PLATFORM("POSIX BusyBox-compatible grep contract");
+#else
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_srch_busybox_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    char bin_dir[640];
+    char fake_grep[700];
+    char source_path[700];
+    snprintf(bin_dir, sizeof(bin_dir), "%s/bin", tmp);
+    snprintf(fake_grep, sizeof(fake_grep), "%s/grep", bin_dir);
+    snprintf(source_path, sizeof(source_path), "%s/R&D-main.c", tmp);
+    ASSERT_EQ(cbm_mkdir(bin_dir), 0);
+    ASSERT_EQ(th_write_file(fake_grep, "#!/bin/sh\n"
+                                       "for arg in \"$@\"; do\n"
+                                       "  case \"$arg\" in --include*) exit 97 ;; esac\n"
+                                       "done\n"
+                                       "if [ -x /usr/bin/grep ]; then exec /usr/bin/grep \"$@\"; fi\n"
+                                       "exec /bin/grep \"$@\"\n"),
+              0);
+    ASSERT_EQ(chmod(fake_grep, 0700), 0);
+    ASSERT_EQ(th_write_file(source_path, "int BUSYBOX_GREP_NEEDLE = 1;\n"), 0);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+    const char *proj = "search-busybox";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, tmp);
+    cbm_node_t file = {.project = proj,
+                       .label = "File",
+                       .name = "R&D-main.c",
+                       .qualified_name = "search-busybox.R&D-main.c",
+                       .file_path = "R&D-main.c"};
+    cbm_node_t symbol = {.project = proj,
+                         .label = "Variable",
+                         .name = "BUSYBOX_GREP_NEEDLE",
+                         .qualified_name = "search-busybox.BUSYBOX_GREP_NEEDLE",
+                         .file_path = "R&D-main.c",
+                         .start_line = 1,
+                         .end_line = 1};
+    ASSERT_GT(cbm_store_upsert_node(st, &file), 0);
+    ASSERT_GT(cbm_store_upsert_node(st, &symbol), 0);
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(cbm_mcp_server_store(srv), proj), 0);
+
+    const char *old_path = getenv("PATH");
+    char *saved_path = old_path ? strdup(old_path) : NULL;
+    char forced_path[1600];
+    snprintf(forced_path, sizeof(forced_path), "%s:/usr/bin:/bin", bin_dir);
+    ASSERT_EQ(cbm_setenv("PATH", forced_path, 1), 0);
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":95,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_code\",\"arguments\":{\"pattern\":"
+             "\"BUSYBOX_GREP_NEEDLE\",\"project\":\"search-busybox\","
+             "\"file_pattern\":\"*R&D*.c\"}}}");
+    if (saved_path) {
+        (void)cbm_setenv("PATH", saved_path, 1);
+    } else {
+        (void)unsetenv("PATH");
+    }
+    free(saved_path);
+    char *inner = resp ? extract_text_content(resp) : NULL;
+    bool portable_success = resp && !strstr(resp, "\"isError\":true") && inner &&
+                            strstr(inner, "\"total_grep_matches\":1") &&
+                            strstr(inner, "BUSYBOX_GREP_NEEDLE");
+
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    unlink(source_path);
+    unlink(fake_grep);
+    rmdir(bin_dir);
+    rmdir(tmp);
+    ASSERT_TRUE(portable_success);
+    PASS();
+#endif
+}
+
 /* Shared fixture for the path_filter prefilter tests (PR #756 distilled):
  * a project with two indexed files that both contain the search pattern —
  * src/handler.go (inside the filter) and vendor/other.go (outside it). */
@@ -5715,6 +5799,7 @@ SUITE(mcp) {
     RUN_TEST(tool_search_code_no_project);
     RUN_TEST(search_code_multi_word);
     RUN_TEST(search_code_scoped_path_with_spaces_issue687);
+    RUN_TEST(search_code_scoped_file_pattern_is_busybox_portable);
     RUN_TEST(search_code_path_filter_prefilter_keeps_matches);
     RUN_TEST(search_code_path_filter_matches_nothing);
     RUN_TEST(search_code_invalid_regex_errors_issue283);

@@ -14,6 +14,7 @@ int tf_skip_count = 0;
 #include "foundation/mem.h"       /* cbm_mem_init — worker budget */
 #include "mcp/index_supervisor.h" /* cbm_index_set_worker_role */
 #include "mcp/mcp.h"              /* cbm_mcp_handle_tool — act as a real worker */
+#include "foundation/subprocess.h" /* cbm_resolve_binary_path — deleted-self probe */
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -22,6 +23,8 @@ int tf_skip_count = 0;
 #include <string.h>
 #ifdef _WIN32
 #include <winsock2.h> /* #798 follow-up: socket-isolation re-exec probe */
+#else
+#include <unistd.h> /* deleted-self probe */
 #endif
 
 /* #832 guard support: when the index supervisor spawns THIS binary as
@@ -114,6 +117,52 @@ static int tf_maybe_run_socket_probe(int argc, char **argv) {
     int rc = getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&type, &len);
     /* rc==0 ⇒ the handle is a live socket in THIS child ⇒ it was inherited. */
     return rc == 0 ? 42 : 0;
+#else
+    (void)argc;
+    (void)argv;
+    return -1;
+#endif
+}
+
+/* #1204 (upstream 11bbf0d8, 5b96b067): spawned by
+ * subprocess_deleted_self_spawn_path_follows_platform_ruling. Signals ready,
+ * waits while the parent replaces or removes this image, then reports what
+ * cbm_resolve_binary_path hands back. */
+static int tf_maybe_run_deleted_self_probe(int argc, char **argv) {
+#if defined(__linux__) || defined(__APPLE__)
+    if (argc != 4 || strcmp(argv[1], "__cbm_deleted_self_probe") != 0) {
+        return -1;
+    }
+    int ready_fd = atoi(argv[2]);
+    int continue_fd = atoi(argv[3]);
+    if (write(ready_fd, "R", 1) != 1) {
+        return 41;
+    }
+    char go = '\0';
+    if (read(continue_fd, &go, 1) != 1) {
+        return 42;
+    }
+    char resolved[1024];
+    bool ok = cbm_resolve_binary_path(NULL, resolved, sizeof(resolved));
+#if defined(__linux__)
+    /* Prove the image really is deleted, or the checks below pass vacuously. */
+    char link_target[1024];
+    ssize_t n = readlink("/proc/self/exe", link_target, sizeof(link_target) - 1);
+    if (n <= 0) {
+        return 45;
+    }
+    link_target[n] = '\0';
+    if (strstr(link_target, " (deleted)") == NULL) {
+        return 46;
+    }
+    if (!ok) {
+        return 43;
+    }
+    return strcmp(resolved, "/proc/self/exe") == 0 && access(resolved, X_OK) == 0 ? 0 : 44;
+#else
+    /* macOS has no magic link: success is the resolver refusing. */
+    return ok ? 44 : 0;
+#endif
 #else
     (void)argc;
     (void)argv;
@@ -265,6 +314,10 @@ int main(int argc, char **argv) {
     int worker_rc = tf_maybe_run_index_worker(argc, argv);
     if (worker_rc >= 0) {
         return worker_rc;
+    }
+    int deleted_self_rc = tf_maybe_run_deleted_self_probe(argc, argv);
+    if (deleted_self_rc >= 0) {
+        return deleted_self_rc;
     }
 
     /* #845 belt-and-suspenders: this binary EMBEDS cbm_mcp_handle_tool. The

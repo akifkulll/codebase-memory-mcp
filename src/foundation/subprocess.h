@@ -30,7 +30,8 @@ typedef enum {
                             * or a Windows NTSTATUS exception exit code (>= 0xC0000000) */
     CBM_PROC_HANG,         /* made no progress within the quiet-timeout; we killed it */
     CBM_PROC_KILLED,       /* terminated by a non-fault signal we did not initiate */
-    CBM_PROC_SPAWN_FAILED  /* fork/exec/CreateProcess failed — no child ever ran */
+    CBM_PROC_SPAWN_FAILED, /* fork/exec/CreateProcess failed — no child ever ran */
+    CBM_PROC_OUTPUT_LIMIT  /* log_file grew past max_log_bytes; we killed it */
 } cbm_proc_outcome_t;
 
 typedef struct {
@@ -53,6 +54,12 @@ typedef struct {
     int quiet_timeout_ms;        /* <= 0 => no timeout; else kill+HANG after this many
                                   * ms with no new completed log line */
     bool delete_log_on_exit;     /* unlink log_file after reaping */
+    int deadline_ms;             /* <= 0 => none; else kill+HANG after this much wall-clock
+                                  * time regardless of progress */
+    long max_log_bytes;          /* <= 0 => none; else kill+OUTPUT_LIMIT once log_file
+                                  * grows past this many bytes */
+    bool own_process_group;      /* POSIX: child leads a new process group and every kill
+                                  * takes the whole group (shell pipelines); ignored on Windows */
 } cbm_proc_opts_t;
 
 /* Spawn opts->bin, supervise (tail + optional quiet-timeout), block until it ends,

@@ -19,6 +19,11 @@
 
 #ifndef _WIN32
 #include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h> /* _NSGetExecutablePath — deleted-self driver */
 #endif
 
 /* ── Layer 1: pure classifier (all platforms) ─────────────────────────────── */
@@ -158,6 +163,89 @@ TEST(subprocess_run_spawn_failure) {
     ASSERT_EQ(rc, 0); /* fork itself succeeded */
     ASSERT_EQ(r.outcome, CBM_PROC_EXIT_NONZERO);
     ASSERT_EQ(r.exit_code, 127);
+    PASS();
+#endif
+}
+
+/* The wall-clock deadline fires even while the child keeps making progress
+ * (a quiet-timeout alone would not), and with own_process_group the kill takes
+ * the backgrounded grandchild too — the search_code sh/xargs/grep shape. */
+TEST(subprocess_run_deadline_kills_process_group) {
+#ifdef _WIN32
+    SKIP_PLATFORM("POSIX process groups");
+#else
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s/cbm_deadline_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(dir));
+    char log[1100];
+    char pidfile[1100];
+    char script[2400];
+    snprintf(log, sizeof(log), "%s/out", dir);
+    snprintf(pidfile, sizeof(pidfile), "%s/grandchild.pid", dir);
+    snprintf(script, sizeof(script),
+             "sleep 30 & echo $! > '%s'; while :; do echo tick; sleep 0.05; done", pidfile);
+    const char *argv[] = {"/bin/sh", "-c", script, NULL};
+    cbm_proc_opts_t opts = {0};
+    opts.bin = "/bin/sh";
+    opts.argv = argv;
+    opts.log_file = log;
+    opts.quiet_timeout_ms = 5000;
+    opts.deadline_ms = 400;
+    opts.own_process_group = true;
+    cbm_proc_result_t r;
+    ASSERT_EQ(cbm_subprocess_run(&opts, &r), 0);
+    ASSERT_EQ(r.outcome, CBM_PROC_HANG);
+
+    FILE *pf = fopen(pidfile, "r");
+    ASSERT_NOT_NULL(pf);
+    int grandchild = 0;
+    ASSERT_EQ(fscanf(pf, "%d", &grandchild), 1);
+    (void)fclose(pf);
+    ASSERT_GT(grandchild, 1);
+    /* The grandchild was reparented, so it is reaped by init; poll briefly. */
+    bool gone = false;
+    for (int i = 0; i < 50 && !gone; i++) {
+        gone = kill((pid_t)grandchild, 0) != 0;
+        if (!gone) {
+            usleep(20000);
+        }
+    }
+    if (!gone) {
+        (void)kill((pid_t)grandchild, SIGKILL);
+    }
+    (void)unlink(pidfile);
+    (void)unlink(log);
+    (void)rmdir(dir);
+    ASSERT_TRUE(gone);
+    PASS();
+#endif
+}
+
+/* A child whose output grows past max_log_bytes is killed and classified
+ * OUTPUT_LIMIT, not HANG or a clean exit. */
+TEST(subprocess_run_output_limit) {
+#ifdef _WIN32
+    SKIP_PLATFORM("POSIX /bin/sh spawn");
+#else
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s/cbm_outlimit_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(dir));
+    char log[1100];
+    snprintf(log, sizeof(log), "%s/out", dir);
+    const char *argv[] = {"/bin/sh", "-c", "while :; do echo 0123456789abcdef; done", NULL};
+    cbm_proc_opts_t opts = {0};
+    opts.bin = "/bin/sh";
+    opts.argv = argv;
+    opts.log_file = log;
+    opts.deadline_ms = 20000;
+    opts.max_log_bytes = 4096;
+    opts.own_process_group = true;
+    opts.delete_log_on_exit = true;
+    cbm_proc_result_t r;
+    ASSERT_EQ(cbm_subprocess_run(&opts, &r), 0);
+    (void)rmdir(dir);
+    ASSERT_EQ(r.outcome, CBM_PROC_OUTPUT_LIMIT);
+    ASSERT_STR_EQ(cbm_proc_outcome_str(r.outcome), "output_limit");
     PASS();
 #endif
 }
@@ -355,6 +443,110 @@ TEST(subprocess_resolves_bare_binary_path_from_path) {
 #endif
 }
 
+#if defined(__linux__) || defined(__APPLE__)
+static int copy_exec_file(const char *src, const char *dst) {
+    FILE *in = fopen(src, "rb");
+    if (!in) {
+        return -1;
+    }
+    FILE *out = fopen(dst, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    char buf[65536];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            rc = -1;
+            break;
+        }
+    }
+    fclose(in);
+    if (fclose(out) != 0) {
+        rc = -1;
+    }
+    return rc == 0 ? chmod(dst, 0755) : rc;
+}
+#endif
+
+/* #1204 (upstream 11bbf0d8, 5b96b067): after an installer replaces the running
+ * binary, the self-resolved path is dead. Linux must hand back the
+ * /proc/self/exe magic link; macOS must refuse. The child side is
+ * tf_maybe_run_deleted_self_probe in test_main.c. */
+TEST(subprocess_deleted_self_spawn_path_follows_platform_ruling) {
+#if defined(__linux__) || defined(__APPLE__)
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cbm_deleted_self_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmpdir));
+
+    char current[1024];
+#if defined(__linux__)
+    ssize_t current_len = readlink("/proc/self/exe", current, sizeof(current) - 1);
+    ASSERT_GT(current_len, 0);
+    current[current_len] = '\0';
+#else
+    uint32_t current_sz = sizeof(current);
+    ASSERT_EQ(_NSGetExecutablePath(current, &current_sz), 0);
+#endif
+
+    char launch_path[512];
+    char replacement_path[512];
+    snprintf(launch_path, sizeof(launch_path), "%s/test-runner", tmpdir);
+    snprintf(replacement_path, sizeof(replacement_path), "%s/test-runner.new", tmpdir);
+    ASSERT_EQ(copy_exec_file(current, launch_path), 0);
+
+    int ready_pipe[2];
+    int continue_pipe[2];
+    ASSERT_EQ(pipe(ready_pipe), 0);
+    ASSERT_EQ(pipe(continue_pipe), 0);
+
+    pid_t child = fork();
+    if (child == 0) {
+        close(ready_pipe[0]);
+        close(continue_pipe[1]);
+        char ready_fd[32];
+        char continue_fd[32];
+        snprintf(ready_fd, sizeof(ready_fd), "%d", ready_pipe[1]);
+        snprintf(continue_fd, sizeof(continue_fd), "%d", continue_pipe[0]);
+        execl(launch_path, launch_path, "__cbm_deleted_self_probe", ready_fd, continue_fd,
+              (char *)NULL);
+        _exit(127);
+    }
+    ASSERT_GT(child, 0);
+
+    close(ready_pipe[1]);
+    close(continue_pipe[0]);
+    char ready = '\0';
+    ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+    ASSERT_EQ(ready, 'R');
+
+#if defined(__linux__)
+    /* Atomic rename-over, the installer's real move. */
+    ASSERT_EQ(copy_exec_file(current, replacement_path), 0);
+    ASSERT_EQ(rename(replacement_path, launch_path), 0);
+#else
+    /* A rename-over on macOS leaves a valid executable that resolve may return;
+     * the fail-closed branch guards the image-gone case. */
+    ASSERT_EQ(unlink(launch_path), 0);
+#endif
+    ASSERT_EQ(write(continue_pipe[1], "G", 1), 1);
+    close(ready_pipe[0]);
+    close(continue_pipe[1]);
+
+    int status = 0;
+    ASSERT_EQ(waitpid(child, &status, 0), child);
+    unlink(launch_path);
+    rmdir(tmpdir);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+    PASS();
+#else
+    PASS();
+#endif
+}
+
 SUITE(subprocess) {
     RUN_TEST(subprocess_classify_clean);
     RUN_TEST(subprocess_classify_exit_nonzero);
@@ -369,9 +561,12 @@ SUITE(subprocess) {
     RUN_TEST(subprocess_run_hang_is_hang);
     RUN_TEST(subprocess_run_spawn_failure);
     RUN_TEST(subprocess_run_null_bin_rejected);
+    RUN_TEST(subprocess_run_deadline_kills_process_group);
+    RUN_TEST(subprocess_run_output_limit);
     RUN_TEST(win_cmdline_index_worker_json);
     RUN_TEST(win_cmdline_roundtrip_battery);
     RUN_TEST(win_cmdline_overflow_rejected);
     RUN_TEST(win_cmdline_overflow_leaves_empty_string);
     RUN_TEST(subprocess_resolves_bare_binary_path_from_path);
+    RUN_TEST(subprocess_deleted_self_spawn_path_follows_platform_ruling);
 }

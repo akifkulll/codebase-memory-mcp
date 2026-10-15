@@ -84,6 +84,8 @@ const char *cbm_proc_outcome_str(cbm_proc_outcome_t o) {
         return "hang";
     case CBM_PROC_KILLED:
         return "killed";
+    case CBM_PROC_OUTPUT_LIMIT:
+        return "output_limit";
     case CBM_PROC_SPAWN_FAILED:
     default:
         return "spawn_failed";
@@ -227,6 +229,24 @@ bool cbm_build_win_cmdline(char *buf, size_t cap, const char *const *argv) {
     return true;
 }
 
+/* Wall-clock deadline / output cap checks shared by both run loops. */
+static bool deadline_passed(const cbm_proc_opts_t *opts, uint64_t started) {
+    return opts->deadline_ms > 0 && (cbm_now_ms() - started) >= (uint64_t)opts->deadline_ms;
+}
+
+static bool log_over_limit(const cbm_proc_opts_t *opts) {
+    if (opts->max_log_bytes <= 0 || !opts->log_file) {
+        return false;
+    }
+    FILE *lf = fopen(opts->log_file, "rb");
+    if (!lf) {
+        return false;
+    }
+    bool over = fseek(lf, 0, SEEK_END) == 0 && ftell(lf) > opts->max_log_bytes;
+    (void)fclose(lf);
+    return over;
+}
+
 #ifdef _WIN32
 
 static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
@@ -279,8 +299,10 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     }
 
     long tail_pos = 0;
-    uint64_t last_activity = cbm_now_ms();
+    uint64_t started = cbm_now_ms();
+    uint64_t last_activity = started;
     bool timed_out = false;
+    bool output_limited = false;
     for (;;) {
         DWORD w = WaitForSingleObject(pi.hProcess, 200);
         if (cbm_tail_log(opts->log_file, &tail_pos, opts->on_log_line, opts->log_ud)) {
@@ -289,11 +311,14 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         if (w == WAIT_OBJECT_0) {
             break;
         }
-        if (opts->quiet_timeout_ms > 0 &&
-            (cbm_now_ms() - last_activity) >= (uint64_t)opts->quiet_timeout_ms) {
+        output_limited = log_over_limit(opts);
+        timed_out = !output_limited &&
+                    ((opts->quiet_timeout_ms > 0 &&
+                      (cbm_now_ms() - last_activity) >= (uint64_t)opts->quiet_timeout_ms) ||
+                     deadline_passed(opts, started));
+        if (timed_out || output_limited) {
             TerminateProcess(pi.hProcess, 1);
             WaitForSingleObject(pi.hProcess, INFINITE);
-            timed_out = true;
             break;
         }
     }
@@ -308,7 +333,8 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
 
     out->exit_code = (int)code;
     out->term_signal = 0;
-    out->outcome = cbm_proc_classify(true, (int)code, 0, timed_out);
+    out->outcome = output_limited ? CBM_PROC_OUTPUT_LIMIT
+                                  : cbm_proc_classify(true, (int)code, 0, timed_out);
     return 0;
 }
 
@@ -323,6 +349,9 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         return -1;
     }
     if (pid == 0) {
+        if (opts->own_process_group) {
+            (void)setpgid(0, 0);
+        }
         /* Child: redirect stdout+stderr to the log (or discard), then exec.
          * Use open()+dup2() (async-signal-safe, no malloc) rather than freopen():
          * the parent may be multithreaded (the MCP server holds worker/watcher/http
@@ -345,9 +374,18 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         _exit(127); /* exec failed */
     }
 
+    if (opts->own_process_group) {
+        /* Also set from the parent so a kill issued before the child's own
+         * setpgid runs still reaches the group (EACCES after exec is fine). */
+        (void)setpgid(pid, pid);
+    }
+    pid_t kill_target = opts->own_process_group ? -pid : pid;
+
     long tail_pos = 0;
-    uint64_t last_activity = cbm_now_ms();
+    uint64_t started = cbm_now_ms();
+    uint64_t last_activity = started;
     bool timed_out = false;
+    bool output_limited = false;
     int wstatus = 0;
     for (;;) {
         pid_t wr;
@@ -362,13 +400,16 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         if (done) {
             break;
         }
-        if (opts->quiet_timeout_ms > 0 &&
-            (cbm_now_ms() - last_activity) >= (uint64_t)opts->quiet_timeout_ms) {
-            kill(pid, SIGKILL);
+        output_limited = log_over_limit(opts);
+        timed_out = !output_limited &&
+                    ((opts->quiet_timeout_ms > 0 &&
+                      (cbm_now_ms() - last_activity) >= (uint64_t)opts->quiet_timeout_ms) ||
+                     deadline_passed(opts, started));
+        if (timed_out || output_limited) {
+            kill(kill_target, SIGKILL);
             do {
                 wr = waitpid(pid, &wstatus, 0);
             } while (wr < 0 && errno == EINTR);
-            timed_out = true;
             break;
         }
         struct timespec ts = {0, 100000000L}; /* 100 ms poll */
@@ -379,7 +420,11 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         (void)unlink(opts->log_file);
     }
 
-    if (WIFEXITED(wstatus)) {
+    if (output_limited) {
+        out->exit_code = -1;
+        out->term_signal = SIGKILL;
+        out->outcome = CBM_PROC_OUTPUT_LIMIT;
+    } else if (WIFEXITED(wstatus)) {
         out->exit_code = WEXITSTATUS(wstatus);
         out->term_signal = 0;
         out->outcome = cbm_proc_classify(true, out->exit_code, 0, timed_out);
@@ -507,8 +552,30 @@ bool cbm_resolve_binary_path(const char *argv0, char *out, size_t outsz) {
     }
 #endif
 
+#ifndef _WIN32
+    /* #1204 (upstream 11bbf0d8, 5b96b067): never hand back a self-resolved
+     * path that is not executable. After an installer's atomic rename-over the
+     * image path no longer exists (Linux readlink reads "<path> (deleted)"),
+     * and spawning it fails with ENOENT. */
+    if (resolve_self_executable(out, outsz)) {
+        if (is_executable_file(out)) {
+            return true;
+        }
+#if defined(__linux__)
+        /* The /proc/self/exe magic link still executes the in-memory old
+         * build, the only image whose build fingerprint the worker accepts. */
+        return copy_path(out, outsz, "/proc/self/exe");
+#else
+        /* No magic link: fail closed, and the supervisor degrades to
+         * in-process indexing instead of spawning a missing binary. */
+        out[0] = '\0';
+        return false;
+#endif
+    }
+#else
     if (resolve_self_executable(out, outsz)) {
         return true;
     }
+#endif
     return copy_path(out, outsz, argv0);
 }

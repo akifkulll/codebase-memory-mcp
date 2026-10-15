@@ -41,6 +41,8 @@ enum {
 #include "foundation/win_utf8.h" /* cbm_wide_to_utf8 — Windows UTF-8 argv (#423/#20); no-op on POSIX */
 #ifdef _WIN32
 #include <shellapi.h> /* CommandLineToArgvW — not pulled in by windows.h under WIN32_LEAN_AND_MEAN */
+#include <io.h>       /* _write — async-safe stderr write in the parent watchdog */
+#include <tlhelp32.h> /* CreateToolhelp32Snapshot — parent PID discovery for the parent-death watchdog */
 #endif
 #include <yyjson/yyjson.h>
 
@@ -103,7 +105,15 @@ static void signal_handler(int sig) {
  * otherwise linger forever blocked on stdin. POSIX has no portable "notify on
  * parent death" primitive (PR_SET_PDEATHSIG is Linux-only), so we poll getppid:
  * once the parent dies the process is reparented (ppid changes, typically to 1)
- * and we shut down. Windows is unaffected (job objects handle this) — #ifndef. */
+ * and we shut down.
+ *
+ * Windows (upstream #914, 92725a5e): job objects do not cover this case — the
+ * KILL_ON_JOB_CLOSE job in subprocess.c only wraps processes CBM spawns itself,
+ * and Windows never propagates a client's termination to the stdio server it
+ * spawned. The Windows branch waits on a SYNCHRONIZE handle to the parent
+ * instead: the kernel signals it exactly once on termination and the held
+ * handle pins the process object, so PID reuse cannot fool the wait. Workers
+ * keep the POSIX-only guard — they run inside CBM's own kill-on-close job. */
 
 #ifndef _WIN32
 static void *parent_watchdog_thread(void *arg) {
@@ -124,6 +134,48 @@ static void *parent_watchdog_thread(void *arg) {
         }
     }
     return NULL;
+}
+#else /* _WIN32 */
+static void *parent_watchdog_thread(void *arg) {
+    HANDLE parent_process = *(HANDLE *)arg;
+
+    /* The 500 ms timeout only re-checks g_shutdown, mirroring the POSIX poll. */
+    while (!atomic_load(&g_shutdown)) {
+        DWORD wait_status = WaitForSingleObject(parent_process, 500);
+        if (wait_status == WAIT_OBJECT_0) {
+            static const char msg[] = "level=warn msg=parent.exited reason=handle_signaled\n";
+            (void)_write(_fileno(stderr), msg, sizeof(msg) - 1);
+            _exit(0);
+        }
+        if (wait_status != WAIT_TIMEOUT) {
+            break; /* handle became unwaitable — stop watching, never spin */
+        }
+    }
+    return NULL;
+}
+
+/* Toolhelp is the documented way to learn one's own parent PID on Windows.
+ * Returns 0 when the lookup fails ("no parent signal available"). */
+static DWORD win_parent_pid_from_snapshot(void) {
+    DWORD parent_pid = 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    PROCESSENTRY32W entry;
+    ZeroMemory(&entry, sizeof(entry));
+    entry.dwSize = sizeof(entry);
+    DWORD self_pid = GetCurrentProcessId();
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (entry.th32ProcessID == self_pid) {
+                parent_pid = entry.th32ParentProcessID;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return parent_pid;
 }
 #endif
 
@@ -703,6 +755,23 @@ int main(int argc, char **argv) {
     } else {
         cbm_log_warn("parent.watchdog.unavailable", "reason", "thread_create_failed");
     }
+#else
+    /* Same fail-open policy as POSIX ppid<=1: with no trustworthy parent at
+     * startup (snapshot failed, or the parent already exited) rely on stdin EOF. */
+    cbm_thread_t parent_watchdog_tid;
+    bool parent_watchdog_started = false;
+    DWORD initial_ppid = win_parent_pid_from_snapshot();
+    HANDLE parent_process = initial_ppid ? OpenProcess(SYNCHRONIZE, FALSE, initial_ppid) : NULL;
+    if (parent_process) {
+        if (cbm_thread_create(&parent_watchdog_tid, PARENT_WATCHDOG_STACK_SIZE,
+                              parent_watchdog_thread, &parent_process) == 0) {
+            parent_watchdog_started = true;
+        } else {
+            CloseHandle(parent_process);
+            parent_process = NULL;
+            cbm_log_warn("parent.watchdog.unavailable", "reason", "thread_create_failed");
+        }
+    }
 #endif
 
     /* Default: MCP server on stdio */
@@ -727,10 +796,13 @@ int main(int argc, char **argv) {
     if (!g_server) {
         cbm_log_error("server.err", "msg", "failed to create server");
         cbm_config_close(runtime_config);
-#ifndef _WIN32
         if (parent_watchdog_started) {
             atomic_store(&g_shutdown, 1);
             cbm_thread_join(&parent_watchdog_tid);
+        }
+#ifdef _WIN32
+        if (parent_process) {
+            CloseHandle(parent_process);
         }
 #endif
         return SKIP_ONE;
@@ -759,9 +831,12 @@ int main(int argc, char **argv) {
     /* Shutdown */
     cbm_log_info("server.shutdown");
 
-#ifndef _WIN32
     if (parent_watchdog_started) {
         cbm_thread_join(&parent_watchdog_tid);
+    }
+#ifdef _WIN32
+    if (parent_process) {
+        CloseHandle(parent_process);
     }
 #endif
 
