@@ -59,6 +59,14 @@ void cbm_ts_full_registry_builds_reset(void) {
 static _Thread_local long g_ts_type_budget = -1;
 static _Thread_local bool g_ts_type_budget_warned;
 
+/* Evaluations that ran (memo hits excluded) since the last budget reset on
+ * this thread. A deterministic work counter for complexity tests. */
+static _Thread_local unsigned long g_ts_eval_entries;
+
+unsigned long cbm_ts_lsp_eval_entries(void) {
+    return g_ts_eval_entries;
+}
+
 static void ts_type_budget_reset(size_t source_len) {
     const char *e = getenv("CBM_TS_TYPE_BUDGET");
     if (e && e[0]) {
@@ -68,6 +76,95 @@ static void ts_type_budget_reset(size_t source_len) {
         g_ts_type_budget = 1000000 + (long)source_len * 64;
     }
     g_ts_type_budget_warned = false;
+    g_ts_eval_entries = 0;
+}
+
+/* Bumped on every degraded eval return (depth cap or budget exhaustion). An
+ * evaluation whose subtree bumped this counter must NOT be memoized: its value
+ * embeds the degradation, and first-eval-wins would freeze it for call sites
+ * that could have evaluated the node fully. */
+static _Thread_local unsigned long g_ts_eval_degraded;
+
+/* Expression-type memo (per file): node.id -> evaluated CBMType.
+ *
+ * ts_signature_for_call re-evaluates a call's argument expressions while
+ * resolving overloads, and boolean/spread chains re-enter the same
+ * subexpression once per enclosing alternative — the TS suite's
+ * objectSpreadRepeatedComplexity.js builds a union of 2^(n-1) members and
+ * measured 11+ s for a 3.6 KB file while emitting the same 5-node graph
+ * v0.9.0 emits in 0.14 s. Expression types are position-pure within a file
+ * pass (one node = one scope path, and the per-file walk is single-threaded
+ * and deterministic), so one eval per node is the correct semantics, not a
+ * cache trade-off. Degraded results are never stored (see
+ * g_ts_eval_degraded). Arena-backed, linear-probed, power-of-two capacity;
+ * grows by rehash and dies with the file pass. */
+typedef struct TsEvalMemo {
+    const void **keys; /* TSNode.id; NULL = empty slot */
+    const CBMType **vals;
+    uint32_t cap;
+    uint32_t count;
+} TsEvalMemo;
+
+static uint32_t ts_memo_slot(const TsEvalMemo *m, const void *id) {
+    uint64_t x = (uint64_t)(uintptr_t)id;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    uint32_t i = (uint32_t)x & (m->cap - 1);
+    while (m->keys[i] && m->keys[i] != id)
+        i = (i + 1) & (m->cap - 1);
+    return i;
+}
+
+static const CBMType *ts_memo_get(const TsEvalMemo *m, const void *id) {
+    if (!m || !m->cap)
+        return NULL;
+    uint32_t i = ts_memo_slot(m, id);
+    return m->keys[i] ? m->vals[i] : NULL;
+}
+
+static void ts_memo_put(TSLSPContext *ctx, const void *id, const CBMType *t) {
+    TsEvalMemo *m = ctx->eval_memo;
+    if (!m) {
+        m = (TsEvalMemo *)cbm_arena_alloc(ctx->arena, sizeof(*m));
+        if (!m)
+            return;
+        m->cap = 1024;
+        m->count = 0;
+        m->keys = (const void **)cbm_arena_alloc(ctx->arena, m->cap * sizeof(*m->keys));
+        m->vals = (const CBMType **)cbm_arena_alloc(ctx->arena, m->cap * sizeof(*m->vals));
+        if (!m->keys || !m->vals)
+            return;
+        memset(m->keys, 0, m->cap * sizeof(*m->keys));
+        memset(m->vals, 0, m->cap * sizeof(*m->vals));
+        ctx->eval_memo = m;
+    }
+    if (m->count * 10 >= m->cap * 7) { /* grow at 70% load */
+        TsEvalMemo bigger = {0};
+        bigger.cap = m->cap * 2;
+        bigger.keys = (const void **)cbm_arena_alloc(ctx->arena, bigger.cap * sizeof(*bigger.keys));
+        bigger.vals =
+            (const CBMType **)cbm_arena_alloc(ctx->arena, bigger.cap * sizeof(*bigger.vals));
+        if (!bigger.keys || !bigger.vals)
+            return; /* keep serving from the full table; stores stop */
+        memset(bigger.keys, 0, bigger.cap * sizeof(*bigger.keys));
+        memset(bigger.vals, 0, bigger.cap * sizeof(*bigger.vals));
+        for (uint32_t i = 0; i < m->cap; i++) {
+            if (!m->keys[i])
+                continue;
+            uint32_t j = ts_memo_slot(&bigger, m->keys[i]);
+            bigger.keys[j] = m->keys[i];
+            bigger.vals[j] = m->vals[i];
+        }
+        bigger.count = m->count;
+        *m = bigger; /* old arrays stay in the arena */
+    }
+    uint32_t i = ts_memo_slot(m, id);
+    if (!m->keys[i]) {
+        m->keys[i] = id;
+        m->vals[i] = t;
+        m->count++;
+    }
 }
 
 #define TS_LSP_MAX_EVAL_DEPTH 64
@@ -149,7 +246,7 @@ static void ts_emit_resolved_call(TSLSPContext *ctx, const char *callee_qn, cons
                                   float confidence) {
     if (!ctx || !ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
         return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {0};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = callee_qn;
     rc.strategy = strategy ? strategy : "lsp_ts";
@@ -158,10 +255,28 @@ static void ts_emit_resolved_call(TSLSPContext *ctx, const char *callee_qn, cons
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
 }
 
+/* A CALL_REFERENCE row: `site` names `callee_qn` as a value at that exact
+ * occurrence. The pipeline joins it to the extracted candidate usage there. */
+static void ts_emit_reference(TSLSPContext *ctx, const char *callee_qn, const char *strategy,
+                              TSNode site) {
+    if (!ctx || !ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn ||
+        ts_node_is_null(site))
+        return;
+    CBMResolvedCall rc = {0};
+    rc.caller_qn = ctx->enclosing_func_qn;
+    rc.callee_qn = callee_qn;
+    rc.strategy = strategy;
+    rc.confidence = 0.95f;
+    rc.kind = CBM_RESOLVED_CALL_REFERENCE;
+    rc.site_start_byte = ts_node_start_byte(site);
+    rc.site_end_byte = ts_node_end_byte(site);
+    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
+}
+
 static void ts_emit_unresolved_call(TSLSPContext *ctx, const char *expr_text, const char *reason) {
     if (!ctx || !ctx->resolved_calls || !ctx->enclosing_func_qn)
         return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {0};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";
@@ -207,6 +322,7 @@ static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, cons
                         "returning unknown\n",
                         module_qn ? module_qn : "?");
             }
+            g_ts_eval_degraded++;
             return cbm_type_unknown();
         }
     }
@@ -1655,9 +1771,22 @@ static const CBMType *return_type_of(CBMArena *arena, const CBMType *sig) {
 const CBMType *ts_eval_expr_type(TSLSPContext *ctx, TSNode node) {
     if (!ctx || ts_node_is_null(node))
         return cbm_type_unknown();
-    if (ctx->eval_depth > TS_LSP_MAX_EVAL_DEPTH)
+    /* Memo hit: O(1), ignores depth — the value came from a completed,
+     * non-degraded evaluation of this exact node. */
+    {
+        const CBMType *memo = ts_memo_get(ctx->eval_memo, node.id);
+        if (memo)
+            return memo;
+    }
+    if (ctx->eval_depth > TS_LSP_MAX_EVAL_DEPTH) {
+        g_ts_eval_degraded++;
         return cbm_type_unknown();
+    }
+    g_ts_eval_entries++;
     ctx->eval_depth++;
+    /* Snapshot for the memo-store guard: any degraded return in this subtree
+     * bumps the counter and blocks the store below. */
+    unsigned long degraded_before = g_ts_eval_degraded;
 
     const CBMType *result = cbm_type_unknown();
     const char *kind = ts_node_type(node);
@@ -1916,6 +2045,11 @@ const CBMType *ts_eval_expr_type(TSLSPContext *ctx, TSNode node) {
     }
 
     ctx->eval_depth--;
+    /* Store only completed, non-degraded evaluations (see g_ts_eval_degraded);
+     * result is never NULL here (initialized to unknown), so NULL stays the
+     * empty-slot sentinel. */
+    if (result && g_ts_eval_degraded == degraded_before)
+        ts_memo_put(ctx, node.id, result);
     return result;
 }
 
@@ -2004,6 +2138,37 @@ const CBMType *ts_parse_type_node(TSLSPContext *ctx, TSNode node) {
 
 // ── Statement processing ──────────────────────────────────────────────────────
 
+/* A bare identifier used as a value — a direct call argument (`xs.map(h)`)
+ * or the whole right-hand side of a binding (`const cb = h`): emit a
+ * CALL_REFERENCE row when it names exactly one module-local or imported
+ * function. A local or parameter of the same name shadows the module symbol,
+ * so nothing is emitted (fail closed). */
+static void ts_resolve_value_reference(TSLSPContext *ctx, TSNode ident) {
+    if (!ctx || !ctx->enclosing_func_qn || !node_kind_is(ident, "identifier"))
+        return;
+    char *name = node_text(ctx, ident);
+    if (!name || !name[0] || cbm_scope_binds_local(ctx->current_scope, name))
+        return;
+    if (ctx->module_qn) {
+        const char *qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, name);
+        const CBMRegisteredFunc *f = cbm_registry_lookup_func(ctx->registry, qn);
+        if (f && f->qualified_name) {
+            ts_emit_reference(ctx, f->qualified_name, "lsp_ts_local_value_reference", ident);
+            return;
+        }
+    }
+    for (int i = 0; i < ctx->import_count; i++) {
+        const char *lname = ctx->import_local_names ? ctx->import_local_names[i] : NULL;
+        const char *mqn = ctx->import_module_qns ? ctx->import_module_qns[i] : NULL;
+        if (!lname || !mqn || strcmp(lname, name) != 0)
+            continue;
+        const CBMRegisteredFunc *f = cbm_registry_lookup_symbol(ctx->registry, mqn, name);
+        if (f && f->qualified_name)
+            ts_emit_reference(ctx, f->qualified_name, "lsp_ts_import_value_reference", ident);
+        return;
+    }
+}
+
 // Bind a variable_declarator: `let x: T = init` / `const x = init` / `var x = ...`.
 static void bind_variable_declarator(TSLSPContext *ctx, TSNode decl) {
     TSNode name = ts_node_child_by_field_name(decl, "name", TS_LSP_FIELD_LEN("name"));
@@ -2011,6 +2176,8 @@ static void bind_variable_declarator(TSLSPContext *ctx, TSNode decl) {
     TSNode value = ts_node_child_by_field_name(decl, "value", TS_LSP_FIELD_LEN("value"));
     if (ts_node_is_null(name))
         return;
+    // Before the name is bound: `const handler = handler` reads the outer one.
+    ts_resolve_value_reference(ctx, value);
 
     const CBMType *declared = NULL;
     if (!ts_node_is_null(tann)) {
@@ -2274,6 +2441,8 @@ static void resolve_call_at(TSLSPContext *ctx, TSNode call_node) {
         ts_node_child_by_field_name(call_node, "arguments", TS_LSP_FIELD_LEN("arguments"));
     if (!ts_node_is_null(args))
         arg_count = (int)ts_node_named_child_count(args);
+    for (int i = 0; i < arg_count; i++)
+        ts_resolve_value_reference(ctx, ts_node_named_child(args, (uint32_t)i));
 
     const char *fk = ts_node_type(fn);
 
@@ -2733,6 +2902,10 @@ static void process_node(TSLSPContext *ctx, TSNode node) {
 
     // Scope-affecting statements bind first, then we recurse.
     ts_process_statement(ctx, node);
+
+    if (strcmp(kind, "assignment_expression") == 0)
+        ts_resolve_value_reference(
+            ctx, ts_node_child_by_field_name(node, "right", TS_LSP_FIELD_LEN("right")));
 
     if (strcmp(kind, "call_expression") == 0) {
         resolve_call_at(ctx, node);

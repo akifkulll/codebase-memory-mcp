@@ -513,7 +513,7 @@ static const char skill_tail[] =
     "\n"
     "## Edge Types\n"
     "CALLS, HTTP_CALLS, ASYNC_CALLS, IMPORTS, DEFINES, DEFINES_METHOD,\n"
-    "HANDLES, IMPLEMENTS, OVERRIDE, USAGE, FILE_CHANGES_WITH,\n"
+    "HANDLES, IMPLEMENTS, OVERRIDE, USAGE, CALL_REFERENCE, FILE_CHANGES_WITH,\n"
     "CONTAINS_FILE, CONTAINS_FOLDER, CONTAINS_PACKAGE\n"
     "\n"
     "## Cypher Examples (for query_graph)\n"

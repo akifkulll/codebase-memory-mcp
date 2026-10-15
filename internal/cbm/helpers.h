@@ -86,6 +86,11 @@ TSNode cbm_find_child_by_kind(TSNode parent, const char *kind);
 // Check if node kind matches a set of types (NULL-terminated array of strings).
 bool cbm_kind_in_set(TSNode node, const char **types);
 
+// PHP first-class callable syntax (`strlen(...)`, `$obj->m(...)`, `Foo::m(...)`):
+// a call node whose argument list is the `...` placeholder. It creates a
+// Closure for the target; it does not invoke it.
+bool cbm_php_is_first_class_callable(TSNode node);
+
 // Free the calling thread's cbm_kind_in_set bitset cache (call at thread/process
 // teardown so the thread-local cache is not reported as a leak).
 void cbm_kind_in_set_free_cache(void);

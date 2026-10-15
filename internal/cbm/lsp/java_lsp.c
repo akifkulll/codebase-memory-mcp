@@ -1779,32 +1779,40 @@ void java_lsp_process_file(JavaLSPContext *ctx, TSNode root) {
 
 /* ── Call-edge resolution ─────────────────────────────────────────── */
 
-static void java_emit_resolved_orig(JavaLSPContext *ctx, const char *callee_qn, const char *orig,
-                                    const char *strategy, float confidence) {
-    if (!ctx->resolved_calls || !ctx->enclosing_method_qn || !callee_qn)
+/* A method reference names its callable without invoking it: emit a
+ * CALL_REFERENCE row tied to the exact `method_reference` occurrence, which
+ * the pipeline joins to the extracted reference usage of the same span. */
+static void java_emit_reference(JavaLSPContext *ctx, const char *callee_qn, const char *strategy,
+                                float confidence, TSNode site) {
+    if (!ctx->resolved_calls || !ctx->enclosing_method_qn || !callee_qn || ts_node_is_null(site))
         return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {0};
     rc.caller_qn = ctx->enclosing_method_qn;
     rc.callee_qn = callee_qn;
     rc.strategy = strategy;
     rc.confidence = confidence;
-    // For a data-flow resolution (constructor reference `Lhs::new` resolved to
-    // the Lhs class), `reason` carries the ORIGINAL textual callee (`new`) so the
-    // pipeline join can match the textual call site even though the resolved
-    // callee_qn's short name differs. NULL/unread for normal resolved calls.
-    rc.reason = orig;
+    rc.kind = CBM_RESOLVED_CALL_REFERENCE;
+    rc.site_start_byte = ts_node_start_byte(site);
+    rc.site_end_byte = ts_node_end_byte(site);
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
 }
 
 static void java_emit_resolved(JavaLSPContext *ctx, const char *callee_qn, const char *strategy,
                                float confidence) {
-    java_emit_resolved_orig(ctx, callee_qn, NULL, strategy, confidence);
+    if (!ctx->resolved_calls || !ctx->enclosing_method_qn || !callee_qn)
+        return;
+    CBMResolvedCall rc = {0};
+    rc.caller_qn = ctx->enclosing_method_qn;
+    rc.callee_qn = callee_qn;
+    rc.strategy = strategy;
+    rc.confidence = confidence;
+    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
 }
 
 static void java_emit_unresolved(JavaLSPContext *ctx, const char *expr_text, const char *reason) {
     if (!ctx->resolved_calls || !ctx->enclosing_method_qn)
         return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {0};
     rc.caller_qn = ctx->enclosing_method_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";
@@ -2571,7 +2579,7 @@ static uint32_t bind_lambda_args(JavaLSPContext *ctx, TSNode call_node,
 /* Resolve a method reference (Class::method or instance::method) to a
  * concrete callee, using the surrounding SAM context for arg-count.
  *
- * Emits a CBMResolvedCall edge for the referenced method when we can pin
+ * Emits a CALL_REFERENCE row for the referenced method when we can pin
  * down the receiver type. Otherwise emits an unresolved diagnostic. */
 static void resolve_method_reference(JavaLSPContext *ctx, TSNode mref,
                                      const CBMRegisteredFunc *outer_resolved, int arg_index,
@@ -2679,13 +2687,22 @@ static void resolve_method_reference(JavaLSPContext *ctx, TSNode mref,
             cbm_registry_lookup_method(ctx->registry, type_qn, short_name);
         // A `ClassName::new` reference constructs ClassName: resolve to the
         // ClassName CLASS node (which the textual extractor stored), not the
-        // synthetic constructor QN that has no graph node. orig=mname ("new")
-        // lets the join match the textual `new` call site (the constructor
-        // reference is extracted as a call to `new`). cf distinguishes an
-        // indexed constructor (higher confidence) from a synthesized one.
-        java_emit_resolved_orig(ctx, type_qn, mname,
-                                cf ? "lsp_method_ref_ctor" : "lsp_method_ref_ctor_synth",
-                                cf ? 0.90f : 0.80f);
+        // synthetic constructor QN that has no graph node. The reference usage
+        // is named `new`, so the type QN cannot match it by leaf; `reason`
+        // carries `new` for the join. cf distinguishes an indexed constructor
+        // (higher confidence) from a synthesized one.
+        if (!ctx->resolved_calls || !ctx->enclosing_method_qn)
+            return;
+        CBMResolvedCall rc = {0};
+        rc.caller_qn = ctx->enclosing_method_qn;
+        rc.callee_qn = type_qn;
+        rc.strategy = cf ? "lsp_method_ref_ctor" : "lsp_method_ref_ctor_synth";
+        rc.confidence = cf ? 0.90f : 0.80f;
+        rc.reason = mname;
+        rc.kind = CBM_RESOLVED_CALL_REFERENCE;
+        rc.site_start_byte = ts_node_start_byte(mref);
+        rc.site_end_byte = ts_node_end_byte(mref);
+        cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
         return;
     }
 
@@ -2704,7 +2721,7 @@ static void resolve_method_reference(JavaLSPContext *ctx, TSNode mref,
     if (!m)
         m = java_lookup_method(ctx, type_qn, mname, 0);
     if (m) {
-        java_emit_resolved(ctx, m->qualified_name, "lsp_method_ref", 0.90f);
+        java_emit_reference(ctx, m->qualified_name, "lsp_method_ref", 0.90f, mref);
     } else {
         java_emit_unresolved(ctx, cbm_arena_sprintf(ctx->arena, "%s.%s", type_qn, mname),
                              "method_reference_no_match");

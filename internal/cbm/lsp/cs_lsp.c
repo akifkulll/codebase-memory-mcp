@@ -1411,7 +1411,7 @@ static void cs_process_assignment(CSLSPContext *ctx, TSNode node) {
 static void cs_emit_resolved(CSLSPContext *ctx, const char *callee_qn, const char *strategy,
                               float confidence) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn) return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {0};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = callee_qn;
     rc.strategy = strategy;
@@ -1420,7 +1420,38 @@ static void cs_emit_resolved(CSLSPContext *ctx, const char *callee_qn, const cha
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
 }
 
+/* A method group passed directly as an argument (`items.ForEach(Handle)`):
+ * emit a CALL_REFERENCE row at that occurrence when the bare name is a method
+ * of the enclosing class (or its bases). A local or parameter of the same name
+ * shadows it, so nothing is emitted (fail closed). */
+static void cs_resolve_argument_references(CSLSPContext *ctx, TSNode call) {
+    if (!ctx->resolved_calls || !ctx->enclosing_func_qn || !ctx->enclosing_class_qn) return;
+    TSNode args = ts_node_child_by_field_name(call, "arguments", 9);
+    if (ts_node_is_null(args)) return;
+    uint32_t n = ts_node_named_child_count(args);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode arg = ts_node_named_child(args, i);
+        if (strcmp(ts_node_type(arg), "argument") != 0) continue;
+        TSNode value = ts_node_named_child(arg, ts_node_named_child_count(arg) - 1);
+        if (ts_node_is_null(value) || strcmp(ts_node_type(value), "identifier") != 0) continue;
+        char *name = cs_node_text(ctx, value);
+        if (!name || !name[0] || cbm_scope_binds_local(ctx->current_scope, name)) continue;
+        const CBMRegisteredFunc *f = cs_lookup_method(ctx, ctx->enclosing_class_qn, name);
+        if (!f || !f->qualified_name) continue;
+        CBMResolvedCall rc = {0};
+        rc.caller_qn = ctx->enclosing_func_qn;
+        rc.callee_qn = f->qualified_name;
+        rc.strategy = "cs_method_group_reference";
+        rc.confidence = 0.92f;
+        rc.kind = CBM_RESOLVED_CALL_REFERENCE;
+        rc.site_start_byte = ts_node_start_byte(value);
+        rc.site_end_byte = ts_node_end_byte(value);
+        cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
+    }
+}
+
 static void cs_resolve_invocation(CSLSPContext *ctx, TSNode call) {
+    cs_resolve_argument_references(ctx, call);
     TSNode fn = ts_node_child_by_field_name(call, "function", 8);
     if (ts_node_is_null(fn)) {
         uint32_t nc = ts_node_child_count(call);

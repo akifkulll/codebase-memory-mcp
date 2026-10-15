@@ -1099,7 +1099,7 @@ void go_process_statement(GoLSPContext* ctx, TSNode node) {
 static void emit_resolved_call(GoLSPContext* ctx, const char* callee_qn, const char* strategy, float confidence) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn) return;
 
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {0};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = callee_qn;
     rc.strategy = strategy;
@@ -1112,13 +1112,41 @@ static void emit_resolved_call(GoLSPContext* ctx, const char* callee_qn, const c
 static void emit_unresolved_call(GoLSPContext* ctx, const char* expr_text, const char* reason) {
     if (!ctx->resolved_calls || !ctx->enclosing_func_qn) return;
 
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {0};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";
     rc.confidence = 0.0f;
     rc.reason = reason;
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
+}
+
+// A bare identifier passed directly as a call argument (`accept(handler)`):
+// emit a CALL_REFERENCE row at that occurrence when it is exactly one
+// package-level function. A local or parameter of the same name shadows it,
+// so nothing is emitted (fail closed).
+static void resolve_argument_references(GoLSPContext* ctx, TSNode call_node) {
+    if (!ctx->resolved_calls || !ctx->enclosing_func_qn) return;
+    TSNode args = ts_node_child_by_field_name(call_node, "arguments", 9);
+    if (ts_node_is_null(args)) return;
+    uint32_t n = ts_node_named_child_count(args);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode arg = ts_node_named_child(args, i);
+        if (strcmp(ts_node_type(arg), "identifier") != 0) continue;
+        char* name = lsp_node_text(ctx, arg);
+        if (!name || !name[0] || cbm_scope_binds_local(ctx->current_scope, name)) continue;
+        const CBMRegisteredFunc* f = cbm_registry_lookup_symbol(ctx->registry, ctx->package_qn, name);
+        if (!f || !f->qualified_name) continue;
+        CBMResolvedCall rc = {0};
+        rc.caller_qn = ctx->enclosing_func_qn;
+        rc.callee_qn = f->qualified_name;
+        rc.strategy = "lsp_func_value_reference";
+        rc.confidence = 0.95f;
+        rc.kind = CBM_RESOLVED_CALL_REFERENCE;
+        rc.site_start_byte = ts_node_start_byte(arg);
+        rc.site_end_byte = ts_node_end_byte(arg);
+        cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
+    }
 }
 
 // --- Walk call expressions and resolve them ---
@@ -1132,6 +1160,7 @@ static void resolve_calls_in_node_inner(GoLSPContext* ctx, TSNode node) {
 
     // Resolve call expressions
     if (strcmp(kind, "call_expression") == 0) {
+        resolve_argument_references(ctx, node);
         TSNode func_node = ts_node_child_by_field_name(node, "function", 8);
         if (!ts_node_is_null(func_node)) {
             const char* fk = ts_node_type(func_node);
@@ -2977,7 +3006,7 @@ int cbm_go_fast_resolve_qualified_calls(
         /* Emit a resolved entry. cbm_pipeline_find_lsp_resolution
          * picks the highest-confidence match, so the unresolved entry
          * stays (harmless duplicate) but our resolved entry wins. */
-        CBMResolvedCall rc;
+        CBMResolvedCall rc = {0};
         rc.caller_qn = uc->caller_qn;
         rc.callee_qn = f->qualified_name; /* borrowed from pipeline arena */
         rc.strategy = "lsp_strategy_cross_file";

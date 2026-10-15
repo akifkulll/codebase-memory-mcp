@@ -3,6 +3,7 @@
  *
  * For each file, re-extracts and resolves:
  *   - USAGE edges: identifier references (not calls) to registered symbols
+ *   - CALL_REFERENCE edges: a callable named as a value, proven by the LSP
  *   - THROWS/RAISES edges: exception types
  *   - READS/WRITES edges: variable read/write access patterns
  *
@@ -15,6 +16,7 @@
 #include "foundation/str_util.h" // cbm_json_escape
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
+#include "pipeline/lsp_resolve.h"
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/log.h"
 #include "foundation/compat.h"
@@ -212,11 +214,16 @@ static const cbm_gbuf_node_t *find_enclosing_node(cbm_pipeline_ctx_t *ctx, const
     return node;
 }
 
-/* Resolve USAGE edges for one file's extracted usages. */
+/* Resolve USAGE and CALL_REFERENCE edges for one file's extracted usages. A
+ * reference candidate becomes CALL_REFERENCE only through the exact LSP join;
+ * the textual registry never earns it (see lsp_resolve.h). */
 static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
                                const char *rel, const char *module_qn, const char **imp_keys,
-                               const char **imp_vals, int imp_count) {
+                               const char **imp_vals, int imp_count, CBMLanguage lang) {
     int resolved = 0;
+    cbm_pipeline_ref_index_t ref_index;
+    (void)cbm_pipeline_ref_index_build(&result->resolved_calls, &ref_index);
+    bool allow_tail = cbm_pipeline_lsp_allow_tail_match(lang);
     for (int u = 0; u < result->usages.count; u++) {
         CBMUsage *usage = &result->usages.items[u];
         if (!usage->ref_name) {
@@ -228,13 +235,24 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
             continue;
         }
 
-        cbm_resolution_t res = cbm_registry_resolve(ctx->registry, usage->ref_name, module_qn,
-                                                    imp_keys, imp_vals, imp_count);
-        if (!res.qualified_name || res.qualified_name[0] == '\0') {
+        const cbm_gbuf_node_t *tgt = NULL;
+        cbm_ref_join_t join = cbm_pipeline_join_lsp_reference(ctx->gbuf, ctx->project_name,
+                                                              &ref_index, usage, allow_tail, &tgt);
+        if (join == CBM_REF_JOIN_SKIP || (join == CBM_REF_JOIN_VALUE && usage->reference_only)) {
             continue;
         }
-
-        const cbm_gbuf_node_t *tgt = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
+        if (join == CBM_REF_JOIN_NONE) {
+            cbm_resolution_t res = cbm_registry_resolve(ctx->registry, usage->ref_name, module_qn,
+                                                        imp_keys, imp_vals, imp_count);
+            if (!res.qualified_name || res.qualified_name[0] == '\0') {
+                continue;
+            }
+            if (!cbm_pipeline_reference_fallback_allowed(lang, usage, res.strategy, imp_keys,
+                                                         imp_count)) {
+                continue;
+            }
+            tgt = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
+        }
         if (!tgt || src->id == tgt->id) {
             continue;
         }
@@ -245,9 +263,11 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         cbm_json_escape(esc_ref, sizeof(esc_ref), usage->ref_name);
         char uprops[CBM_SZ_512];
         snprintf(uprops, sizeof(uprops), "{\"callee\":\"%s\"}", esc_ref);
-        cbm_gbuf_insert_edge(ctx->gbuf, src->id, tgt->id, "USAGE", uprops);
+        cbm_gbuf_insert_edge(ctx->gbuf, src->id, tgt->id,
+                             join == CBM_REF_JOIN_CALLABLE ? "CALL_REFERENCE" : "USAGE", uprops);
         resolved++;
     }
+    cbm_pipeline_ref_index_free(&ref_index);
     return resolved;
 }
 
@@ -374,7 +394,8 @@ int cbm_pipeline_pass_usages(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *fil
                                                       pu_module_is_dir(files[i].language));
 
         usage_resolved +=
-            resolve_usage_edges(ctx, result, rel, module_qn, imp_keys, imp_vals, imp_count);
+            resolve_usage_edges(ctx, result, rel, module_qn, imp_keys, imp_vals, imp_count,
+                                files[i].language);
         throw_resolved +=
             resolve_throw_edges(ctx, result, rel, module_qn, imp_keys, imp_vals, imp_count);
         rw_resolved += resolve_rw_edges(ctx, result, rel, module_qn, imp_keys, imp_vals, imp_count);

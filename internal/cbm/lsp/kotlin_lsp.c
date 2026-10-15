@@ -320,6 +320,21 @@ static void kt_emit_resolved(KotlinLSPContext *ctx, const char *callee_qn, const
     arr->count++;
 }
 
+/* A callable reference names its target without invoking it: a
+ * CALL_REFERENCE row tied to the exact `callable_reference` occurrence. */
+static void kt_emit_reference(KotlinLSPContext *ctx, const char *callee_qn, const char *strategy,
+                              float confidence, TSNode site) {
+    CBMResolvedCallArray *arr = ctx->resolved_calls;
+    int before = arr ? arr->count : 0;
+    kt_emit_resolved(ctx, callee_qn, strategy, confidence);
+    if (arr && arr->count > before) {
+        CBMResolvedCall *rc = &arr->items[arr->count - 1];
+        rc->kind = CBM_RESOLVED_CALL_REFERENCE;
+        rc->site_start_byte = ts_node_start_byte(site);
+        rc->site_end_byte = ts_node_end_byte(site);
+    }
+}
+
 /* Detect a function_declaration's extension receiver type. The
  * tree-sitter Kotlin grammar inlines the rule `_receiver_type` (a hidden
  * rule starting with '_'), so the receiver doesn't appear as a named
@@ -1824,6 +1839,33 @@ static const CBMType *kt_eval_literal_type(KotlinLSPContext *ctx, TSNode node) {
     return cbm_type_unknown();
 }
 
+/* A callable reference under a branch (if/when/elvis) or an operator is not
+ * by itself the value of the enclosing expression; a direct argument,
+ * initializer or return value is. */
+static bool kt_callable_reference_has_ambiguous_parent(TSNode node) {
+    TSNode child = node;
+    for (int depth = 0; depth < 8; depth++) {
+        TSNode parent = ts_node_parent(child);
+        if (ts_node_is_null(parent))
+            return false;
+        const char *kind = ts_node_type(parent);
+        if (strcmp(kind, "if_expression") == 0 || strcmp(kind, "when_expression") == 0 ||
+            strcmp(kind, "elvis_expression") == 0) {
+            return true;
+        }
+        if (strcmp(kind, "property_declaration") == 0 || strcmp(kind, "value_argument") == 0 ||
+            strcmp(kind, "call_expression") == 0 || strcmp(kind, "return_expression") == 0) {
+            return false;
+        }
+        if (strcmp(kind, "binary_expression") == 0 || strcmp(kind, "additive_expression") == 0 ||
+            strcmp(kind, "multiplicative_expression") == 0) {
+            return true;
+        }
+        child = parent;
+    }
+    return false;
+}
+
 const CBMType *kotlin_eval_expr_type(KotlinLSPContext *ctx, TSNode node) {
     if (ts_node_is_null(node) || !ctx) {
         return cbm_type_unknown();
@@ -2100,6 +2142,12 @@ const CBMType *kotlin_eval_expr_type(KotlinLSPContext *ctx, TSNode node) {
         goto out;
     }
     if (strcmp(kind, "callable_reference") == 0) {
+        if (kt_callable_reference_has_ambiguous_parent(node)) {
+            /* A branch selects among several references: none is the value of
+             * the expression, so each stays an ordinary USAGE. */
+            result = cbm_type_unknown();
+            goto out;
+        }
         /* Callable references take three shapes:
          *   `::topLevelFn`    — bound to receiverless top-level function
          *   `Foo::method`     — bound class method or property
@@ -2107,8 +2155,8 @@ const CBMType *kotlin_eval_expr_type(KotlinLSPContext *ctx, TSNode node) {
          *   `Foo::class`      — class literal (KClass<Foo>)
          *   `T::class` (reified) — class literal of reified type param
          *
-         * We emit an edge with strategy `lsp_kt_callable_ref` so the call
-         * graph captures the reference even when it's not invoked here.
+         * We emit a CALL_REFERENCE row (strategy `lsp_kt_callable_ref`) at
+         * this occurrence: the target is named, not invoked here.
          * The grammar exposes the LHS (optional) and RHS via named
          * children — typically two identifiers separated by `::`. */
         uint32_t nc = ts_node_named_child_count(node);
@@ -2140,15 +2188,16 @@ const CBMType *kotlin_eval_expr_type(KotlinLSPContext *ctx, TSNode node) {
                         }
                         const CBMRegisteredFunc *rf = kotlin_lookup_method(ctx, recv_qn, member);
                         if (rf && rf->qualified_name) {
-                            kt_emit_resolved(ctx, rf->qualified_name, "lsp_kt_callable_ref",
-                                             KT_CONF_METHOD);
+                            kt_emit_reference(ctx, rf->qualified_name, "lsp_kt_callable_ref",
+                                              KT_CONF_METHOD, node);
                         }
                     }
                 } else {
                     /* `::name` — bound to top-level fn or local. */
                     const char *fn_qn = kotlin_resolve_function_name(ctx, member);
                     if (fn_qn) {
-                        kt_emit_resolved(ctx, fn_qn, "lsp_kt_callable_ref", KT_CONF_TOP_LEVEL);
+                        kt_emit_reference(ctx, fn_qn, "lsp_kt_callable_ref", KT_CONF_TOP_LEVEL,
+                                          node);
                     }
                 }
             }
@@ -3065,6 +3114,48 @@ static void kt_process_call_with_lambda(KotlinLSPContext *ctx, TSNode call_node)
     kt_process_lambda(ctx, lambda, recv_t);
 }
 
+/* A callable reference is not type-evaluated by the call resolver; evaluate it
+ * here so it emits its CALL_REFERENCE row, unless binding an initializer
+ * already did for this occurrence. */
+static void kt_resolve_callable_reference(KotlinLSPContext *ctx, TSNode node) {
+    uint32_t start = ts_node_start_byte(node);
+    uint32_t end = ts_node_end_byte(node);
+    for (int i = 0; ctx->resolved_calls && i < ctx->resolved_calls->count; i++) {
+        const CBMResolvedCall *rc = &ctx->resolved_calls->items[i];
+        if (rc->kind == CBM_RESOLVED_CALL_REFERENCE && rc->site_start_byte == start &&
+            rc->site_end_byte == end) {
+            return;
+        }
+    }
+    (void)kotlin_eval_expr_type(ctx, node);
+}
+
+/* `accept(::handler)` as a statement: the statement path resolves the call
+ * without visiting its arguments, so resolve direct callable-reference
+ * arguments here. */
+static void kt_resolve_argument_references(KotlinLSPContext *ctx, TSNode call) {
+    TSNode args = kt_child_kind(call, "value_arguments");
+    if (ts_node_is_null(args)) {
+        TSNode suffix = kt_child_kind(call, "call_suffix");
+        if (!ts_node_is_null(suffix))
+            args = kt_child_kind(suffix, "value_arguments");
+    }
+    if (ts_node_is_null(args))
+        return;
+    uint32_t n = ts_node_named_child_count(args);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode arg = ts_node_named_child(args, i);
+        if (!kt_node_is(arg, "value_argument"))
+            continue;
+        uint32_t an = ts_node_named_child_count(arg);
+        if (an == 0)
+            continue;
+        TSNode value = ts_node_named_child(arg, an - 1);
+        if (kt_node_is(value, "callable_reference"))
+            kt_resolve_callable_reference(ctx, value);
+    }
+}
+
 static void kt_process_statement(KotlinLSPContext *ctx, TSNode stmt) {
     if (ts_node_is_null(stmt)) {
         return;
@@ -3165,6 +3256,7 @@ static void kt_process_statement(KotlinLSPContext *ctx, TSNode stmt) {
     }
     if (strcmp(kind, "call_expression") == 0) {
         kt_process_call_with_lambda(ctx, stmt);
+        kt_resolve_argument_references(ctx, stmt);
         return;
     }
     if (strcmp(kind, "navigation_expression") == 0) {
@@ -3198,6 +3290,10 @@ static void kt_resolve_calls_in_node_inner(KotlinLSPContext *ctx, TSNode node) {
         strcmp(kind, "object_declaration") == 0 || strcmp(kind, "lambda_literal") == 0 ||
         strcmp(kind, "anonymous_function") == 0) {
         /* Skip — handled elsewhere */
+        return;
+    }
+    if (strcmp(kind, "callable_reference") == 0) {
+        kt_resolve_callable_reference(ctx, node);
         return;
     }
     if (strcmp(kind, "call_expression") == 0) {

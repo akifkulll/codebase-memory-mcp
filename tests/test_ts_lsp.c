@@ -3820,6 +3820,30 @@ TEST(tslsp_void_returning_method) {
     PASS();
 }
 
+/* ── Expression-eval complexity guard (upstream 51770de0) ───────────────────── */
+
+/* Each member call in `b.m().m()...` evaluates its receiver, which is the
+ * previous call. Without the per-node memo the chain re-walks every prefix,
+ * which is quadratic in the chain length; with it each node evaluates once. The
+ * chain stays under TS_LSP_MAX_EVAL_DEPTH, so no result is degraded and every
+ * node is memoized. Guarded by the deterministic eval counter, not wall-clock. */
+TEST(tslsp_eval_memo_bounds_method_chain_work) {
+    char src[4096];
+    int off = snprintf(src, sizeof(src),
+                       "class B { m(): B { return this; } }\nfunction f(b: B) {\n    b");
+    for (int i = 0; i < 30; i++)
+        off += snprintf(src + off, sizeof(src) - (size_t)off, ".m()");
+    snprintf(src + off, sizeof(src) - (size_t)off, ";\n}\n");
+
+    CBMFileResult *r = extract_ts(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(require_resolved(r, ".f", "m") >= 0, 1);
+    /* 30 links: 2N = 60 evals with the memo, N(N+1)/2 = 1830 without. */
+    ASSERT_LT(cbm_ts_lsp_eval_entries(), 200UL);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(tslsp_nested_class_resolution) {
     CBMFileResult *r = extract_ts("class Outer {\n"
                                   "    inner: Inner = new Inner();\n"
@@ -4288,4 +4312,5 @@ SUITE(ts_lsp) {
     RUN_TEST(tslsp_optional_property_chain);
     RUN_TEST(tslsp_void_returning_method);
     RUN_TEST(tslsp_nested_class_resolution);
+    RUN_TEST(tslsp_eval_memo_bounds_method_chain_work);
 }

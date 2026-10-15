@@ -2150,6 +2150,7 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
             for (int i = 0; i < result->resolved_calls.count; i++) {
                 CBMResolvedCall *rc_e = &result->resolved_calls.items[i];
                 if (!rc_e->caller_qn || !rc_e->callee_qn ||
+                    rc_e->kind != CBM_RESOLVED_INVOCATION ||
                     rc_e->confidence < CBM_LSP_CONFIDENCE_FLOOR) {
                     continue;
                 }
@@ -2365,10 +2366,16 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
     }
 }
 
-/* Resolve usages for one file. */
+/* Resolve USAGE and CALL_REFERENCE edges for one file. Mirrors
+ * resolve_usage_edges in pass_usages.c: CALL_REFERENCE only through the exact
+ * LSP join, never from the textual registry. */
 static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
                                 CBMFileResult *result, const char *rel, const char *module_qn,
-                                const char **imp_keys, const char **imp_vals, int imp_count) {
+                                const char **imp_keys, const char **imp_vals, int imp_count,
+                                CBMLanguage lang) {
+    cbm_pipeline_ref_index_t ref_index;
+    (void)cbm_pipeline_ref_index_build(&result->resolved_calls, &ref_index);
+    bool allow_tail = cbm_pipeline_lsp_allow_tail_match(lang);
     for (int u = 0; u < result->usages.count; u++) {
         CBMUsage *usage = &result->usages.items[u];
         if (!usage->ref_name) {
@@ -2379,12 +2386,24 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (!src) {
             continue;
         }
-        cbm_resolution_t res = cbm_registry_resolve(rc->registry, usage->ref_name, module_qn,
-                                                    imp_keys, imp_vals, imp_count);
-        if (!res.qualified_name || res.qualified_name[0] == '\0') {
+        const cbm_gbuf_node_t *tgt = NULL;
+        cbm_ref_join_t join = cbm_pipeline_join_lsp_reference(
+            rc->main_gbuf, rc->project_name, &ref_index, usage, allow_tail, &tgt);
+        if (join == CBM_REF_JOIN_SKIP || (join == CBM_REF_JOIN_VALUE && usage->reference_only)) {
             continue;
         }
-        const cbm_gbuf_node_t *tgt = cbm_gbuf_find_by_qn(rc->main_gbuf, res.qualified_name);
+        if (join == CBM_REF_JOIN_NONE) {
+            cbm_resolution_t res = cbm_registry_resolve(rc->registry, usage->ref_name, module_qn,
+                                                        imp_keys, imp_vals, imp_count);
+            if (!res.qualified_name || res.qualified_name[0] == '\0') {
+                continue;
+            }
+            if (!cbm_pipeline_reference_fallback_allowed(lang, usage, res.strategy, imp_keys,
+                                                         imp_count)) {
+                continue;
+            }
+            tgt = cbm_gbuf_find_by_qn(rc->main_gbuf, res.qualified_name);
+        }
         if (!tgt || src->id == tgt->id) {
             continue;
         }
@@ -2392,9 +2411,11 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         char esc_ref[CBM_SZ_256]; /* sliced source text: escape quotes/newlines */
         cbm_json_escape(esc_ref, sizeof(esc_ref), usage->ref_name);
         snprintf(uprops, sizeof(uprops), "{\"callee\":\"%s\"}", esc_ref);
-        cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, tgt->id, "USAGE", uprops);
+        cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, tgt->id,
+                             join == CBM_REF_JOIN_CALLABLE ? "CALL_REFERENCE" : "USAGE", uprops);
         ws->usages_resolved++;
     }
+    cbm_pipeline_ref_index_free(&ref_index);
 }
 
 /* Resolve throws/raises for one file. */
@@ -2676,7 +2697,9 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         bool cross_lsp_eligible =
             (rc->all_defs && rc->def_count > 0 && cbm_pxc_has_cross_lsp(lang) &&
              result->calls.count > 0 &&
-             (jvm_cross_lsp || result->resolved_calls.count < result->calls.count) &&
+             (jvm_cross_lsp ||
+              cbm_pipeline_invocation_row_count(&result->resolved_calls) <
+                  result->calls.count) &&
              !is_generated);
 
         /* Skip files with nothing else to resolve and no cross-LSP work. */
@@ -2809,7 +2832,8 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
 
         /* ── USAGE resolution ──────────────────────────────────── */
         _ph_t0 = extract_now_ns();
-        resolve_file_usages(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count);
+        resolve_file_usages(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count,
+                            lang);
         atomic_fetch_add_explicit(&rc->time_ns_usages, extract_now_ns() - _ph_t0,
                                   memory_order_relaxed);
 

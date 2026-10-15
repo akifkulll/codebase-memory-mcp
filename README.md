@@ -521,7 +521,9 @@ between unrelated workspaces.
 
 ### Edge Types
 
-`CONTAINS_PACKAGE`, `CONTAINS_FOLDER`, `CONTAINS_FILE`, `DEFINES`, `DEFINES_METHOD`, `IMPORTS`, `CALLS`, `HTTP_CALLS`, `ASYNC_CALLS`, `IMPLEMENTS`, `HANDLES`, `USAGE`, `CONFIGURES`, `WRITES`, `MEMBER_OF`, `TESTS`, `USES_TYPE`, `FILE_CHANGES_WITH`
+`CONTAINS_PACKAGE`, `CONTAINS_FOLDER`, `CONTAINS_FILE`, `DEFINES`, `DEFINES_METHOD`, `IMPORTS`, `CALLS`, `HTTP_CALLS`, `ASYNC_CALLS`, `IMPLEMENTS`, `HANDLES`, `USAGE`, `CALL_REFERENCE`, `CONFIGURES`, `WRITES`, `MEMBER_OF`, `TESTS`, `USES_TYPE`, `FILE_CHANGES_WITH`
+
+`CALLS` is invocation-only. A function or method named as a value without being invoked (passed as an argument, assigned, Java `A::m`, Kotlin `::f`, PHP `f(...)`) is a `CALL_REFERENCE` edge when the language's type resolver proves the single target at that occurrence; otherwise it stays `USAGE`. `trace_path` in `calls` mode follows `CALLS` only; pass `edge_types: ["CALLS", "CALL_REFERENCE"]` to follow references too.
 
 ### Qualified Names
 

@@ -606,18 +606,68 @@ TEST(repro_lsp_java_interface_dispatch) {
                                "lsp_interface_dispatch");
 }
 
+/* Edges of `edge_type` sourced at the Function/Method named `callable_name`. */
+static int count_edges_from_callable(cbm_store_t *store, const char *project,
+                                     const char *edge_type, const char *callable_name) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    if (cbm_store_find_edges_by_type(store, project, edge_type, &edges, &edge_count) !=
+        CBM_STORE_OK) {
+        return 0;
+    }
+    int matches = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t source = {0};
+        if (cbm_store_find_node_by_id(store, edges[i].source_id, &source) == CBM_STORE_OK &&
+            source.name && strcmp(source.name, callable_name) == 0 && source.label &&
+            (strcmp(source.label, "Function") == 0 || strcmp(source.label, "Method") == 0)) {
+            matches++;
+        }
+        cbm_node_free_fields(&source);
+    }
+    cbm_store_free_edges(edges, edge_count);
+    return matches;
+}
+
+/* A method or constructor reference names its target without invoking it:
+ * exactly one CALL_REFERENCE from `run`, and no CALLS. `Foo::new` targets the
+ * Foo class node whether its constructor is declared or implicit. */
+static int assert_method_reference_semantics(const char *filename, const char *src) {
+    RProj project;
+    cbm_store_t *store = rh_index(&project, filename, src);
+    if (!store) {
+        printf("  %sFAIL%s %s:%d: method-reference fixture failed to index\n", tf_red(),
+               tf_reset(), __FILE__, __LINE__);
+        rh_cleanup(&project, store);
+        return 1;
+    }
+    int references = count_edges_from_callable(store, project.project, "CALL_REFERENCE", "run");
+    int calls = count_edges_from_callable(store, project.project, "CALLS", "run");
+    int rc = 0;
+    if (references != 1) {
+        printf("  %sFAIL%s %s:%d: method reference count expected=1 actual=%d\n", tf_red(),
+               tf_reset(), __FILE__, __LINE__, references);
+        rc = 1;
+    }
+    if (calls != 0) {
+        printf("  %sFAIL%s %s:%d: method reference fabricated %d CALLS edges\n", tf_red(),
+               tf_reset(), __FILE__, __LINE__, calls);
+        rc = 1;
+    }
+    rh_cleanup(&project, store);
+    return rc;
+}
+
 TEST(repro_lsp_java_method_ref_ctor) {
-    return assert_lsp_strategy("Client.java", kJavaMethodRefCtor,
-                               "lsp_method_ref_ctor");
+    return assert_method_reference_semantics("Client.java", kJavaMethodRefCtor);
 }
 
 TEST(repro_lsp_java_method_ref_ctor_synth) {
-    return assert_lsp_strategy("Client.java", kJavaMethodRefCtorSynth,
-                               "lsp_method_ref_ctor_synth");
+    return assert_method_reference_semantics("Client.java", kJavaMethodRefCtorSynth);
 }
 
 TEST(repro_lsp_java_method_ref) {
-    return assert_lsp_strategy("Client.java", kJavaMethodRef, "lsp_method_ref");
+    return assert_method_reference_semantics("Client.java", kJavaMethodRef);
 }
 
 TEST(repro_lsp_java_constructor) {

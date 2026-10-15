@@ -396,7 +396,7 @@ static void py_emit_resolved_call_reason(PyLSPContext *ctx, const char *callee_q
             return;
         }
     }
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {0};
     memset(&rc, 0, sizeof(rc));
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = cbm_arena_strdup(ctx->arena, callee_qn);
@@ -409,6 +409,51 @@ static void py_emit_resolved_call_reason(PyLSPContext *ctx, const char *callee_q
 static void py_emit_resolved_call(PyLSPContext *ctx, const char *callee_qn, const char *strategy,
                                   float confidence) {
     py_emit_resolved_call_reason(ctx, callee_qn, strategy, confidence, NULL);
+}
+
+/* A bare name used as a value — a direct call argument (`accept(handler)`,
+ * `accept(cb=handler)`, `accept((handler))`) or the whole right-hand side of
+ * `cb = handler` / `(cb := handler)`: emit a CALL_REFERENCE row at the name's
+ * occurrence when it is exactly one module-local function. A local or
+ * parameter of the same name shadows it, so nothing is emitted (fail closed).
+ * Rows bypass the invocation dedup: each is tied to its own occurrence. */
+static void py_resolve_value_reference(PyLSPContext *ctx, TSNode node) {
+    if (!ctx || !ctx->resolved_calls || !ctx->enclosing_func_qn || ts_node_is_null(node))
+        return;
+    while (strcmp(ts_node_type(node), "parenthesized_expression") == 0 &&
+           ts_node_named_child_count(node) == 1) {
+        node = ts_node_named_child(node, 0);
+    }
+    if (strcmp(ts_node_type(node), "identifier") != 0)
+        return;
+    char *name = py_node_text(ctx, node);
+    if (!name || !name[0] || cbm_scope_binds_local(ctx->current_scope, name))
+        return;
+    const CBMRegisteredFunc *f = cbm_registry_lookup_symbol(ctx->registry, ctx->module_qn, name);
+    if (!f || !f->qualified_name)
+        return;
+    CBMResolvedCall rc = {0};
+    rc.caller_qn = ctx->enclosing_func_qn;
+    rc.callee_qn = f->qualified_name;
+    rc.strategy = "lsp_callable_value_reference";
+    rc.confidence = 0.95f;
+    rc.kind = CBM_RESOLVED_CALL_REFERENCE;
+    rc.site_start_byte = ts_node_start_byte(node);
+    rc.site_end_byte = ts_node_end_byte(node);
+    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
+}
+
+static void py_resolve_argument_references(PyLSPContext *ctx, TSNode call_node) {
+    TSNode args = ts_node_child_by_field_name(call_node, "arguments", 9);
+    if (ts_node_is_null(args) || strcmp(ts_node_type(args), "argument_list") != 0)
+        return;
+    uint32_t n = ts_node_named_child_count(args);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode arg = ts_node_named_child(args, i);
+        if (strcmp(ts_node_type(arg), "keyword_argument") == 0)
+            arg = ts_node_child_by_field_name(arg, "value", 5);
+        py_resolve_value_reference(ctx, arg);
+    }
 }
 
 /* ── helpers: registry-driven attribute lookup with depth cap ──── */
@@ -1578,6 +1623,9 @@ static void py_process_statement(PyLSPContext *ctx, TSNode node) {
         TSNode left = ts_node_child_by_field_name(node, "left", 4);
         TSNode right = ts_node_child_by_field_name(node, "right", 5);
         TSNode ann = ts_node_child_by_field_name(node, "type", 4);
+        // Before the target is bound: `handler = handler` reads the outer one.
+        if (!ts_node_is_null(right) && strcmp(ts_node_type(right), "identifier") == 0)
+            py_resolve_value_reference(ctx, right);
 
         const CBMType *rhs_type =
             ts_node_is_null(right) ? cbm_type_unknown() : py_eval_expr_type(ctx, right);
@@ -1854,6 +1902,7 @@ static void py_process_statement(PyLSPContext *ctx, TSNode node) {
 /* ── Recursive walker: process statements + emit resolved_calls ── */
 
 static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
+    py_resolve_argument_references(ctx, call_node);
     TSNode fn = ts_node_child_by_field_name(call_node, "function", 8);
     if (ts_node_is_null(fn))
         return;
@@ -2290,6 +2339,8 @@ static void py_bind_walrus_in(PyLSPContext *ctx, TSNode node) {
             strcmp(ts_node_type(left), "identifier") == 0) {
             char *name = py_node_text(ctx, left);
             if (name) {
+                if (strcmp(ts_node_type(right), "identifier") == 0)
+                    py_resolve_value_reference(ctx, right);
                 const CBMType *t = py_eval_expr_type(ctx, right);
                 py_scope_bind(ctx, name, t);
             }

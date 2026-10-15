@@ -432,6 +432,17 @@ bool cbm_pxc_has_cross_lsp(CBMLanguage lang) {
  * resolved very many cross-calls turned the whole append into O(n^2) and could
  * peg a core for minutes (observed: an index hung in pxc_append_results/strcmp).
  * The key strings live in a scratch arena that is destroyed after the table. */
+/* Invocation rows dedup on (caller, callee). A reference row is tied to one
+ * source occurrence, so its site is part of the key and it never collides
+ * with an invocation of the same callee. */
+static char *pxc_result_key(CBMArena *keys, const CBMResolvedCall *rc) {
+    if (rc->kind == CBM_RESOLVED_CALL_REFERENCE) {
+        return cbm_arena_sprintf(keys, "%s\x1f%s\x1fR%u:%u", rc->caller_qn, rc->callee_qn,
+                                 rc->site_start_byte, rc->site_end_byte);
+    }
+    return cbm_arena_sprintf(keys, "%s\x1f%s", rc->caller_qn, rc->callee_qn);
+}
+
 static void pxc_append_results(CBMArena *dst_arena, CBMResolvedCallArray *dst_calls,
                                const CBMResolvedCallArray *src_out) {
     if (!dst_calls || !src_out)
@@ -444,7 +455,7 @@ static void pxc_append_results(CBMArena *dst_arena, CBMResolvedCallArray *dst_ca
     for (int i = 0; i < dst_calls->count; i++) {
         const CBMResolvedCall *rc = &dst_calls->items[i];
         if (rc->caller_qn && rc->callee_qn) {
-            char *k = cbm_arena_sprintf(&keys, "%s\x1f%s", rc->caller_qn, rc->callee_qn);
+            char *k = pxc_result_key(&keys, rc);
             if (k) {
                 cbm_ht_set(seen, k, (void *)1);
             }
@@ -455,7 +466,7 @@ static void pxc_append_results(CBMArena *dst_arena, CBMResolvedCallArray *dst_ca
         const CBMResolvedCall *src = &src_out->items[j];
         if (!src->caller_qn || !src->callee_qn)
             continue;
-        char *k = cbm_arena_sprintf(&keys, "%s\x1f%s", src->caller_qn, src->callee_qn);
+        char *k = pxc_result_key(&keys, src);
         if (k && cbm_ht_has(seen, k))
             continue;
         if (k) {
@@ -468,6 +479,9 @@ static void pxc_append_results(CBMArena *dst_arena, CBMResolvedCallArray *dst_ca
         dst.strategy = src->strategy ? cbm_arena_strdup(dst_arena, src->strategy) : NULL;
         dst.confidence = src->confidence;
         dst.reason = src->reason ? cbm_arena_strdup(dst_arena, src->reason) : NULL;
+        dst.kind = src->kind;
+        dst.site_start_byte = src->site_start_byte;
+        dst.site_end_byte = src->site_end_byte;
         cbm_resolvedcall_push(dst_calls, dst_arena, dst);
     }
 

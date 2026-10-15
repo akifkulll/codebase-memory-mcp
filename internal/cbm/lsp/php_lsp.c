@@ -1254,7 +1254,7 @@ static void emit_resolved_reason(PHPLSPContext *ctx, const char *callee_qn, cons
                                  float confidence, const char *reason) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
         return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {0};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = callee_qn;
     rc.strategy = strategy;
@@ -1271,7 +1271,7 @@ static void emit_resolved(PHPLSPContext *ctx, const char *callee_qn, const char 
 static void emit_unresolved(PHPLSPContext *ctx, const char *expr_text, const char *reason) {
     if (!ctx->resolved_calls || !ctx->enclosing_func_qn)
         return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {0};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";
@@ -1608,6 +1608,57 @@ static void resolve_static_call(PHPLSPContext *ctx, TSNode call) {
     emit_resolved(ctx, cbm_arena_sprintf(ctx->arena, "%s.%s", class_qn, method_name),
                   "php_static_unindexed", 0.55f);
 }
+
+/* Trailing name of a QN or callee text: after the last '.', '\\', ':' or '>'. */
+static const char *php_name_leaf(const char *s) {
+    const char *leaf = s;
+    for (const char *p = s; p && *p; p++) {
+        if (*p == '.' || *p == '\\' || *p == ':' || *p == '>')
+            leaf = p + 1;
+    }
+    return leaf;
+}
+
+/* `f(...)` / `$o->m(...)` / `C::m(...)` creates a Closure for the target
+ * without invoking it. Resolve it like the call, then retag the rows that
+ * name the target as CALL_REFERENCE at this occurrence. An unresolved target
+ * emits no row, so the occurrence stays USAGE (fail closed). Rows for other
+ * callees (calls nested in the receiver) stay invocations. */
+static void php_resolve_first_class_callable(PHPLSPContext *ctx, TSNode node) {
+    if (!ctx->resolved_calls)
+        return;
+    TSNode target = ts_node_child_by_field_name(node, "name", 4);
+    if (ts_node_is_null(target))
+        target = ts_node_child_by_field_name(node, "function", 8);
+    char *text = ts_node_is_null(target) ? NULL : php_node_text(ctx, target);
+    if (!text || !text[0])
+        return;
+    const char *name = php_name_leaf(text);
+    int before = ctx->resolved_calls->count;
+    const char *kind = ts_node_type(node);
+    if (strcmp(kind, "function_call_expression") == 0) {
+        resolve_function_call(ctx, node);
+    } else if (strcmp(kind, "scoped_call_expression") == 0) {
+        resolve_static_call(ctx, node);
+    } else {
+        resolve_member_call(ctx, node);
+    }
+    int out = before;
+    for (int i = before; i < ctx->resolved_calls->count; i++) {
+        CBMResolvedCall rc = ctx->resolved_calls->items[i];
+        bool names_target = rc.callee_qn && strcmp(php_name_leaf(rc.callee_qn), name) == 0;
+        if (names_target && rc.strategy && strcmp(rc.strategy, "lsp_unresolved") == 0)
+            continue;
+        if (names_target) {
+            rc.kind = CBM_RESOLVED_CALL_REFERENCE;
+            rc.site_start_byte = ts_node_start_byte(node);
+            rc.site_end_byte = ts_node_end_byte(node);
+        }
+        ctx->resolved_calls->items[out++] = rc;
+    }
+    ctx->resolved_calls->count = out;
+}
+
 
 /* ── type narrowing ─────────────────────────────────────────────────
  *
@@ -2159,7 +2210,9 @@ static void php_resolve_calls_in_node_inner(PHPLSPContext *ctx, TSNode node) {
     }
 
     /* Call-resolution dispatch. */
-    if (strcmp(kind, "function_call_expression") == 0) {
+    if (cbm_php_is_first_class_callable(node)) {
+        php_resolve_first_class_callable(ctx, node);
+    } else if (strcmp(kind, "function_call_expression") == 0) {
         resolve_function_call(ctx, node);
         /* assert(...) in current scope narrows sequentially. */
         apply_assert_narrowing(ctx, node);

@@ -1871,42 +1871,16 @@ static void extract_kotlin_desugared_calls(CBMExtractCtx *ctx, TSNode node, cons
     }
 }
 
-// Java method reference `Lhs::name` (e.g. `String::length`, `Foo::new`). The
-// call walk only visits call_expression-like nodes, so a method_reference never
-// becomes a call and the LSP's lsp_method_ref resolution has no call site to
-// attach to. Record a textual call to the referenced method's bare name (the
-// constructor ref `Lhs::new` uses the unnamed `new` token); the LSP join then
-// matches on the bare name. The referenced method IS invoked indirectly, so
-// this is an accurate call edge (mirrors java_lsp.c resolve_method_reference).
-static void extract_java_method_reference(CBMExtractCtx *ctx, TSNode node, const char *kind,
-                                          const char *enclosing_func_qn) {
-    if (strcmp(kind, "method_reference") != 0) {
-        return;
-    }
-    uint32_t nc = ts_node_named_child_count(node);
-    if (nc < 1) {
-        return;
-    }
-    char *mname = NULL;
-    if (nc >= 2) {
-        mname = cbm_node_text(ctx->arena, ts_node_named_child(node, nc - 1), ctx->source);
-    }
-    if (!mname || !mname[0]) {
-        mname = "new"; // constructor reference `Lhs::new` — `new` is unnamed
-    }
-    CBMCall call = {0};
-    call.callee_name = mname;
-    call.enclosing_func_qn = enclosing_func_qn;
-    call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
-    cbm_calls_push(&ctx->result->calls, ctx->arena, call);
-}
-
 void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state) {
     if (!spec->call_node_types || !spec->call_node_types[0]) {
         return;
     }
 
     if (cbm_kind_in_set(node, spec->call_node_types)) {
+        // PHP `f(...)` names f as a Closure; it is a CALL_REFERENCE usage, not a call.
+        if (ctx->language == CBM_LANG_PHP && cbm_php_is_first_class_callable(node)) {
+            return;
+        }
         char *callee = extract_callee_name(ctx->arena, node, ctx->source, ctx->language);
         // Keyword-filter callees, but keep builtins we mint a node for (len, str,
         // ...) so the LSP-resolved builtin call still forms a CALLS edge.
@@ -1986,10 +1960,6 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
 
     if (ctx->language == CBM_LANG_TSX || ctx->language == CBM_LANG_JAVASCRIPT) {
         extract_jsx_component_ref(ctx, node, ts_node_type(node), state->enclosing_func_qn);
-    }
-
-    if (ctx->language == CBM_LANG_JAVA) {
-        extract_java_method_reference(ctx, node, ts_node_type(node), state->enclosing_func_qn);
     }
 
     if (ctx->language == CBM_LANG_KOTLIN) {

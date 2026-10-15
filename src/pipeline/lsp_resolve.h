@@ -26,6 +26,7 @@
 #include "foundation/constants.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Confidence floor below which LSP-resolved calls are ignored and the
@@ -138,7 +139,7 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution(
     const CBMResolvedCall *best_exact = NULL;
     for (int i = 0; i < arr->count; i++) {
         const CBMResolvedCall *rc = &arr->items[i];
-        if (!rc->caller_qn || !rc->callee_qn) {
+        if (!rc->caller_qn || !rc->callee_qn || rc->kind != CBM_RESOLVED_INVOCATION) {
             continue;
         }
         if (rc->confidence < CBM_LSP_CONFIDENCE_FLOOR) {
@@ -168,8 +169,6 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution(
             if (!(rc->reason && rc->strategy &&
                   (strcmp(rc->strategy, "lsp_func_ptr") == 0 ||
                    strcmp(rc->strategy, "lsp_dll_resolve") == 0 ||
-                   strcmp(rc->strategy, "lsp_method_ref_ctor") == 0 ||
-                   strcmp(rc->strategy, "lsp_method_ref_ctor_synth") == 0 ||
                    strcmp(rc->strategy, "lsp_dict_dispatch") == 0 ||
                    strcmp(rc->strategy, "lsp_destructor") == 0 ||
                    strcmp(rc->strategy, "php_method_dynamic") == 0) &&
@@ -196,7 +195,7 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution(
     const CBMResolvedCall *best_tail = NULL;
     for (int i = 0; i < arr->count; i++) {
         const CBMResolvedCall *rc = &arr->items[i];
-        if (!rc->caller_qn || !rc->callee_qn) {
+        if (!rc->caller_qn || !rc->callee_qn || rc->kind != CBM_RESOLVED_INVOCATION) {
             continue;
         }
         if (rc->confidence < CBM_LSP_CONFIDENCE_FLOOR) {
@@ -291,6 +290,228 @@ static inline const cbm_gbuf_node_t *cbm_pipeline_lsp_target_node(const cbm_gbuf
         match = cand;
     }
     return match;
+}
+
+/* ── Callable references (CALL_REFERENCE) ─────────────────────────────────
+ *
+ * A function or method named as a value is a CALL_REFERENCE only when the
+ * language LSP proved one exact callable at that source occurrence. The
+ * semantic join is by (enclosing function, exact byte span of the reference
+ * token); the textual registry never earns CALL_REFERENCE, it only yields an
+ * ordinary USAGE. Reference rows never take part in the CALLS join. */
+
+/* Extraction marked this usage as a callable-reference candidate: explicit
+ * reference syntax, or a bare value in a narrow position (direct argument,
+ * assignment right-hand side) the language LSP knows how to prove. */
+static inline bool cbm_pipeline_usage_is_reference_candidate(const CBMUsage *usage) {
+    return usage && (usage->kind == CBM_USAGE_CALL_REFERENCE || usage->may_be_call_reference) &&
+           usage->site_end_byte > usage->site_start_byte;
+}
+
+/* Graph labels a CALL_REFERENCE may point at (a Class covers constructor
+ * references such as Java `Foo::new`). Anything else (a field, a variable, an
+ * interface) proved by the LSP still lands as USAGE. */
+static inline bool cbm_pipeline_node_is_callable_target(const cbm_gbuf_node_t *node) {
+    if (!node || !node->label) {
+        return false;
+    }
+    return strcmp(node->label, "Function") == 0 || strcmp(node->label, "Method") == 0 ||
+           strcmp(node->label, "Constructor") == 0 || strcmp(node->label, "Class") == 0;
+}
+
+/* Per-file index of CALL_REFERENCE rows sorted by site, so each candidate
+ * usage costs one binary search instead of a scan of every resolved row. */
+typedef struct {
+    const CBMResolvedCall **rows;
+    int count;
+} cbm_pipeline_ref_index_t;
+
+static inline int cbm_pipeline_ref_row_cmp(const void *a, const void *b) {
+    const CBMResolvedCall *l = *(const CBMResolvedCall *const *)a;
+    const CBMResolvedCall *r = *(const CBMResolvedCall *const *)b;
+    if (l->site_start_byte != r->site_start_byte) {
+        return l->site_start_byte < r->site_start_byte ? -1 : 1;
+    }
+    if (l->site_end_byte != r->site_end_byte) {
+        return l->site_end_byte < r->site_end_byte ? -1 : 1;
+    }
+    /* Stable order within one site: confidence ties keep the first row. */
+    return l < r ? -1 : (l > r ? 1 : 0);
+}
+
+/* Returns false only on allocation failure; the caller then finds no semantic
+ * row and every candidate stays USAGE (fail closed). */
+static inline bool cbm_pipeline_ref_index_build(const CBMResolvedCallArray *arr,
+                                                cbm_pipeline_ref_index_t *index) {
+    index->rows = NULL;
+    index->count = 0;
+    if (!arr || arr->count <= 0) {
+        return true;
+    }
+    int n = 0;
+    for (int i = 0; i < arr->count; i++) {
+        if (arr->items[i].kind == CBM_RESOLVED_CALL_REFERENCE) {
+            n++;
+        }
+    }
+    if (n == 0) {
+        return true;
+    }
+    const CBMResolvedCall **rows = (const CBMResolvedCall **)malloc((size_t)n * sizeof(*rows));
+    if (!rows) {
+        return false;
+    }
+    int k = 0;
+    for (int i = 0; i < arr->count; i++) {
+        if (arr->items[i].kind == CBM_RESOLVED_CALL_REFERENCE) {
+            rows[k++] = &arr->items[i];
+        }
+    }
+    qsort(rows, (size_t)n, sizeof(*rows), cbm_pipeline_ref_row_cmp);
+    index->rows = rows;
+    index->count = n;
+    return true;
+}
+
+static inline void cbm_pipeline_ref_index_free(cbm_pipeline_ref_index_t *index) {
+    free(index->rows);
+    index->rows = NULL;
+    index->count = 0;
+}
+
+/* Scan the rows sharing the usage's byte span. `tail` NULL requires the exact
+ * enclosing function; otherwise the caller's Class.method tail must match. */
+static inline const CBMResolvedCall *cbm_pipeline_ref_scan(const cbm_pipeline_ref_index_t *index,
+                                                           int first, const CBMUsage *usage,
+                                                           const char *tail) {
+    const char *ref_leaf = cbm_lsp_bare_segment(usage->ref_name);
+    const CBMResolvedCall *best = NULL;
+    for (int i = first; i < index->count; i++) {
+        const CBMResolvedCall *r = index->rows[i];
+        if (r->site_start_byte != usage->site_start_byte ||
+            r->site_end_byte != usage->site_end_byte) {
+            break;
+        }
+        if (!r->caller_qn || !r->callee_qn || r->confidence < CBM_LSP_CONFIDENCE_FLOOR) {
+            continue;
+        }
+        if (tail ? !cbm_pipeline_qn_class_method_tail_eq(r->caller_qn, tail)
+                 : strcmp(r->caller_qn, usage->enclosing_func_qn) != 0) {
+            continue;
+        }
+        /* The row must name this reference: the callee leaf, or `reason` for an
+         * alias (`cb` proven to hold `handler`). */
+        if (strcmp(cbm_lsp_bare_segment(r->callee_qn), ref_leaf) != 0 &&
+            !(r->reason && strcmp(cbm_lsp_bare_segment(r->reason), ref_leaf) == 0)) {
+            continue;
+        }
+        if (!best) {
+            best = r;
+        } else if (strcmp(best->callee_qn, r->callee_qn) != 0) {
+            return NULL; /* two targets at one occurrence: ambiguous, fail closed */
+        } else if (r->confidence > best->confidence) {
+            best = r;
+        }
+    }
+    return best;
+}
+
+/* The exact semantic row for one candidate usage, or NULL. Rows must share the
+ * usage's byte span and enclosing function and clear the confidence floor.
+ * JVM callers (allow_tail_match) may fall back to a Class.method tail match on
+ * the caller, the same rule the CALLS join uses for package-shaped LSP QNs. */
+static inline const CBMResolvedCall *cbm_pipeline_find_lsp_reference(
+    const cbm_pipeline_ref_index_t *index, const CBMUsage *usage, bool allow_tail_match) {
+    if (!index || index->count == 0 || !cbm_pipeline_usage_is_reference_candidate(usage) ||
+        !usage->enclosing_func_qn || !usage->ref_name) {
+        return NULL;
+    }
+    int lo = 0;
+    int hi = index->count;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        const CBMResolvedCall *r = index->rows[mid];
+        if (r->site_start_byte < usage->site_start_byte ||
+            (r->site_start_byte == usage->site_start_byte &&
+             r->site_end_byte < usage->site_end_byte)) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    const CBMResolvedCall *exact = cbm_pipeline_ref_scan(index, lo, usage, NULL);
+    if (exact || !allow_tail_match) {
+        return exact;
+    }
+    const char *tail = cbm_pipeline_qn_class_method_tail(usage->enclosing_func_qn);
+    return tail ? cbm_pipeline_ref_scan(index, lo, usage, tail) : NULL;
+}
+
+/* Rows that take part in the CALLS join. Count-based heuristics that compare
+ * LSP output with textual calls must not count reference rows. */
+static inline int cbm_pipeline_invocation_row_count(const CBMResolvedCallArray *arr) {
+    int n = 0;
+    for (int i = 0; arr && i < arr->count; i++) {
+        if (arr->items[i].kind == CBM_RESOLVED_INVOCATION) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* Outcome of the exact semantic join for one usage. */
+typedef enum {
+    CBM_REF_JOIN_NONE = 0, /* no LSP row at this occurrence: registry fallback decides */
+    CBM_REF_JOIN_CALLABLE, /* proven callable target: emit CALL_REFERENCE */
+    CBM_REF_JOIN_VALUE,    /* proven non-callable target: at most a USAGE */
+    CBM_REF_JOIN_SKIP,     /* a row owns the occurrence but its target is not in the
+                            * graph: emit nothing rather than guess by name */
+} cbm_ref_join_t;
+
+static inline cbm_ref_join_t cbm_pipeline_join_lsp_reference(
+    const cbm_gbuf_t *gbuf, const char *project_name, const cbm_pipeline_ref_index_t *index,
+    const CBMUsage *usage, bool allow_tail_match, const cbm_gbuf_node_t **out_target) {
+    *out_target = NULL;
+    const CBMResolvedCall *row = cbm_pipeline_find_lsp_reference(index, usage, allow_tail_match);
+    if (!row) {
+        return CBM_REF_JOIN_NONE;
+    }
+    const cbm_gbuf_node_t *tgt =
+        cbm_pipeline_lsp_target_node(gbuf, project_name, row->callee_qn, allow_tail_match);
+    if (!tgt) {
+        return CBM_REF_JOIN_SKIP;
+    }
+    *out_target = tgt;
+    return cbm_pipeline_node_is_callable_target(tgt) ? CBM_REF_JOIN_CALLABLE : CBM_REF_JOIN_VALUE;
+}
+
+/* Registry fallback for a usage the LSP did not prove. A candidate emitted
+ * only for the join (reference_only) never falls back. Explicit JVM reference
+ * syntax may not bind by a bare-name guess (unique_name / suffix_match),
+ * except a Kotlin `::name` whose spelling the file imports. */
+static inline bool cbm_pipeline_reference_fallback_allowed(CBMLanguage lang, const CBMUsage *usage,
+                                                           const char *strategy,
+                                                           const char *const *import_names,
+                                                           int import_count) {
+    if (usage->reference_only) {
+        return false;
+    }
+    if (usage->kind != CBM_USAGE_CALL_REFERENCE ||
+        (lang != CBM_LANG_JAVA && lang != CBM_LANG_KOTLIN)) {
+        return true;
+    }
+    if (strategy && strategy[0] && strcmp(strategy, "unique_name") != 0 &&
+        strcmp(strategy, "suffix_match") != 0) {
+        return true;
+    }
+    if (lang == CBM_LANG_KOTLIN && usage->ref_name && import_names) {
+        for (int i = 0; i < import_count; i++) {
+            if (import_names[i] && strcmp(import_names[i], usage->ref_name) == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 #endif /* CBM_PIPELINE_LSP_RESOLVE_H */

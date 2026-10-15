@@ -3545,6 +3545,73 @@ static void rust_emit_unresolved_call(RustLSPContext *ctx, const char *expr_text
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
 }
 
+/* Resolve the callee of a path used as a value (`map(handler)`,
+ * `map(Foo::new)`): a registered free function, or an inherent associated
+ * function. Trait dispatch is not attempted — an unproven path stays USAGE. */
+static const char *rust_resolve_value_path(RustLSPContext *ctx, char *path) {
+    rust_strip_turbofish(path);
+    const char *qn = rust_resolve_path_expr(ctx, path);
+    if (!qn)
+        return NULL;
+    if (cbm_registry_lookup_func(ctx->registry, qn))
+        return qn;
+    if (ctx->module_qn && strstr(qn, ".") == NULL) {
+        const char *full = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, qn);
+        return cbm_registry_lookup_func(ctx->registry, full) ? full : NULL;
+    }
+    const char *dot = strrchr(qn, '.');
+    if (!dot)
+        return NULL;
+    char *head = cbm_arena_strndup(ctx->arena, qn, (size_t)(dot - qn));
+    const CBMRegisteredType *head_t = cbm_registry_lookup_type(ctx->registry, head);
+    if (head_t && head_t->is_interface)
+        return NULL;
+    const CBMRegisteredFunc *m = cbm_registry_lookup_method_aliased(ctx->registry, head, dot + 1);
+    if (!m && ctx->module_qn) {
+        const char *full_head = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, head);
+        const CBMRegisteredType *ft = cbm_registry_lookup_type(ctx->registry, full_head);
+        if (ft && ft->is_interface)
+            return NULL;
+        m = cbm_registry_lookup_method_aliased(ctx->registry, full_head, dot + 1);
+    }
+    return m ? m->qualified_name : NULL;
+}
+
+/* A function path passed directly as an argument is a CALL_REFERENCE at that
+ * occurrence; a local binding of the same name shadows it (fail closed). */
+static void rust_resolve_argument_references(RustLSPContext *ctx, TSNode call) {
+    if (!ctx->resolved_calls || !ctx->enclosing_func_qn)
+        return;
+    TSNode args = ts_node_child_by_field_name(call, "arguments", 9);
+    if (ts_node_is_null(args))
+        return;
+    uint32_t n = ts_node_named_child_count(args);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode arg = ts_node_named_child(args, i);
+        const char *ak = ts_node_type(arg);
+        bool is_ident = strcmp(ak, "identifier") == 0;
+        if (!is_ident && strcmp(ak, "scoped_identifier") != 0)
+            continue;
+        char *path = rust_node_text(ctx, arg);
+        if (!path || !path[0])
+            continue;
+        if (is_ident && cbm_scope_binds_local(ctx->current_scope, path))
+            continue;
+        const char *qn = rust_resolve_value_path(ctx, path);
+        if (!qn)
+            continue;
+        CBMResolvedCall rc = {0};
+        rc.caller_qn = ctx->enclosing_func_qn;
+        rc.callee_qn = qn;
+        rc.strategy = "lsp_func_value_reference";
+        rc.confidence = CBM_RUST_CONF_DIRECT;
+        rc.kind = CBM_RESOLVED_CALL_REFERENCE;
+        rc.site_start_byte = ts_node_start_byte(arg);
+        rc.site_end_byte = ts_node_end_byte(arg);
+        cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
+    }
+}
+
 /* Entry hook: classify a call_expression and emit the best edge we can. */
 static void rust_resolve_call_expression(RustLSPContext *ctx, TSNode node) {
     TSNode func_node = ts_node_child_by_field_name(node, "function", 8);
@@ -3930,6 +3997,7 @@ static void rust_resolve_calls_in_node(RustLSPContext *ctx, TSNode node) {
 
     /* Resolve a call expression. */
     if (strcmp(kind, "call_expression") == 0) {
+        rust_resolve_argument_references(ctx, node);
         rust_resolve_call_expression(ctx, node);
         /* Closure-parameter inference: when the call is a known
          * iterator-style method that takes a closure of `Item`, stash

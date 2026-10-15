@@ -72,3 +72,19 @@ const CBMType* cbm_scope_lookup(const CBMScope* scope, const char* name) {
     }
     return cbm_type_unknown();
 }
+
+bool cbm_scope_binds_local(const CBMScope* scope, const char* name) {
+    if (!name) {
+        return false;
+    }
+    for (const CBMScope* s = scope; s != NULL && s->parent != NULL; s = s->parent) {
+        for (CBMScopeChunk* c = s->chunks; c != NULL; c = c->next) {
+            for (int i = 0; i < c->used; i++) {
+                if (c->bindings[i].name && strcmp(c->bindings[i].name, name) == 0) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}

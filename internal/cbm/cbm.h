@@ -246,9 +246,20 @@ typedef struct {
     const char *module_path; // resolved module path / QN
 } CBMImport;
 
+typedef enum {
+    CBM_USAGE_VALUE = 0,      // ordinary value reference
+    CBM_USAGE_CALL_REFERENCE, // explicit callable-reference syntax (Java A::m)
+} CBMUsageKind;
+
 typedef struct {
     const char *ref_name;          // referenced identifier
     const char *enclosing_func_qn; // QN of enclosing function (or module QN)
+    uint32_t site_start_byte;      // exact reference-token span; end > start when present
+    uint32_t site_end_byte;        // exclusive byte offset in the source file
+    CBMUsageKind kind;             // ordinary USAGE or explicit callable reference
+    bool may_be_call_reference;    // syntactic candidate; exact LSP proof may upgrade its edge
+    bool reference_only;           // emitted only as a candidate (inside a call): no USAGE
+                                   // fallback when the LSP proves nothing
 } CBMUsage;
 
 typedef struct {
@@ -325,13 +336,22 @@ typedef struct {
     const char *struct_name; // struct/type name (raw text)
 } CBMImplTrait;
 
-// LSP-resolved call: high-confidence type-aware call resolution
+typedef enum {
+    CBM_RESOLVED_INVOCATION = 0, // a call: joins CBMCall records into CALLS
+    CBM_RESOLVED_CALL_REFERENCE, // a callable named as a value: joins CBMUsage records
+                                 // by exact site into CALL_REFERENCE
+} CBMResolvedKind;
+
+// LSP-resolved invocation/reference: high-confidence type-aware resolution
 typedef struct {
-    const char *caller_qn; // enclosing function QN
-    const char *callee_qn; // resolved target QN (fully qualified)
-    const char *strategy;  // "lsp_type_dispatch", "lsp_direct", etc.
-    float confidence;      // 0.90-0.95
-    const char *reason;    // diagnostic label for unresolved calls (NULL if resolved)
+    const char *caller_qn;    // enclosing function QN
+    const char *callee_qn;    // resolved target QN (fully qualified)
+    const char *strategy;     // "lsp_type_dispatch", "lsp_direct", etc.
+    float confidence;         // 0.90-0.95
+    const char *reason;       // diagnostic label for unresolved calls (NULL if resolved)
+    CBMResolvedKind kind;     // invocation (CALLS) or callable reference
+    uint32_t site_start_byte; // reference rows: exact source occurrence (end > start)
+    uint32_t site_end_byte;   // exclusive byte offset in the source file
 } CBMResolvedCall;
 
 typedef struct {

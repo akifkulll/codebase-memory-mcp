@@ -454,6 +454,27 @@ static ks_slot_t *ks_get(const TSLanguage *lang, const char *const *types) {
     return NULL;
 }
 
+bool cbm_php_is_first_class_callable(TSNode node) {
+    const char *kind = ts_node_type(node);
+    if (strcmp(kind, "function_call_expression") != 0 &&
+        strcmp(kind, "member_call_expression") != 0 &&
+        strcmp(kind, "nullsafe_member_call_expression") != 0 &&
+        strcmp(kind, "scoped_call_expression") != 0) {
+        return false;
+    }
+    TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
+    if (ts_node_is_null(args)) {
+        return false;
+    }
+    uint32_t n = ts_node_named_child_count(args);
+    for (uint32_t i = 0; i < n; i++) {
+        if (strcmp(ts_node_type(ts_node_named_child(args, i)), "variadic_placeholder") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool cbm_kind_in_set(TSNode node, const char **types) {
     if (!types || !types[0]) {
         return false;

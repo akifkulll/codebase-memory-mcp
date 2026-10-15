@@ -56,11 +56,20 @@ typedef struct {
 
     // Recursion guard for ts_eval_expr_type (mirrors c_lsp).
     int eval_depth;
+    // Expression-type memo: node.id -> evaluated type (lazily created on the
+    // first completed eval; see TsEvalMemo in ts_lsp.c). Kills the exponential
+    // re-evaluation of shared subexpressions under overload resolution.
+    struct TsEvalMemo *eval_memo;
     // Recursion guard for lookup_member_type: cyclic type graphs (mutually
     // recursive unions/wrappers across registered types) otherwise recurse
     // without bound — stack overflow on real repos.
     int member_depth;
 } TSLSPContext;
+
+// Expression evaluations that actually ran (memo hits excluded) on the calling
+// thread since its last TS LSP entry point began. A deterministic work counter
+// for complexity-regression tests.
+unsigned long cbm_ts_lsp_eval_entries(void);
 
 // --- Initialization ---
 

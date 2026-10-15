@@ -57,5 +57,9 @@ CBMScope* cbm_scope_push(CBMArena* a, CBMScope* current);
 CBMScope* cbm_scope_pop(CBMScope* scope);
 void cbm_scope_bind(CBMScope* scope, const char* name, const CBMType* type);
 const CBMType* cbm_scope_lookup(const CBMScope* scope, const char* name);
+// True when `name` is bound in `scope` or an enclosing scope other than the
+// outermost (module) scope, whatever its type: a local or parameter that
+// shadows a module-level symbol of the same name.
+bool cbm_scope_binds_local(const CBMScope* scope, const char* name);
 
 #endif // CBM_LSP_SCOPE_H
