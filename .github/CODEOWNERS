@@ -48,7 +48,6 @@
 /src/git/ @DeusData
 /src/semantic/ @DeusData
 /src/simhash/ @DeusData
-/src/traces/ @DeusData
 
 # Extraction and language support.
 /internal/cbm/ @DeusData

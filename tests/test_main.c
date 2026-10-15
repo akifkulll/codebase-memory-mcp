@@ -284,7 +284,6 @@ extern void suite_java_lsp_coverage(void);
 extern void suite_kotlin_lsp(void);
 extern void suite_rust_lsp(void);
 extern void suite_store_arch(void);
-extern void suite_traces(void);
 extern void suite_configlink(void);
 extern void suite_infrascan(void);
 extern void suite_cli(void);
@@ -506,7 +505,6 @@ int main(int argc, char **argv) {
     /* HTTP link */
 
     /* Traces helpers */
-    RUN_SELECTED_SUITE(traces);
 
     /* Config link */
     RUN_SELECTED_SUITE(configlink);

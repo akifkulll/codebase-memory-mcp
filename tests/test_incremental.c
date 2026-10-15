@@ -1901,27 +1901,6 @@ TEST(tool_detect_changes_depth) {
     PASS();
 }
 
-/* ── ingest_traces ─────────────────────────────────────────────── */
-
-TEST(tool_ingest_traces_empty) {
-    double ms;
-    char *r =
-        call_tool_timed("ingest_traces", &ms, "{\"project\":\"%s\",\"traces\":[]}", g_project);
-    TOOL_OK(r, ms);
-    free(r);
-    PASS();
-}
-
-TEST(tool_ingest_traces_basic) {
-    double ms;
-    char *r = call_tool_timed(
-        "ingest_traces", &ms,
-        "{\"project\":\"%s\",\"traces\":[{\"caller\":\"a\",\"callee\":\"b\"}]}", g_project);
-    TOOL_OK(r, ms);
-    free(r);
-    PASS();
-}
-
 /* ── Error handling: every tool with bad project ───────────────── */
 
 TEST(tool_err_query_bad_project) {
@@ -2297,22 +2276,6 @@ TEST(tool_arch_multi_aspects) {
 TEST(tool_detect_changes_scope) {
     double ms;
     char *r = call_tool_timed("detect_changes", &ms, "{\"project\":\"%s\",\"scope\":\"fastapi/\"}",
-                              g_project);
-    TOOL_OK(r, ms);
-    free(r);
-    PASS();
-}
-
-/* ── ingest_traces: multiple traces ────────────────────────────── */
-
-TEST(tool_ingest_traces_multiple) {
-    double ms;
-    char *r = call_tool_timed("ingest_traces", &ms,
-                              "{\"project\":\"%s\",\"traces\":["
-                              "{\"caller\":\"funcA\",\"callee\":\"funcB\",\"count\":5},"
-                              "{\"caller\":\"funcB\",\"callee\":\"funcC\",\"count\":3},"
-                              "{\"caller\":\"funcC\",\"callee\":\"funcD\",\"count\":1}"
-                              "]}",
                               g_project);
     TOOL_OK(r, ms);
     free(r);
@@ -2737,18 +2700,6 @@ TEST(tool_detect_depth_1) {
     PASS();
 }
 
-/* ── ingest_traces: trace with missing fields ──────────────────── */
-
-TEST(tool_ingest_traces_partial) {
-    double ms;
-    char *r =
-        call_tool_timed("ingest_traces", &ms,
-                        "{\"project\":\"%s\",\"traces\":[{\"caller\":\"onlyA\"}]}", g_project);
-    TOOL_OK(r, ms);
-    free(r);
-    PASS();
-}
-
 /* ── Error: get_graph_schema bad project ───────────────────────── */
 
 TEST(tool_err_schema_bad_project) {
@@ -2764,27 +2715,6 @@ TEST(tool_err_schema_bad_project) {
 TEST(tool_err_index_status_no_project) {
     double ms;
     char *r = call_tool_timed("index_status", &ms, "{}");
-    TOOL_OK(r, ms);
-    free(r);
-    PASS();
-}
-
-/* ── Error: ingest_traces bad project ──────────────────────────── */
-
-TEST(tool_err_ingest_bad_project) {
-    double ms;
-    char *r =
-        call_tool_timed("ingest_traces", &ms, "{\"project\":\"nonexistent-xyz\",\"traces\":[]}");
-    TOOL_OK(r, ms);
-    free(r);
-    PASS();
-}
-
-/* ── Error: ingest_traces missing traces array ─────────────────── */
-
-TEST(tool_err_ingest_no_traces) {
-    double ms;
-    char *r = call_tool_timed("ingest_traces", &ms, "{\"project\":\"%s\"}", g_project);
     TOOL_OK(r, ms);
     free(r);
     PASS();
@@ -3114,10 +3044,6 @@ SUITE(incremental) {
     RUN_TEST(tool_detect_changes_since_precedence);
     RUN_TEST(tool_detect_changes_depth);
 
-    /* Phase 17: ingest_traces */
-    RUN_TEST(tool_ingest_traces_empty);
-    RUN_TEST(tool_ingest_traces_basic);
-
     /* Phase 18: Error handling — every tool with bad project */
     RUN_TEST(tool_err_query_bad_project);
     RUN_TEST(tool_err_search_code_bad_project);
@@ -3162,9 +3088,6 @@ SUITE(incremental) {
 
     /* Phase 25: detect_changes scope */
     RUN_TEST(tool_detect_changes_scope);
-
-    /* Phase 27: ingest_traces multiple */
-    RUN_TEST(tool_ingest_traces_multiple);
 
     /* Phase 28: trace_path edge_types combos */
     RUN_TEST(tool_trace_imports_only);
@@ -3214,14 +3137,9 @@ SUITE(incremental) {
     RUN_TEST(tool_detect_nonexistent_branch);
     RUN_TEST(tool_detect_depth_1);
 
-    /* Phase 38: ingest_traces remaining */
-    RUN_TEST(tool_ingest_traces_partial);
-
     /* Phase 39: error handling remaining tools */
     RUN_TEST(tool_err_schema_bad_project);
     RUN_TEST(tool_err_index_status_no_project);
-    RUN_TEST(tool_err_ingest_bad_project);
-    RUN_TEST(tool_err_ingest_no_traces);
 
     /* Phase 40: index_repository mode=full + arch empty aspects */
     RUN_TEST(tool_index_mode_full);

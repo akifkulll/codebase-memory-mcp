@@ -309,7 +309,7 @@ Add to `~/.claude/.mcp.json` (global) or project `.mcp.json`:
 }
 ```
 
-Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` with 14 tools.
+Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` with 15 tools.
 
 </details>
 
@@ -486,7 +486,6 @@ promotion tests, not routine development tests.
 | `compare_graphs` | Bounded diff of nodes and edges added and removed between two indexed projects. |
 | `get_architecture` | Codebase overview: languages, packages, routes, hotspots, clusters. |
 | `search_code` | Grep-like text search within indexed project files. |
-| `ingest_traces` | Ingest runtime traces to validate HTTP_CALLS edges. |
 
 `search_graph`, `query_graph`, `trace_path`, `search_code`, `get_architecture`, `list_projects` and
 `check_index_coverage` accept `format: "compact"`, which returns indented text with tabular rows and
@@ -677,7 +676,7 @@ Also supported (not yet benchmarked): Ada, Agda, Apex, Assembly (NASM), Astro, A
 ```
 src/
   main.c              Entry point (MCP stdio server + CLI + install/update/config)
-  mcp/                MCP server (14 tools, JSON-RPC 2.0, session detection, auto-index)
+  mcp/                MCP server (15 tools, JSON-RPC 2.0, session detection, auto-index)
   cli/                Install/uninstall/update/config (10 agents, hooks, instructions)
   store/              Query/storage compatibility layer and cross-workspace search
   zova/               Shared database, native graph/vector publication, migration, and operations
@@ -685,7 +684,6 @@ src/
   cypher/             Cypher query lexer, parser, planner, executor
   discover/           File discovery (.gitignore, .cbmignore, symlink handling)
   watcher/            Background auto-sync (git polling, adaptive intervals)
-  traces/             Runtime trace ingestion
   foundation/         Platform abstractions (threads, filesystem, logging, memory)
 internal/cbm/         Vendored tree-sitter grammars (158 languages) + AST extraction engine
 ```
