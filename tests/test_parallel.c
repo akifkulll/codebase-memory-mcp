@@ -153,7 +153,7 @@ static cbm_gbuf_t *run_parallel_with_extract_opts(const char *project, const cha
     char **def_modules = (char **)calloc((size_t)file_count, sizeof(char *));
     int def_count = 0;
     CBMLSPDef *all_defs = def_modules
-                              ? cbm_pxc_collect_all_defs(result_cache, files, file_count,
+                              ? cbm_pxc_collect_all_defs(&ctx, result_cache, files, file_count,
                                                          ctx.project_name, def_modules, &def_count)
                               : NULL;
     CBMModuleDefIndex *module_def_index =
