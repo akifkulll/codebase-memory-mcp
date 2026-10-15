@@ -11,6 +11,8 @@
 #ifndef CBM_SERVICE_PATTERNS_H
 #define CBM_SERVICE_PATTERNS_H
 
+#include <stdbool.h>
+
 /* Edge type returned by pattern match. */
 typedef enum {
     CBM_SVC_NONE = 0,      /* Not a service pattern — use normal CALLS */
@@ -31,6 +33,10 @@ void cbm_service_patterns_init(void);
  * Matches on library name substrings in the QN (e.g., "requests" in
  * "project.venv.requests.api.get"). Import-alias transparent. */
 cbm_svc_kind_t cbm_service_pattern_match(const char *resolved_qn);
+
+/* True when a string literal is a plausible HTTP route for the given callee.
+ * Rejects filesystem paths and non-HTTP string consumers. */
+bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *callee_name);
 
 /* Per-worker TLS cache for cbm_service_pattern_match results. The
  * pattern matcher runs once per resolved CALL edge in emit_service_

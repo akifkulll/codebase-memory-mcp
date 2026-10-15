@@ -16,8 +16,6 @@
 enum { LEAN_MAX_PARENT_DEPTH = 20 };
 /* Max positional args to scan for URL/string. */
 enum { MAX_POSITIONAL_SCAN = 3 };
-/* Max positional args to scan for handler ref. */
-enum { MAX_HANDLER_SCAN = 4 };
 /* Max string arg length before rejection. */
 enum { MAX_STRING_ARG_LEN = CBM_SZ_512 };
 /* Min printable ASCII (space). */
@@ -25,14 +23,29 @@ enum { MIN_PRINTABLE = 0x20 };
 /* Handler arg scan start index (skip first positional). */
 enum { HANDLER_START_IDX = 1 };
 
-/* Look up a module-level string constant by name. */
+/* Look up a module-level string constant by name. URL-builder entries share the
+ * map but are not constants: a bare `thingPath` reference is the function, not
+ * the URL it would build (issue #1009). */
 static const char *lookup_string_constant(const CBMExtractCtx *ctx, const char *name) {
     if (!name || !name[0]) {
         return NULL;
     }
     const CBMStringConstantMap *map = &ctx->string_constants;
     for (int i = 0; i < map->count; i++) {
-        if (strcmp(map->names[i], name) == 0) {
+        if (!map->is_url_builder[i] && strcmp(map->names[i], name) == 0) {
+            return map->values[i];
+        }
+    }
+    return NULL;
+}
+
+static const char *lookup_url_builder(const CBMExtractCtx *ctx, const char *name) {
+    if (!name || !name[0]) {
+        return NULL;
+    }
+    const CBMStringConstantMap *map = &ctx->string_constants;
+    for (int i = 0; i < map->count; i++) {
+        if (map->is_url_builder[i] && strcmp(map->names[i], name) == 0) {
             return map->values[i];
         }
     }
@@ -1367,8 +1380,22 @@ static void extract_call_args(CBMExtractCtx *ctx, TSNode args, CBMCall *call) {
             ca->index = positional_idx++;
             if (is_string_like(ak) && ca->expr) {
                 ca->value = strip_quotes(ctx->arena, ca->expr);
+            } else if (strcmp(ak, "template_string") == 0) {
+                /* Flattened {} form so downstream url-arg detection joins the
+                 * canonical server route shape (issue #1006/#1009). */
+                ca->value = cbm_template_string_text(ctx->arena, arg_node, ctx->source);
             } else if (strcmp(ak, "identifier") == 0 && ca->expr) {
                 ca->value = lookup_string_constant(ctx, ca->expr);
+            } else if (strcmp(ak, "call_expression") == 0) {
+                /* URL-builder helper call (issue #1009): resolve
+                 * client(buildPath(id)) through the per-file builder map. */
+                TSNode fn = ts_node_child_by_field_name(arg_node, TS_FIELD("function"));
+                if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "identifier") == 0) {
+                    char *fname = cbm_node_text(ctx->arena, fn, ctx->source);
+                    if (fname) {
+                        ca->value = lookup_url_builder(ctx, fname);
+                    }
+                }
             }
             call->arg_count++;
         }
@@ -1609,6 +1636,19 @@ static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args) {
             }
         }
 
+        /* URL-builder helper call (issue #1009): `client(buildPath(id))` — the
+         * builder's returned URL was recorded in the per-file constant map. */
+        if (strcmp(ak, "call_expression") == 0) {
+            TSNode fn = ts_node_child_by_field_name(arg, TS_FIELD("function"));
+            if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "identifier") == 0) {
+                char *fname = cbm_node_text(ctx->arena, fn, ctx->source);
+                const char *val = fname ? lookup_url_builder(ctx, fname) : NULL;
+                if (val) {
+                    return val;
+                }
+            }
+        }
+
         if (ai < MAX_POSITIONAL_SCAN) {
             const char *val = extract_positional_url(ctx, arg, ak);
             if (val) {
@@ -1637,8 +1677,17 @@ static const char *normalize_string_handler(CBMArena *a, const char *raw) {
 }
 
 static const char *extract_handler_arg(CBMExtractCtx *ctx, TSNode args) {
+    /* The LAST eligible argument wins, and every argument is examined.
+     * Express, Fastify, gin and Laravel all put middleware between the route
+     * path and the handler, so the first function-shaped argument is usually a
+     * middleware. Taking the first one pointed the HANDLES edge at the
+     * middleware; stopping the scan early missed the handler outright when the
+     * middleware was written inline, because an arrow function matches none of
+     * the kinds below. Nothing that follows a handler matches them either — an
+     * options argument is an object node — so the last match is the handler. */
+    const char *handler = NULL;
     uint32_t nc = ts_node_named_child_count(args);
-    for (uint32_t ai = HANDLER_START_IDX; ai < nc && ai < MAX_HANDLER_SCAN; ai++) {
+    for (uint32_t ai = HANDLER_START_IDX; ai < nc; ai++) {
         TSNode arg2 = ts_node_named_child(args, ai);
         /* PHP wraps each argument in an `argument` node — unwrap to the value. */
         if (strcmp(ts_node_type(arg2), "argument") == 0 && ts_node_named_child_count(arg2) > 0) {
@@ -1650,17 +1699,18 @@ static const char *extract_handler_arg(CBMExtractCtx *ctx, TSNode args) {
         if (strcmp(ak2, "identifier") == 0 || strcmp(ak2, "member_expression") == 0 ||
             strcmp(ak2, "selector_expression") == 0 || strcmp(ak2, "attribute") == 0 ||
             strcmp(ak2, "field_expression") == 0 || strcmp(ak2, "name") == 0) {
-            return cbm_node_text(ctx->arena, arg2, ctx->source);
+            handler = cbm_node_text(ctx->arena, arg2, ctx->source);
+            continue;
         }
         if (is_string_like(ak2)) {
             const char *h =
                 normalize_string_handler(ctx->arena, cbm_node_text(ctx->arena, arg2, ctx->source));
             if (h && h[0]) {
-                return h;
+                handler = h;
             }
         }
     }
-    return NULL;
+    return handler;
 }
 
 // Extract JSX component refs (uppercase tags) as CALLS edges.
