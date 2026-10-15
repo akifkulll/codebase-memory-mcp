@@ -529,6 +529,54 @@ TEST(callref_bfs_workspace_matches_sqlite) {
     PASS();
 }
 
+/* "name@hop" per (node, hop) pair of a CALLS trail walk. */
+static void crf_trail_sig(cbm_store_t *store, int64_t start, char *buf, size_t size) {
+    const char *types[] = {"CALLS"};
+    cbm_traverse_result_t tr = {0};
+    int len = snprintf(buf, size, "rc=%d", cbm_store_bfs_trail(store, start, "outbound", types, 1,
+                                                               2, 100, &tr));
+    for (int i = 0; i < tr.visited_count; i++)
+        len += snprintf(buf + len, size - (size_t)len, " %s@%d", tr.visited[i].node.name,
+                        tr.visited[i].hop);
+    len += snprintf(buf + len, size - (size_t)len, " truncated=%d", tr.truncated);
+    cbm_store_traverse_free(&tr);
+}
+
+/* The Cypher trail walk gives the same (node, hop) pairs on a Zova workspace
+ * store as on SQLite: c is reached at hop 1 directly and at hop 2 through b. */
+TEST(callref_bfs_trail_workspace_matches_sqlite) {
+    RProj lp;
+    cbm_store_t *store = crf_index1(&lp, "main.ts",
+                                    "function c(): void {}\n"
+                                    "function b(): void { c(); }\n"
+                                    "function a(): void { b(); c(); }\n");
+    ASSERT_NOT_NULL(store);
+    cbm_store_t *sql = cbm_store_open_memory();
+    cbm_store_upsert_project(sql, lp.project, lp.tmpdir);
+    int64_t ids[64][2];
+    int nids = 0;
+    crf_copy_edges(store, lp.project, "CALLS", sql, ids, &nids);
+    int64_t start_ws = 0, start_sql = 0;
+    for (int j = 0; j < nids; j++) {
+        cbm_node_t node = {0};
+        if (cbm_store_find_node_by_id(store, ids[j][0], &node) == CBM_STORE_OK && node.name &&
+            strcmp(node.name, "a") == 0) {
+            start_ws = ids[j][0];
+            start_sql = ids[j][1];
+        }
+        cbm_node_free_fields(&node);
+    }
+    char ws[512], lite[512];
+    crf_trail_sig(store, start_ws, ws, sizeof(ws));
+    crf_trail_sig(sql, start_sql, lite, sizeof(lite));
+    fprintf(stderr, "  [trail] workspace: %s\n  [trail] sqlite:    %s\n", ws, lite);
+    cbm_store_close(sql);
+    rh_cleanup(&lp, store);
+    ASSERT_STR_EQ(ws, "rc=0 b@1 c@1 c@2 truncated=0");
+    ASSERT_STR_EQ(lite, ws);
+    PASS();
+}
+
 /* Every strategy a CALL_REFERENCE row can carry maps to a known class. */
 TEST(callref_strategy_class_vocabulary) {
     static const char *const lsp[] = {
@@ -572,5 +620,6 @@ SUITE(call_reference) {
     RUN_TEST(callref_trace_path_include_evidence);
     RUN_TEST(callref_trace_calls_only_include_evidence);
     RUN_TEST(callref_bfs_workspace_matches_sqlite);
+    RUN_TEST(callref_bfs_trail_workspace_matches_sqlite);
     RUN_TEST(callref_strategy_class_vocabulary);
 }

@@ -162,6 +162,8 @@ typedef struct {
     int visited_count;
     cbm_edge_info_t *edges;
     int edge_count;
+    /* cbm_store_bfs_trail only: the row budget or max_results cut the walk. */
+    bool truncated;
 } cbm_traverse_result_t;
 
 /* ── Schema introspection ───────────────────────────────────────── */
@@ -405,6 +407,13 @@ int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const
 int cbm_store_bfs_with_edges(cbm_store_t *s, int64_t start_id, const char *direction,
                              const char **edge_types, int edge_type_count, int max_depth,
                              int max_results, cbm_traverse_result_t *out);
+
+/* Variable-length Cypher traversal with relationship-trail semantics: every
+ * (node, hop) pair some edge-distinct path reaches, ordered by hop. Bounded by
+ * a row budget; out->truncated reports a cut walk. Fills no edges. */
+int cbm_store_bfs_trail(cbm_store_t *s, int64_t start_id, const char *direction,
+                        const char **edge_types, int edge_type_count, int max_depth,
+                        int max_results, cbm_traverse_result_t *out);
 
 /* Free a traverse result's allocated memory. */
 void cbm_store_traverse_free(cbm_traverse_result_t *out);

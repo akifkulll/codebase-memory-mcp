@@ -3726,6 +3726,194 @@ int cbm_store_bfs_with_edges(cbm_store_t *s, int64_t start_id, const char *direc
                      true, out);
 }
 
+/* ── Relationship-trail walk for Cypher variable-length paths ──────
+ *
+ * cbm_store_bfs reports each node once, at its shortest distance. A Cypher
+ * pattern such as [:CALLS*2..2] asks for paths of length 2, which may reach a
+ * node whose shortest distance is 1, and must not reuse a relationship (a
+ * self-loop cannot pad a path). So this walk reports every (node, hop) pair
+ * that some edge-distinct path reaches.
+ *
+ * Path enumeration is exponential, so the walk has a row budget: every node
+ * entered on a path counts one row, the start included. It goes deepest first
+ * and, among siblings, lower node id first, so a wide first hop cannot use up
+ * the budget before a deeper match is seen (upstream 0c5ffa50, 0d97729c,
+ * cd22487c). It reads edges through cbm_store_find_edges_by_{source,target},
+ * so the SQLite, Zova workspace and query-backend stores share one semantics. */
+enum { ST_TRAIL_ROW_MULTIPLIER = 8, ST_TRAIL_MAX_ROWS = 4096 };
+
+static int trail_row_limit(int max_results, int max_depth) {
+    long base = (long)(max_results > 0 ? max_results : ST_INIT_CAP_16) * ST_TRAIL_ROW_MULTIPLIER +
+                SKIP_ONE;
+    long rows = base * (max_depth > 0 ? max_depth : ST_INIT_CAP_16);
+    return rows > ST_TRAIL_MAX_ROWS ? ST_TRAIL_MAX_ROWS : (int)rows;
+}
+
+typedef struct {
+    int64_t node;
+    int64_t *next; /* selected neighbours, lower id first */
+    int count;
+} trail_adj_t;
+
+typedef struct {
+    int adj;    /* index into the adjacency cache */
+    int cursor; /* next neighbour to try; the edge taken to reach the child is cursor - 1 */
+} trail_frame_t;
+
+static int trail_next_order(const void *a, const void *b) {
+    int64_t x = *(const int64_t *)a;
+    int64_t y = *(const int64_t *)b;
+    return x < y ? -1 : (x > y);
+}
+
+/* Index of node's adjacency in the cache, loading it on first use. */
+static int trail_adjacency(cbm_store_t *s, trail_adj_t **cache, int *count, int *cap,
+                           int64_t node, bool inbound, const char **edge_types,
+                           int edge_type_count, int *rc) {
+    for (int i = 0; i < *count; i++)
+        if ((*cache)[i].node == node) return i;
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    *rc = inbound ? cbm_store_find_edges_by_target(s, node, &edges, &edge_count)
+                  : cbm_store_find_edges_by_source(s, node, &edges, &edge_count);
+    if (*rc == CBM_STORE_NOT_FOUND) *rc = CBM_STORE_OK;
+    if (*rc != CBM_STORE_OK) return CBM_NOT_FOUND;
+    trail_adj_t adj = {.node = node};
+    adj.next = edge_count ? malloc((size_t)edge_count * sizeof(*adj.next)) : NULL;
+    for (int e = 0; e < edge_count && adj.next; e++)
+        if (bfs_edge_type_selected(edges[e].type, edge_types, edge_type_count))
+            adj.next[adj.count++] = inbound ? edges[e].source_id : edges[e].target_id;
+    cbm_store_free_edges(edges, edge_count);
+    qsort(adj.next, (size_t)adj.count, sizeof(*adj.next), trail_next_order);
+    if (*count == *cap) {
+        *cap = *cap ? *cap * ST_GROWTH : ST_INIT_CAP_16;
+        *cache = safe_realloc(*cache, (size_t)*cap * sizeof(**cache));
+    }
+    (*cache)[*count] = adj;
+    return (*count)++;
+}
+
+/* True when the edge (adjacency a, neighbour slot k) is already on the path. */
+static bool trail_uses_edge(const trail_frame_t *stack, int depth, int a, int k) {
+    for (int i = 0; i < depth; i++)
+        if (stack[i].adj == a && stack[i].cursor - SKIP_ONE == k) return true;
+    return false;
+}
+
+static int trail_hop_order(const void *a, const void *b) {
+    const cbm_node_hop_t *x = a;
+    const cbm_node_hop_t *y = b;
+    if (x->hop != y->hop) return x->hop < y->hop ? -1 : 1;
+    return bfs_hop_order(a, b);
+}
+
+int cbm_store_bfs_trail(cbm_store_t *s, int64_t start_id, const char *direction,
+                        const char **edge_types, int edge_type_count, int max_depth,
+                        int max_results, cbm_traverse_result_t *out) {
+    memset(out, 0, sizeof(*out));
+    int rc = cbm_store_find_node_by_id(s, start_id, &out->root);
+    if (rc != CBM_STORE_OK) return rc;
+    if (max_results < 0) max_results = 0;
+    bool inbound = direction && strcmp(direction, "inbound") == 0;
+    int row_limit = trail_row_limit(max_results, max_depth);
+
+    trail_adj_t *cache = NULL;
+    int cache_count = 0, cache_cap = 0;
+    trail_frame_t *stack = malloc(((size_t)(max_depth > 0 ? max_depth : 0) + SKIP_ONE) *
+                                  sizeof(*stack));
+    cbm_node_hop_t *hops = NULL; /* distinct (node, hop) pairs; node holds only the id here */
+    int hop_count = 0, hop_cap = 0;
+    int rows = SKIP_ONE; /* the start node */
+    int depth = 0;
+    stack[0].adj = trail_adjacency(s, &cache, &cache_count, &cache_cap, start_id, inbound,
+                                   edge_types, edge_type_count, &rc);
+    stack[0].cursor = 0;
+    while (rc == CBM_STORE_OK && depth >= 0 && stack[0].adj >= 0) {
+        trail_frame_t *f = &stack[depth];
+        const trail_adj_t *adj = &cache[f->adj];
+        if (depth >= max_depth || f->cursor >= adj->count) {
+            depth--;
+            continue;
+        }
+        int k = f->cursor++;
+        if (trail_uses_edge(stack, depth, f->adj, k)) continue;
+        if (rows >= row_limit) {
+            out->truncated = true;
+            break;
+        }
+        rows++;
+        int64_t next = adj->next[k];
+        bool seen = false;
+        for (int i = 0; i < hop_count && !seen; i++)
+            seen = hops[i].node.id == next && hops[i].hop == depth + SKIP_ONE;
+        if (!seen) {
+            if (hop_count == hop_cap) {
+                hop_cap = hop_cap ? hop_cap * ST_GROWTH : ST_INIT_CAP_16;
+                hops = safe_realloc(hops, (size_t)hop_cap * sizeof(*hops));
+            }
+            memset(&hops[hop_count], 0, sizeof(hops[hop_count]));
+            hops[hop_count].node.id = next;
+            hops[hop_count++].hop = depth + SKIP_ONE;
+        }
+        if (depth + SKIP_ONE < max_depth) {
+            int child = trail_adjacency(s, &cache, &cache_count, &cache_cap, next, inbound,
+                                        edge_types, edge_type_count, &rc);
+            if (child >= 0) {
+                depth++;
+                stack[depth].adj = child;
+                stack[depth].cursor = 0;
+            }
+        }
+    }
+    for (int i = 0; i < cache_count; i++) free(cache[i].next);
+    free(cache);
+    free(stack);
+    if (out->truncated) {
+        char limit_buf[ST_BUF_16];
+        snprintf(limit_buf, sizeof(limit_buf), "%d", row_limit);
+        cbm_log_warn("cypher.trail_truncated", "rows", limit_buf, "result", "partial");
+    }
+
+    /* Materialize each pair; a node reached at several hops is read once. */
+    int kept = 0;
+    for (int i = 0; i < hop_count && rc == CBM_STORE_OK; i++) {
+        int64_t id = hops[i].node.id;
+        int prior = CBM_NOT_FOUND;
+        for (int j = 0; j < kept && prior < 0; j++)
+            if (hops[j].node.id == id) prior = j;
+        cbm_node_t node = {0};
+        int nrc = prior >= 0 ? CBM_STORE_OK : cbm_store_find_node_by_id(s, id, &node);
+        if (nrc == CBM_STORE_NOT_FOUND) continue;
+        if (nrc != CBM_STORE_OK) {
+            rc = nrc;
+            break;
+        }
+        if (prior >= 0) {
+            const cbm_node_t *p = &hops[prior].node;
+            node = *p;
+            node.project = heap_strdup(p->project);
+            node.label = heap_strdup(p->label);
+            node.name = heap_strdup(p->name);
+            node.qualified_name = heap_strdup(p->qualified_name);
+            node.file_path = heap_strdup(p->file_path);
+            node.properties_json = heap_strdup(p->properties_json);
+        }
+        int hop = hops[i].hop;
+        hops[kept].node = node;
+        hops[kept++].hop = hop;
+    }
+    hop_count = kept;
+    if (hop_count > 0)
+        qsort(hops, (size_t)hop_count, sizeof(*hops), trail_hop_order);
+    if (hop_count > max_results) {
+        while (hop_count > max_results) cbm_node_free_fields(&hops[--hop_count].node);
+        out->truncated = true;
+    }
+    out->visited = hops;
+    out->visited_count = hop_count;
+    return rc;
+}
+
 void cbm_store_traverse_free(cbm_traverse_result_t *out) {
     if (!out) {
         return;
