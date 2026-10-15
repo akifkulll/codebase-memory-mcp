@@ -612,6 +612,25 @@ static const cbm_gbuf_node_t *incr_find_unique_renamed_target(const cbm_gbuf_t *
     return candidate;
 }
 
+static int incr_cmp_id(const void *a, const void *b) {
+    int64_t x = *(const int64_t *)a;
+    int64_t y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
+typedef struct {
+    const int64_t *ids;
+    int count;
+} incr_id_set_t;
+
+static bool incr_keep_unless_source_in_set(const cbm_gbuf_t *gb, const cbm_gbuf_edge_t *edge,
+                                           void *userdata) {
+    (void)gb;
+    const incr_id_set_t *set = userdata;
+    return !bsearch(&edge->source_id, set->ids, (size_t)set->count, sizeof(*set->ids),
+                    incr_cmp_id);
+}
+
 /* A path rename changes the callee's qualified name. Re-run the CALLS pass
  * for only unchanged source files that previously called a purged target, so
  * the normal resolver recalculates strategy/confidence against the new
@@ -622,10 +641,14 @@ static void incr_rebuild_snapshot_callers(cbm_pipeline_ctx_t *ctx, const cbm_edg
         return;
     }
     cbm_file_info_t *callers = calloc((size_t)cap->count, sizeof(*callers));
-    if (!callers) {
+    int64_t *source_ids = malloc((size_t)cap->count * sizeof(*source_ids));
+    if (!callers || !source_ids) {
+        free(callers);
+        free(source_ids);
         return;
     }
     int caller_count = 0;
+    int source_count = 0;
     for (int i = 0; i < cap->count; i++) {
         const cbm_saved_edge_t *saved = &cap->items[i];
         /* Re-resolve unchanged sources that previously emitted either CALLS
@@ -641,7 +664,7 @@ static void incr_rebuild_snapshot_callers(cbm_pipeline_ctx_t *ctx, const cbm_edg
         if (!source || !source->file_path) {
             continue;
         }
-        cbm_gbuf_delete_edges_by_source_type(ctx->gbuf, source->id, "CONFIGURES");
+        source_ids[source_count++] = source->id;
         for (int f = 0; f < file_count; f++) {
             if (strcmp(files[f].rel_path, source->file_path) != 0) {
                 continue;
@@ -659,9 +682,19 @@ static void incr_rebuild_snapshot_callers(cbm_pipeline_ctx_t *ctx, const cbm_edg
             break;
         }
     }
+    /* Drop these sources' CONFIGURES edges in one pass over the edge list:
+     * deleting per captured edge rescanned every edge and rebuilt the edge
+     * indexes each time, which made a one-file reindex slower than a full one. */
+    if (source_count > 0) {
+        qsort(source_ids, (size_t)source_count, sizeof(*source_ids), incr_cmp_id);
+        incr_id_set_t set = {source_ids, source_count};
+        cbm_gbuf_delete_edges_by_type_unless(ctx->gbuf, "CONFIGURES",
+                                             incr_keep_unless_source_in_set, &set);
+    }
     if (caller_count > 0) {
         cbm_pipeline_pass_calls(ctx, callers, caller_count);
     }
+    free(source_ids);
     free(callers);
 }
 
