@@ -1192,3 +1192,50 @@ CBMLanguage cbm_disambiguate_m(const char *path) {
 
     return CBM_LANG_MATLAB;
 }
+
+/* Visual Basic 6 / VBA source exports are recognisable from their header
+ * (upstream #721): every module carries `Attribute VB_Name = "..."`, class
+ * modules open with `VERSION 1.0 CLASS`, forms/controls with `VERSION 5.00` +
+ * `Begin VB.Form` / `Begin VB.UserControl`. None of these occur in Apex classes
+ * or in FORM programs, whose .cls / .frm extensions VB6 happens to share. */
+static bool has_vb6_markers(const char *buf) {
+    return str_contains(buf, "Attribute VB_Name") || str_contains(buf, "VERSION 1.0 CLASS") ||
+           str_contains(buf, "Begin VB.") || str_contains(buf, "\nOption Explicit");
+}
+
+/* Read the first 4KB of path into buf (NUL-terminated). False when unreadable. */
+static bool read_head_4k(const char *path, char buf[CBM_SZ_4K + SKIP_ONE]) {
+    FILE *f = path ? cbm_fopen(path, "r") : NULL;
+    if (!f) {
+        return false;
+    }
+    size_t n = fread(buf, SKIP_ONE, CBM_SZ_4K, f);
+    buf[n] = '\0';
+    (void)fclose(f);
+    return true;
+}
+
+/* There is no Visual Basic grammar, so a VB6 form or class module is reported
+ * as unsupported (CBM_LANG_COUNT) instead of being handed to the FORM grammar
+ * (no defs) or the Apex grammar (junk nodes, extract timeouts). Any doubt keeps
+ * the extension's owner. */
+CBMLanguage cbm_disambiguate_frm(const char *path) {
+    char buf[CBM_SZ_4K + SKIP_ONE];
+    if (!read_head_4k(path, buf)) {
+        return CBM_LANG_FORM;
+    }
+    /* VB6 form files open with "VERSION x.yy" on line 1. */
+    if (strncmp(buf, "VERSION ", SLEN("VERSION ")) == 0 &&
+        isdigit((unsigned char)buf[SLEN("VERSION ")])) {
+        return CBM_LANG_COUNT;
+    }
+    return has_vb6_markers(buf) ? CBM_LANG_COUNT : CBM_LANG_FORM;
+}
+
+CBMLanguage cbm_disambiguate_cls(const char *path) {
+    char buf[CBM_SZ_4K + SKIP_ONE];
+    if (!read_head_4k(path, buf)) {
+        return CBM_LANG_APEX;
+    }
+    return has_vb6_markers(buf) ? CBM_LANG_COUNT : CBM_LANG_APEX;
+}

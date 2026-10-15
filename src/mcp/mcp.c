@@ -4348,6 +4348,30 @@ static bool supervisor_append_quarantine(const char *path, const char *rel, cons
     return true;
 }
 
+/* How many times a failed index worker may be re-run, as
+ * CBM_INDEX_MAX_RESTARTS sets it. Default 100; 0 means no restarts. An
+ * unreadable value keeps the default and is logged (upstream 6b801eec). */
+static int index_restart_cap(void) {
+    enum { INDEX_RESTART_CAP_DEFAULT = 100 };
+    long v = 0;
+    if (!cbm_env_long("CBM_INDEX_MAX_RESTARTS", &v)) {
+        char raw[CBM_SZ_64] = {0};
+        if (cbm_safe_getenv("CBM_INDEX_MAX_RESTARTS", raw, sizeof(raw), NULL) && raw[0]) {
+            cbm_log_warn("index.restart_cap.ignored", "value", raw, "action", "using_default");
+        }
+        return INDEX_RESTART_CAP_DEFAULT;
+    }
+    if (v < 0 || v > INT_MAX) {
+        cbm_log_warn("index.restart_cap.out_of_range", "action", "using_default");
+        return INDEX_RESTART_CAP_DEFAULT;
+    }
+    return (int)v;
+}
+
+int cbm_index_restart_cap_for_testing(void) {
+    return index_restart_cap();
+}
+
 /* Run index_repository in a supervised worker subprocess with skip-and-continue
  * (Stage 3c). Returns the response string (caller frees):
  *   - the worker's own response on a clean first run (the common path);
@@ -4414,14 +4438,7 @@ static char *index_run_supervised_impl(cbm_mcp_server_t *srv, const char *args) 
         (void)fclose(qinit);
     }
 
-    int cap = 100;
-    const char *cap_env = getenv("CBM_INDEX_MAX_RESTARTS");
-    if (cap_env && cap_env[0]) {
-        int v = atoi(cap_env);
-        if (v > 0) {
-            cap = v;
-        }
-    }
+    int cap = index_restart_cap();
 
     char *resp = NULL;
     int quarantined = 0;         /* files pinned + added to the quarantine list so far */

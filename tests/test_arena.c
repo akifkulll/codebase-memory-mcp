@@ -311,6 +311,21 @@ TEST(arena_strndup_len_exceeds_string) {
     PASS();
 }
 
+TEST(arena_sprintf_longer_than_stack_buffer) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    char big[2000];
+    memset(big, 'x', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    char *s = cbm_arena_sprintf(&a, "<%s>%.2f", big, 1.5);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(strlen(s), sizeof(big) - 1 + 2 + 4);
+    ASSERT_EQ(s[0], '<');
+    ASSERT_STR_EQ(s + sizeof(big), ">1.50");
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
 TEST(arena_sprintf_empty_format) {
     CBMArena a;
     cbm_arena_init(&a);
@@ -454,6 +469,7 @@ SUITE(arena) {
     RUN_TEST(arena_strdup_empty);
     RUN_TEST(arena_strndup_len_exceeds_string);
     RUN_TEST(arena_sprintf_empty_format);
+    RUN_TEST(arena_sprintf_longer_than_stack_buffer);
     RUN_TEST(arena_double_destroy);
     RUN_TEST(arena_calloc_zero);
     RUN_TEST(arena_many_large_allocs_block_growth);

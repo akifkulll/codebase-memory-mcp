@@ -7,8 +7,18 @@
 
 $ErrorActionPreference = "Stop"
 
-# Enforce TLS 1.2+ (older PowerShell defaults to TLS 1.0 which GitHub rejects)
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+# Enforce TLS 1.2+ (older PowerShell defaults to TLS 1.0 which GitHub rejects).
+# TLS 1.3 is added only where schannel can negotiate it: Windows 11 and Server
+# 2022 (build 20348+). On Windows 10 the enum value exists from .NET Framework
+# 4.8 on, so the assignment succeeds, but the handshake then fails with "Could
+# not create SSL/TLS secure channel". The enum-name probe keeps the script
+# parsing on .NET Framework 4.7, where Tls13 is not defined.
+$CbmProtocols = [Net.SecurityProtocolType]::Tls12
+if ([Environment]::OSVersion.Version.Build -ge 20348 -and
+    ([enum]::GetNames([Net.SecurityProtocolType]) -contains 'Tls13')) {
+    $CbmProtocols = $CbmProtocols -bor [Net.SecurityProtocolType]::Tls13
+}
+[Net.ServicePointManager]::SecurityProtocol = $CbmProtocols
 
 $Repo = "0ctacity/codebase-memory-mcp"
 $InstallDir = "$env:LOCALAPPDATA\Programs\codebase-memory-mcp"

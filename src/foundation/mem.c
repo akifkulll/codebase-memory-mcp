@@ -153,7 +153,11 @@ void cbm_mem_init(double ram_fraction) {
      * (#363). Explicit override > implicit RAM/cgroup detection. */
     char env_buf[CBM_SZ_32];
     if (cbm_safe_getenv("CBM_MEM_BUDGET_MB", env_buf, sizeof(env_buf), NULL) != NULL) {
-        long mb = strtol(env_buf, NULL, CBM_DECIMAL_BASE);
+        /* Whole-string read: "512MB" or " 512" is refused, not read as 512. */
+        long mb = 0;
+        if (!cbm_env_long("CBM_MEM_BUDGET_MB", &mb)) {
+            mb = 0;
+        }
         if (mb > 0) {
             g_budget = (size_t)mb * MB_DIVISOR;
             char ovr_mb[CBM_SZ_32];

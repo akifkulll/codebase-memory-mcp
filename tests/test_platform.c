@@ -309,6 +309,68 @@ TEST(cgroup_no_mem_files) {
 
 #endif /* __linux__ */
 
+/* cbm_env_long reads a whole number, or says it could not (upstream
+ * 6b801eec). atoi/atol answer 0 for text they cannot read, and 0 is a real
+ * setting wherever this project reads a number from the environment. */
+TEST(platform_env_long_reads_a_clean_number) {
+    const char *name = "CBM_TEST_ENV_LONG";
+    char *saved = getenv(name) ? strdup(getenv(name)) : NULL;
+    long out = 0;
+
+    ASSERT_EQ(cbm_setenv(name, "42", 1), 0);
+    ASSERT_TRUE(cbm_env_long(name, &out));
+    ASSERT_EQ(out, 42);
+
+    ASSERT_EQ(cbm_setenv(name, "0", 1), 0);
+    out = 999;
+    ASSERT_TRUE(cbm_env_long(name, &out));
+    ASSERT_EQ(out, 0);
+
+    ASSERT_EQ(cbm_setenv(name, "-7", 1), 0);
+    ASSERT_TRUE(cbm_env_long(name, &out));
+    ASSERT_EQ(out, -7);
+
+    if (saved) {
+        (void)cbm_setenv(name, saved, 1);
+        free(saved);
+    } else {
+        (void)cbm_unsetenv(name);
+    }
+    PASS();
+}
+
+TEST(platform_env_long_refuses_what_it_cannot_read) {
+    const char *name = "CBM_TEST_ENV_LONG";
+    char *saved = getenv(name) ? strdup(getenv(name)) : NULL;
+
+    const char *unreadable[] = {
+        "abc",  "30s",  " 30", "30 ", "",    "1e3",
+        "0x10", "+ 30", "--3", "3.5", "99999999999999999999999999",
+    };
+    for (size_t i = 0; i < sizeof(unreadable) / sizeof(unreadable[0]); i++) {
+        ASSERT_EQ(cbm_setenv(name, unreadable[i], 1), 0);
+        long out = 1234; /* a value the helper must not touch */
+        ASSERT_TRUE(!cbm_env_long(name, &out));
+        ASSERT_EQ(out, 1234);
+    }
+
+    ASSERT_EQ(cbm_unsetenv(name), 0);
+    long out = 555;
+    ASSERT_TRUE(!cbm_env_long(name, &out));
+    ASSERT_EQ(out, 555);
+
+    ASSERT_EQ(cbm_setenv(name, "5", 1), 0);
+    ASSERT_TRUE(!cbm_env_long(name, NULL));
+
+    if (saved) {
+        (void)cbm_setenv(name, saved, 1);
+        free(saved);
+    } else {
+        (void)cbm_unsetenv(name);
+    }
+    PASS();
+}
+
 SUITE(platform) {
     RUN_TEST(platform_now_ns);
     RUN_TEST(platform_now_ms);
@@ -322,6 +384,8 @@ SUITE(platform) {
     RUN_TEST(platform_default_workers_env_zero_is_sequential);
     RUN_TEST(platform_default_workers_env_invalid);
     RUN_TEST(platform_default_workers_env_unset);
+    RUN_TEST(platform_env_long_reads_a_clean_number);
+    RUN_TEST(platform_env_long_refuses_what_it_cannot_read);
 #ifdef __linux__
     RUN_TEST(cgroup_v2_cpu_quota);
     RUN_TEST(cgroup_v2_cpu_quota_rounds_up);

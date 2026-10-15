@@ -39,6 +39,12 @@ const char *cbm_language_name(CBMLanguage lang);
  * On read failure, defaults to CBM_LANG_MATLAB. */
 CBMLanguage cbm_disambiguate_m(const char *path);
 
+/* Disambiguate .cls / .frm files by reading first 4KB of content (upstream
+ * #721). A Visual Basic 6 class module or form returns CBM_LANG_COUNT
+ * (unsupported); otherwise CBM_LANG_APEX / CBM_LANG_FORM, also on read failure. */
+CBMLanguage cbm_disambiguate_cls(const char *path);
+CBMLanguage cbm_disambiguate_frm(const char *path);
+
 /* Detect a supported script language from a file's shebang (#!...) first line.
  * Conservative fallback used only when filename/extension detection is unknown
  * (see detect_file_language); it never overrides extension or special-filename

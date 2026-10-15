@@ -4,12 +4,14 @@
 #include "index_supervisor.h"
 
 #include "foundation/compat.h"    /* cbm_setenv, cbm_unsetenv */
+#include "foundation/constants.h"
 #include "foundation/compat_fs.h" /* cbm_mkdir_p, cbm_fopen */
 #include "foundation/log.h"
 #include "foundation/platform.h" /* cbm_resolve_cache_dir */
 #include "foundation/profile.h"  /* cbm_profile_active (keep worker log under CBM_PROFILE) */
 #include "foundation/subprocess.h" /* cbm_resolve_binary_path */
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -94,12 +96,17 @@ bool cbm_index_supervisor_should_wrap(void) {
  * CBM_INDEX_WORKER_TIMEOUT_S override (seconds → ms) tightens it for tests. */
 static int worker_quiet_timeout_ms(void) {
     enum { DEFAULT_QUIET_TIMEOUT_MS = 900000 }; /* 15 min with no progress */
-    const char *e = getenv("CBM_INDEX_WORKER_TIMEOUT_S");
-    if (e && e[0]) {
-        long s = atol(e);
-        if (s > 0) {
-            return (int)(s * 1000);
-        }
+    enum { MS_PER_SECOND = 1000 };
+    long s = 0;
+    if (cbm_env_long("CBM_INDEX_WORKER_TIMEOUT_S", &s) && s > 0 && s <= INT_MAX / MS_PER_SECOND) {
+        return (int)(s * MS_PER_SECOND);
+    }
+    /* An unreadable value ("30s") used to read as 0 and fall through to the
+     * 15-minute default silently; say so before dropping it. */
+    char raw[CBM_SZ_64] = {0};
+    if (cbm_safe_getenv("CBM_INDEX_WORKER_TIMEOUT_S", raw, sizeof(raw), NULL) && raw[0]) {
+        cbm_log_warn("index.supervisor.worker_timeout_ignored", "value", raw, "action",
+                     "using_default");
     }
     return DEFAULT_QUIET_TIMEOUT_MS;
 }

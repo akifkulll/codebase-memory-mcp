@@ -143,6 +143,15 @@ grep -q 'REPO="0ctacity/codebase-memory-mcp"' "$ROOT/install.sh"
 grep -q '\$Repo = "0ctacity/codebase-memory-mcp"' "$ROOT/install.ps1"
 grep -q '\$AlreadyInstalled = \$true' "$ROOT/install.ps1"
 grep -q '\$PSScriptRoot' "$ROOT/install.ps1"
+# TLS 1.3 only where schannel can negotiate it (build 20348+); an unsupported
+# bit hard-fails the first HTTPS request on Windows 10 (upstream #2188).
+if grep -q 'Tls12 -bor \[Net.SecurityProtocolType\]::Tls13' "$ROOT/install.ps1"; then
+    echo "error: install.ps1 sets the TLS 1.3 bit unconditionally" >&2
+    exit 1
+fi
+grep -q 'OSVersion.Version.Build -ge 20348' "$ROOT/install.ps1"
+grep -q "GetNames(\[Net.SecurityProtocolType\]) -contains 'Tls13'" "$ROOT/install.ps1"
+grep -q 'SecurityProtocol = \$CbmProtocols' "$ROOT/install.ps1"
 grep -q 'canonical install.sh' "$ROOT/scripts/setup.sh"
 grep -q 'canonical install.ps1' "$ROOT/scripts/setup-windows.ps1"
 if grep -q 'Go 1\.23\\|CGO\\|Configure Claude Code' \

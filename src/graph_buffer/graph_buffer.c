@@ -1093,12 +1093,20 @@ void cbm_gbuf_foreach_edge(const cbm_gbuf_t *gb, cbm_gbuf_edge_visitor_fn fn, vo
 
 /* ── Edge operations ─────────────────────────────────────────────── */
 
-/* "confidence":<double> from an edge property blob; -1 when absent, so a blob
- * that states a confidence outranks one that does not. */
+/* "confidence":<double> from an edge property blob; -1 when absent or
+ * unreadable, so a blob that states a confidence outranks one that does not.
+ * strtod answers 0.0 for text it cannot read ("confidence":null), and 0.0 is a
+ * real confidence, so an end pointer that never moved means absent. */
 static double edge_properties_confidence(const char *props_json) {
     static const char conf_key[] = "\"confidence\":";
     const char *p = props_json ? strstr(props_json, conf_key) : NULL;
-    return p ? strtod(p + sizeof(conf_key) - SKIP_ONE, NULL) : -1.0;
+    if (!p) {
+        return -1.0;
+    }
+    const char *value = p + sizeof(conf_key) - SKIP_ONE;
+    char *end = NULL;
+    double conf = strtod(value, &end);
+    return end == value ? -1.0 : conf;
 }
 
 /* A total order over the two candidates, so the result does not depend on

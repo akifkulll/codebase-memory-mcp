@@ -6,6 +6,8 @@
 #include "platform.h"
 
 #include "foundation/constants.h"
+#include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -320,6 +322,29 @@ const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const ch
     }
     buf[0] = '\0';
     return NULL;
+}
+
+bool cbm_env_long(const char *name, long *out) {
+    if (!out) {
+        return false;
+    }
+    char raw[CBM_SZ_64] = {0};
+    if (!cbm_safe_getenv(name, raw, sizeof(raw), NULL) || !raw[0]) {
+        return false;
+    }
+    /* strtol skips leading blanks, so " 5" would read as 5; a blank in front
+     * of a setting is a slip, not a number. */
+    if (isspace((unsigned char)raw[0])) {
+        return false;
+    }
+    char *end = NULL;
+    errno = 0;
+    long value = strtol(raw, &end, CBM_DECIMAL_BASE);
+    if (errno != 0 || !end || end == raw || *end != '\0') {
+        return false;
+    }
+    *out = value;
+    return true;
 }
 
 /* ── Home directory (cross-platform) ───────────────────── */

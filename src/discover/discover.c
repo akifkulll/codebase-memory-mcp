@@ -651,7 +651,7 @@ static bool should_skip_file(const char *entry_name, const char *rel_path,
     return global_ignored;
 }
 
-/* Detect language for a file, handling .m disambiguation and JSON filtering. */
+/* Detect language for a file, handling .m/.cls/.frm disambiguation and JSON filtering. */
 static CBMLanguage detect_file_language(const char *entry_name, const char *abs_path) {
     CBMLanguage lang = cbm_language_for_filename(entry_name);
     if (lang == CBM_LANG_COUNT) {
@@ -665,6 +665,13 @@ static CBMLanguage detect_file_language(const char *entry_name, const char *abs_
     const char *dot = strrchr(entry_name, '.');
     if (dot && strcmp(dot, ".m") == 0) {
         lang = cbm_disambiguate_m(abs_path);
+    }
+    /* Special: .cls / .frm are shared with VB6 class modules and forms */
+    if (dot && strcmp(dot, ".cls") == 0) {
+        lang = cbm_disambiguate_cls(abs_path);
+    }
+    if (dot && strcmp(dot, ".frm") == 0) {
+        lang = cbm_disambiguate_frm(abs_path);
     }
     /* Check ignored JSON files */
     if (lang == CBM_LANG_JSON && str_in_list(entry_name, IGNORED_JSON_FILES)) {

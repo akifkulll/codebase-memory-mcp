@@ -3516,7 +3516,39 @@ TEST(cli_zova_ops_strict_parser_dispatch_and_exit_mapping) {
  *  Suite definition
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* CBM_INDEX_MAX_RESTARTS: 0 means no restarts, and text that does not read
+ * cleanly keeps the default (upstream 6b801eec). */
+TEST(cli_index_restart_cap_honours_zero_and_refuses_junk) {
+    enum { INDEX_RESTART_CAP_DEFAULT = 100 };
+    const char *name = "CBM_INDEX_MAX_RESTARTS";
+    char *saved = getenv(name) ? strdup(getenv(name)) : NULL;
+
+    cbm_setenv(name, "7", 1);
+    ASSERT_EQ(cbm_index_restart_cap_for_testing(), 7);
+
+    cbm_unsetenv(name);
+    ASSERT_EQ(cbm_index_restart_cap_for_testing(), INDEX_RESTART_CAP_DEFAULT);
+
+    cbm_setenv(name, "0", 1);
+    ASSERT_EQ(cbm_index_restart_cap_for_testing(), 0);
+
+    const char *unreadable[] = {"abc", "5x", " 5", "5 ", ""};
+    for (size_t i = 0; i < sizeof(unreadable) / sizeof(unreadable[0]); i++) {
+        cbm_setenv(name, unreadable[i], 1);
+        ASSERT_EQ(cbm_index_restart_cap_for_testing(), INDEX_RESTART_CAP_DEFAULT);
+    }
+
+    if (saved) {
+        cbm_setenv(name, saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv(name);
+    }
+    PASS();
+}
+
 SUITE(cli) {
+    RUN_TEST(cli_index_restart_cap_honours_zero_and_refuses_junk);
     RUN_TEST(cli_sha256_file_matches_known_vector);
     RUN_TEST(cli_sha256_update_fragmentation_matches_one_shot);
     RUN_TEST(cli_sha256_accelerated_backend_matches_portable);

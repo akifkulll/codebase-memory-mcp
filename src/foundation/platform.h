@@ -121,6 +121,12 @@ int cbm_default_worker_count(bool initial);
  * Returns NULL when the variable is unset and fallback is NULL. */
 const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const char *fallback);
 
+/* Read an environment variable as a whole decimal number. True only when the
+ * variable is set, non-empty, and reads cleanly from its first character to
+ * its last; *out is untouched otherwise. Holds no policy (no range, no
+ * default): atoi/atol answer 0 for unreadable text, and 0 is a real setting. */
+bool cbm_env_long(const char *name, long *out);
+
 /* ── Home directory ─────────────────────────────────────────────── */
 
 /* Cross-platform home directory: tries HOME first, then USERPROFILE (Windows).

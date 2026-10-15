@@ -251,6 +251,30 @@ TEST(gbuf_edge_props_merge_prefers_higher_confidence) {
     PASS();
 }
 
+/* A confidence that cannot be read is not evidence (upstream 62b44519): it
+ * reads as absent (-1), not as a real 0.0 that outranks an absent one. The
+ * blobs tie on confidence after the fix, and the smaller-blob tie-break then
+ * keeps the clean one. */
+TEST(gbuf_edge_props_unreadable_confidence_does_not_displace_absent) {
+    const char *no_conf = "{\"callee\":\"f\",\"strategy\":\"lsp\"}";
+    const char *bad_conf = "{\"callee\":\"f\",\"strategy\":\"registry\",\"confidence\":null}";
+
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
+    int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
+    cbm_gbuf_insert_edge(gb, a, b, "CALLS", no_conf);
+    cbm_gbuf_insert_edge(gb, a, b, "CALLS", bad_conf); /* unreadable, arrives last */
+
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    cbm_gbuf_find_edges_by_type(gb, "CALLS", &edges, &count);
+    ASSERT_EQ(count, 1);
+    ASSERT_TRUE(strstr(edges[0]->properties_json, "\"strategy\":\"lsp\"") != NULL);
+
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
 /* An empty incoming blob must never displace real stored properties. */
 TEST(gbuf_edge_props_merge_keeps_existing_on_empty) {
     const char *lsp = "{\"callee\":\"f\",\"confidence\":0.95,\"strategy\":\"lsp\"}";
@@ -1216,6 +1240,7 @@ SUITE(graph_buffer) {
     /* Edge property merge determinism */
     RUN_TEST(gbuf_edge_props_merge_is_order_independent);
     RUN_TEST(gbuf_edge_props_merge_prefers_higher_confidence);
+    RUN_TEST(gbuf_edge_props_unreadable_confidence_does_not_displace_absent);
     RUN_TEST(gbuf_edge_props_merge_keeps_existing_on_empty);
 
     /* Shared ID tests */

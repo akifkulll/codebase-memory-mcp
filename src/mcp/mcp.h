@@ -209,4 +209,7 @@ struct cbm_pipeline *cbm_mcp_server_active_pipeline(cbm_mcp_server_t *srv);
  * On Windows, strips leading / from /C:/path. */
 bool cbm_parse_file_uri(const char *uri, char *out_path, int out_size);
 
+/* CBM_INDEX_MAX_RESTARTS as the supervised index path reads it (tests). */
+int cbm_index_restart_cap_for_testing(void);
+
 #endif /* CBM_MCP_H */
