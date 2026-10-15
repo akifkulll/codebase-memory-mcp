@@ -209,10 +209,60 @@ fn createCModule(b: *std.Build, cfg: Config, kind: BuildKind) *std.Build.Module 
     });
     _ = kind;
     addIncludePaths(b, module, cfg);
+    module.addCSourceFile(.{ .file = inputDigestSource(b), .flags = &.{} });
     module.linkSystemLibrary("m", .{ .preferred_link_mode = if (cfg.static_link) .static else .dynamic });
     module.linkSystemLibrary("pthread", .{ .preferred_link_mode = if (cfg.static_link) .static else .dynamic });
     module.linkSystemLibrary("z", .{ .preferred_link_mode = if (cfg.static_link) .static else .dynamic });
     return module;
+}
+
+/// Zig 0.17 drops a C object's header dependencies from the artifact's cache
+/// manifest when that object itself comes from cache, so a later edit to a
+/// header (or to a .c file pulled in by #include, like lsp/c_lsp.c) can leave
+/// the binary or library stale. Every C module therefore also compiles a
+/// one-line file named after a digest of the size and mtime of each C source
+/// and header: any edit changes the file, the artifact manifest misses, and
+/// Zig re-checks each object against its own, complete, dependency list. The
+/// files are registered as configure dependencies so that build() reruns.
+var input_digest_source: ?std.Build.LazyPath = null;
+
+fn inputDigestSource(b: *std.Build) std.Build.LazyPath {
+    if (input_digest_source) |path| return path;
+    const io = b.graph.io;
+    var sum: u64 = 0;
+    for ([_][]const u8{ "src", "internal", "vendored", "tests" }) |root| {
+        b.dependOnDirectoryContents(b.path(root));
+        var dir = b.root.root_dir.handle.openDir(io, root, .{ .iterate = true }) catch |err|
+            std.debug.panic("error: unable to open {s}: {t}", .{ root, err });
+        defer dir.close(io);
+        var walker = dir.walk(b.allocator) catch @panic("OOM");
+        defer walker.deinit();
+        while (walker.next(io) catch |err| std.debug.panic("error: unable to walk {s}: {t}", .{ root, err })) |entry| {
+            const rel = b.pathJoin(&.{ root, entry.path });
+            if (entry.kind == .directory) {
+                b.dependOnDirectoryContents(b.path(rel));
+                continue;
+            }
+            if (entry.kind != .file or !isCInput(entry.basename)) continue;
+            const st = entry.dir.statFile(io, entry.basename, .{}) catch continue;
+            b.dependOnFileMetadata(b.path(rel));
+            var h = std.hash.Wyhash.init(0);
+            h.update(rel);
+            h.update(std.mem.asBytes(&st.size));
+            h.update(std.mem.asBytes(&st.mtime.nanoseconds));
+            sum +%= h.final(); // order-independent: the walk order is undefined
+        }
+    }
+    const wf = b.addWriteFiles();
+    input_digest_source = wf.add("cbm_input_digest.c", b.fmt("typedef int cbm_input_digest_{x:0>16};\n", .{sum}));
+    return input_digest_source.?;
+}
+
+fn isCInput(name: []const u8) bool {
+    for ([_][]const u8{ ".c", ".h", ".cc", ".cpp", ".hpp", ".inc", ".def" }) |ext| {
+        if (std.mem.endsWith(u8, name, ext)) return true;
+    }
+    return false;
 }
 
 fn addIncludePaths(b: *std.Build, module: *std.Build.Module, cfg: Config) void {
