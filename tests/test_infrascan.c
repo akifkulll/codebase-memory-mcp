@@ -281,6 +281,35 @@ TEST(infrascan_prefix_bridge_uses_every_registrar) {
     PASS();
 }
 
+/* A repo with more than 64 .proto classes (messages and services) must still
+ * get a gRPC Route for a service that comes after the first 64. */
+TEST(infrascan_grpc_routes_cover_services_past_64_proto_classes) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp/cbm_infrascan_grpc_many");
+    ASSERT_NOT_NULL(gb);
+    for (int i = 0; i < 70; i++) {
+        char name[32];
+        char qn[64];
+        snprintf(name, sizeof(name), "Msg%d", i);
+        snprintf(qn, sizeof(qn), "test.api.Msg%d", i);
+        ASSERT_GT(cbm_gbuf_upsert_node(gb, "Class", name, qn, "api.proto", i * 3 + 1, i * 3 + 2,
+                                       "{}"),
+                  0);
+    }
+    ASSERT_GT(cbm_gbuf_upsert_node(gb, "Class", "PodService", "test.api.PodService", "api.proto",
+                                   300, 310, "{}"),
+              0);
+    ASSERT_GT(cbm_gbuf_upsert_node(gb, "Function", "GetPod", "test.api.PodService.GetPod",
+                                   "api.proto", 301, 301, "{}"),
+              0);
+
+    cbm_pipeline_create_route_nodes(gb);
+
+    ASSERT_NOT_NULL(cbm_gbuf_find_by_qn(gb, "__grpc__PodService/GetPod"));
+
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
 SUITE(infrascan) {
     RUN_TEST(infrascan_http_route_literal_guard_rejects_filesystem_paths);
     RUN_TEST(infrascan_route_nodes_skip_bad_http_url_paths);
@@ -291,4 +320,5 @@ SUITE(infrascan) {
     RUN_TEST(infrascan_infra_prefix_match_is_segment_aware);
     RUN_TEST(infrascan_infra_match_prefers_longest_path_in_any_order);
     RUN_TEST(infrascan_prefix_bridge_uses_every_registrar);
+    RUN_TEST(infrascan_grpc_routes_cover_services_past_64_proto_classes);
 }

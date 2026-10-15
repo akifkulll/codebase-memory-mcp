@@ -36,6 +36,7 @@ enum {
 #include "service_patterns.h" /* cbm_service_pattern_is_http_route_literal */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* True for characters that may appear in a ":name" route parameter. */
@@ -892,20 +893,23 @@ static void create_grpc_routes(cbm_gbuf_t *gb) {
         return;
     }
 
-    const cbm_gbuf_node_t *services[CBM_SZ_64];
+    /* Every .proto class, uncapped: a fixed cap kept whichever classes the
+     * parallel workers happened to emit first, so routes varied by run. */
+    const cbm_gbuf_node_t **services = malloc((size_t)class_count * sizeof(*services));
+    if (!services) {
+        return;
+    }
     int svc_count = 0;
-    for (int i = 0; i < class_count && svc_count < CBM_SZ_64; i++) {
+    for (int i = 0; i < class_count; i++) {
         if (classes[i]->file_path && strstr(classes[i]->file_path, ".proto")) {
             services[svc_count++] = classes[i];
         }
     }
-    if (svc_count == 0) {
-        return;
-    }
-
     const cbm_gbuf_node_t **funcs = NULL;
     int func_count = 0;
-    if (cbm_gbuf_find_by_label(gb, "Function", &funcs, &func_count) != 0 || func_count == 0) {
+    if (svc_count == 0 ||
+        cbm_gbuf_find_by_label(gb, "Function", &funcs, &func_count) != 0 || func_count == 0) {
+        free(services);
         return;
     }
 
@@ -930,6 +934,7 @@ static void create_grpc_routes(cbm_gbuf_t *gb) {
         cbm_gbuf_insert_edge(gb, fn->id, route_id, "HANDLES", "{\"via\":\"proto_rpc\"}");
         grpc_routes++;
     }
+    free(services);
     if (grpc_routes > 0) {
         char buf[CBM_SZ_16];
         snprintf(buf, sizeof(buf), "%d", grpc_routes);
