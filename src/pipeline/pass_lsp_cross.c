@@ -454,44 +454,84 @@ static int pxc_build_import_map(const cbm_gbuf_t *gbuf, const char *project_name
                                 const char ***out_vals, int *out_count);
 static void pxc_free_import_map(const char **keys, const char **vals, int count);
 
+/* A file's declared namespace, or for Java/Kotlin the one inferred from its
+ * source-root path, stored back on the result (in its arena) so later readers
+ * of result->namespace_name see the same value. NULL when there is none. */
+const char *cbm_pxc_apply_inferred_namespace(CBMFileResult *result, const cbm_file_info_t *file) {
+    const char *namespace_name = result->namespace_name;
+    if ((!namespace_name || !namespace_name[0]) && file->rel_path) {
+        namespace_name = pxc_infer_jvm_namespace(&result->arena, file->rel_path, file->language);
+        if (namespace_name && namespace_name[0]) {
+            result->namespace_name = namespace_name;
+        }
+    }
+    return namespace_name;
+}
+
+/* Re-home defs[start, end) into `arena`: they borrow strings from a loaded
+ * (spilled) result that is freed right after collection. def_module_qn is
+ * borrowed from def_modules[] and stays. */
+static void pxc_own_def_strings(CBMArena *arena, CBMLSPDef *defs, int start, int end) {
+    for (int i = start; i < end; i++) {
+        CBMLSPDef *d = &defs[i];
+        d->qualified_name = cbm_arena_strdup(arena, d->qualified_name);
+        d->short_name = cbm_arena_strdup(arena, d->short_name);
+        d->label = cbm_arena_strdup(arena, d->label);
+        d->receiver_type = cbm_arena_strdup(arena, d->receiver_type);
+        d->return_types = cbm_arena_strdup(arena, d->return_types);
+        d->embedded_types = cbm_arena_strdup(arena, d->embedded_types);
+        d->field_defs = cbm_arena_strdup(arena, d->field_defs);
+        d->method_names_str = cbm_arena_strdup(arena, d->method_names_str);
+        d->namespace_name = cbm_arena_strdup(arena, d->namespace_name);
+    }
+}
+
 /* Collect a project-wide CBMLSPDef[] from all cached results. Returns a
  * malloc'd array (caller frees) of length *out_count. String fields are
- * borrowed from cache[i]->arena and from def_modules[i] (also borrowed). */
+ * borrowed from cache[i]->arena and from def_modules[i] (also borrowed);
+ * defs of a spilled result (ctx->spill) are copied into owned_arena, and
+ * spilled results are skipped when owned_arena is NULL. */
 CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMFileResult **cache,
                                     const cbm_file_info_t *files, int file_count,
                                     const char *project_name, char **def_modules,
-                                    int *out_count) {
-    int total = 0;
+                                    CBMArena *owned_arena, int *out_count) {
+    cbm_result_spill_t *spill = ctx && owned_arena ? ctx->spill : NULL;
+    int cap = 0;
     for (int i = 0; i < file_count; i++) {
         if (cache[i])
-            total += cache[i]->defs.count;
+            cap += cache[i]->defs.count;
     }
-    if (total == 0) {
+    if (cap == 0 && !spill) {
         *out_count = 0;
         return NULL;
     }
-    CBMLSPDef *defs = (CBMLSPDef *)calloc((size_t)total, sizeof(CBMLSPDef));
-    if (!defs) {
+    CBMLSPDef *defs = cap > 0 ? (CBMLSPDef *)calloc((size_t)cap, sizeof(CBMLSPDef)) : NULL;
+    if (cap > 0 && !defs) {
         *out_count = 0;
         return NULL;
     }
     int idx = 0;
     for (int fi = 0; fi < file_count; fi++) {
         const int file_start = idx;
-        if (!cache[fi])
+        CBMFileResult *result = cbm_result_cache_acquire(cache, spill, fi);
+        if (!result)
             continue;
+        const bool loaded = result != cache[fi];
+        if (idx + result->defs.count > cap) {
+            int grown = cap * 2 > idx + result->defs.count ? cap * 2 : idx + result->defs.count;
+            CBMLSPDef *more = (CBMLSPDef *)realloc(defs, (size_t)grown * sizeof(CBMLSPDef));
+            if (!more) {
+                cbm_result_cache_release(cache, fi, result);
+                continue;
+            }
+            defs = more;
+            cap = grown;
+        }
         if (!def_modules[fi]) {
             def_modules[fi] = cbm_pipeline_fqn_module_dir(project_name, files[fi].rel_path,
                                                           pxc_module_is_dir(files[fi].language));
         }
-        const char *namespace_name = cache[fi]->namespace_name;
-        if ((!namespace_name || !namespace_name[0]) && files[fi].rel_path) {
-            namespace_name =
-                pxc_infer_jvm_namespace(&cache[fi]->arena, files[fi].rel_path, files[fi].language);
-            if (namespace_name && namespace_name[0]) {
-                cache[fi]->namespace_name = namespace_name;
-            }
-        }
+        const char *namespace_name = cbm_pxc_apply_inferred_namespace(result, &files[fi]);
         /* One import map per FILE (not per def, and not per base name): the
          * cross-file base-class resolution needs the same local-name →
          * import-QN view pass_semantic uses. Both drivers have already
@@ -507,8 +547,8 @@ CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMFileResult
             pxc_build_import_map(ctx->gbuf, project_name, files[fi].rel_path, &imp_keys,
                                  &imp_vals, &imp_count);
         }
-        for (int di = 0; di < cache[fi]->defs.count; di++) {
-            if (pxc_build_lsp_def(&cache[fi]->arena, &cache[fi]->defs.items[di], def_modules[fi],
+        for (int di = 0; di < result->defs.count; di++) {
+            if (pxc_build_lsp_def(&result->arena, &result->defs.items[di], def_modules[fi],
                                   namespace_name, files[fi].language, &defs[idx], base_reg,
                                   imp_keys, imp_vals, imp_count) == 0) {
                 idx++;
@@ -516,8 +556,12 @@ CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMFileResult
         }
         pxc_free_import_map(imp_keys, imp_vals, imp_count); /* NULL-safe */
         if (files[fi].language == CBM_LANG_GO) {
-            pxc_fold_go_struct_fields(&cache[fi]->arena, cache[fi], defs, file_start, idx);
+            pxc_fold_go_struct_fields(&result->arena, result, defs, file_start, idx);
         }
+        if (loaded) {
+            pxc_own_def_strings(owned_arena, defs, file_start, idx);
+        }
+        cbm_result_cache_release(cache, fi, result);
     }
     *out_count = idx;
     return defs;
@@ -1083,7 +1127,8 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
 
     int def_count = 0;
     CBMLSPDef *all_defs = cbm_pxc_collect_all_defs(ctx, cache, files, file_count,
-                                                   ctx->project_name, def_modules, &def_count);
+                                                   ctx->project_name, def_modules, NULL,
+                                                   &def_count);
 
     /* Shared prepare (mirrors run_parallel_pipeline): inverted module-def
      * index + per-language shared registries, built ONCE for the whole pass.

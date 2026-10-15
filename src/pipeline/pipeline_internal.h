@@ -10,6 +10,7 @@
 
 #include "pipeline/pipeline.h"
 #include "pipeline/path_alias.h"
+#include "pipeline/result_spill.h"
 #include "graph_buffer/graph_buffer.h"
 #include "store/store.h"
 #include "zova/cbm_zova_repository.h"
@@ -92,6 +93,12 @@ typedef struct {
      * and pass_calls/usages/semantic reuse cached results instead of re-extracting.
      * Indexed by file position in the files[] array. Owned by pipeline.c. */
     CBMFileResult **result_cache;
+
+    /* Parallel extract spill store (F1). When the extract runs over its memory
+     * budget, results are parked here and their result_cache slots go NULL;
+     * every later pass reads a slot through cbm_result_cache_acquire. NULL on
+     * the sequential and incremental paths. Owned by run_parallel_pipeline. */
+    cbm_result_spill_t *spill;
 
     /* Build-tool path aliases (tsconfig/jsconfig today; webpack/vite-style
      * configs are an easy follow-on). NULL when no usable configs were found.
@@ -180,7 +187,8 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
  * the namespace string (e.g. "App.Utils", "com.example").  Returns NULL when no
  * results declared a namespace.  Caller frees via cbm_pipeline_namespace_map_free. */
 CBMHashTable *cbm_pipeline_namespace_map_build(const char *project_name,
-                                               CBMFileResult *const *results,
+                                               CBMFileResult **results,
+                                               cbm_result_spill_t *spill,
                                                const char *const *rels, int count);
 void cbm_pipeline_namespace_map_free(CBMHashTable *map);
 
@@ -548,11 +556,14 @@ bool cbm_pipeline_infra_route_key_allowed(const char *key_path);
 bool cbm_pipeline_is_infra_file(const char *rel_path);
 
 /* Mint infra Route nodes from config-file URLs and link infra topic bindings.
- * result_cache[i] holds the extraction result of files[i] (NULL entries skipped). */
+ * result_cache[i] holds the extraction result of files[i] (NULL entries skipped);
+ * `spill` (nullable) supplies the results parked by the parallel extract. */
 void cbm_pipeline_extract_infra_routes(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
-                                       CBMFileResult **result_cache, int file_count);
+                                       CBMFileResult **result_cache, cbm_result_spill_t *spill,
+                                       int file_count);
 void cbm_pipeline_process_infra_bindings(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
-                                         CBMFileResult **result_cache, int file_count);
+                                         CBMFileResult **result_cache, cbm_result_spill_t *spill,
+                                         int file_count);
 
 /* Stamp parse coverage on the File nodes of every file this run recorded in
  * file_errors. Call after extraction merged its per-file errors, on full and
@@ -696,5 +707,11 @@ bool extract_grpc_service_method(const char *callee, char *service, size_t srv_s
  * (futile: the resident floor, not transients, holds the memory). */
 long cbm_pp_bp_nap_cycles(void);
 void cbm_pp_bp_nap_cycles_reset(void);
+/* Test seam: non-zero makes the parallel extract park every result in the
+ * run's spill store from the first file (F1). */
+void cbm_parallel_force_spill_for_test(int on);
+/* Results parked by the parallel extract since the last reset. */
+long cbm_pp_spill_parked(void);
+void cbm_pp_spill_parked_reset(void);
 
 #endif /* CBM_PIPELINE_INTERNAL_H */

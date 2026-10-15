@@ -58,11 +58,17 @@ bool cbm_pxc_has_cross_lsp(CBMLanguage lang);
  * to a project QN through ctx->registry plus the file's import map — the same
  * inputs pass_semantic uses to draw its INHERITS edge, so the LSP's
  * inheritance view and the graph's cannot diverge. Pass NULL to keep the raw
- * source spelling. */
+ * source spelling. Results parked in ctx->spill are loaded one at a time and
+ * their def strings copied into owned_arena (which must outlive all_defs);
+ * with owned_arena NULL they are skipped. */
 CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMFileResult **cache,
                                     const cbm_file_info_t *files, int file_count,
                                     const char *project_name, char **def_modules,
-                                    int *out_count);
+                                    CBMArena *owned_arena, int *out_count);
+
+/* A file's declared namespace, or for Java/Kotlin the one inferred from its
+ * source-root path; stores the inferred value on result->namespace_name. */
+const char *cbm_pxc_apply_inferred_namespace(CBMFileResult *result, const cbm_file_info_t *file);
 
 /* Detect TS dialect flags from a relative path. */
 void cbm_pxc_ts_modes(CBMLanguage lang, const char *rel_path, bool *out_js, bool *out_jsx,

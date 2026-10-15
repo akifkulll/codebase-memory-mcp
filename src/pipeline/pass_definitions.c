@@ -633,7 +633,8 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             }
         }
         CBMHashTable *namespace_map =
-            cbm_pipeline_namespace_map_build(ctx->project_name, local_cache, rels, file_count);
+            cbm_pipeline_namespace_map_build(ctx->project_name, local_cache, NULL, rels,
+                                             file_count);
         free(rels);
         for (int i = 0; i < file_count; i++) {
             if (cbm_pipeline_check_cancel(ctx)) {

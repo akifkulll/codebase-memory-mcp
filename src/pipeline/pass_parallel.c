@@ -119,6 +119,24 @@ void cbm_pp_bp_nap_cycles_reset(void) {
     atomic_store_explicit(&g_bp_nap_cycles, 0, memory_order_relaxed);
 }
 
+/* Test seam: when set, a parallel extract with a spill store spills from its
+ * first file instead of waiting for the budget signal. */
+static _Atomic int g_force_spill = 0;
+/* Results parked by the parallel extract (test observability). */
+static _Atomic long g_spill_parked = 0;
+
+void cbm_parallel_force_spill_for_test(int on) {
+    atomic_store_explicit(&g_force_spill, on ? 1 : 0, memory_order_relaxed);
+}
+
+long cbm_pp_spill_parked(void) {
+    return atomic_load_explicit(&g_spill_parked, memory_order_relaxed);
+}
+
+void cbm_pp_spill_parked_reset(void) {
+    atomic_store_explicit(&g_spill_parked, 0, memory_order_relaxed);
+}
+
 /* Parse a positive MB-valued retention env knob (CBM_RETAIN_*_MB) into bytes.
  * Follows the limits.c strtol convention: unset / unparseable / non-positive
  * → return 0 so the caller keeps its derived default. */
@@ -720,6 +738,16 @@ typedef struct {
      * CBM_PIPELINE_ABORT_OVER_BUDGET. Deliberately not the shared cancel
      * token — that one belongs to client cancellation. */
     _Atomic int over_budget_abort;
+
+    /* Spill (F1). With a store, the first futility latch turns spilling on
+     * instead of failing the attempt: every finished result is then parked on
+     * disk and its result_cache slot cleared. result_owner[file_idx] is the
+     * extracting worker id + 1, so each worker parks its own backlog once
+     * (its own allocations, which its next cbm_mem_collect returns). Only a
+     * latch that fires again while spilling fails the attempt whole. */
+    cbm_result_spill_t *spill;
+    _Atomic int *result_owner;
+    _Atomic int spilling;
 } extract_ctx_t;
 
 /* Cap on the number of index.file_oversized WARN lines (the full list still goes
@@ -800,9 +828,51 @@ static void pp_fail_whole_over_budget(extract_ctx_t *ec) {
     }
 }
 
+static bool pp_park(extract_ctx_t *ec, int file_idx, CBMFileResult *result) {
+    if (!cbm_result_spill_park(ec->spill, file_idx, result)) {
+        return false;
+    }
+    atomic_fetch_add_explicit(&g_spill_parked, SKIP_ONE, memory_order_relaxed);
+    return true;
+}
+
+/* Park every result this worker extracted that is still in memory. */
+static void pp_spill_backlog(extract_ctx_t *ec, int worker_id) {
+    for (int i = 0; i < ec->file_count; i++) {
+        if (atomic_load_explicit(&ec->result_owner[i], memory_order_relaxed) != worker_id + 1) {
+            continue;
+        }
+        if (ec->result_cache[i] && pp_park(ec, i, ec->result_cache[i])) {
+            ec->result_cache[i] = NULL;
+        }
+    }
+    cbm_mem_collect();
+}
+
+/* The budget gate's futility latch fired. With a spill store that is not yet
+ * spilling, turn spilling on and re-arm the gate; otherwise run the B3
+ * confirmation cycle and fail the attempt whole if it still ends over. */
+static void pp_backpressure_futile(extract_ctx_t *ec, int worker_id) {
+    if (ec->spill && atomic_exchange_explicit(&ec->spilling, 1, memory_order_relaxed) == 0) {
+        cbm_log_warn("mem.spill.engaged", "rss_mb",
+                     itoa_log((int)(cbm_mem_rss() / (1024 * 1024))), "budget_mb",
+                     itoa_log((int)(cbm_mem_budget() / (1024 * 1024))));
+        pp_spill_backlog(ec, worker_id);
+        atomic_store_explicit(&ec->bp_futile, 0, memory_order_relaxed);
+        return;
+    }
+    cbm_log_warn("mem.backpressure.futile", "action", "confirm");
+    if (pp_backpressure_cycle_still_over(ec)) {
+        pp_fail_whole_over_budget(ec);
+    } else {
+        atomic_store_explicit(&ec->bp_futile, 0, memory_order_relaxed);
+    }
+}
+
 static void extract_worker(int worker_id, void *ctx_ptr) {
     extract_ctx_t *ec = ctx_ptr;
     extract_worker_state_t *ws = &ec->workers[worker_id];
+    bool backlog_spilled = false;
 
     /* Lazy gbuf creation */
     if (!ws->local_gbuf) {
@@ -849,12 +919,7 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
                  * (and WARN) once per worker. */
                 if (pp_backpressure_cycle_still_over(ec) &&
                     atomic_exchange_explicit(&ec->bp_futile, 1, memory_order_relaxed) == 0) {
-                    cbm_log_warn("mem.backpressure.futile", "action", "confirm");
-                    if (pp_backpressure_cycle_still_over(ec)) {
-                        pp_fail_whole_over_budget(ec);
-                    } else {
-                        atomic_store_explicit(&ec->bp_futile, 0, memory_order_relaxed);
-                    }
+                    pp_backpressure_futile(ec, worker_id);
                 }
             } else if (!over && futile) {
                 atomic_store_explicit(&ec->bp_futile, 0, memory_order_relaxed);
@@ -862,6 +927,11 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
         }
         if (atomic_load_explicit(&ec->over_budget_abort, memory_order_relaxed)) {
             break;
+        }
+        const bool spilling = atomic_load_explicit(&ec->spilling, memory_order_relaxed) != 0;
+        if (spilling && !backlog_spilled) {
+            pp_spill_backlog(ec, worker_id);
+            backlog_spilled = true;
         }
 
         int file_idx = ec->sorted[sort_pos].idx;
@@ -1023,8 +1093,15 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
          * and the retention copy (if any) lives in result->arena. */
         free_source(source);
 
-        /* Cache result (arena + extracted data, no tree) for Phase 3B and Phase 4 */
-        ec->result_cache[file_idx] = result;
+        /* Cache result (arena + extracted data, no tree) for Phase 3B and Phase 4.
+         * While spilling it goes straight to disk; a failed park keeps it. */
+        if (!spilling || !pp_park(ec, file_idx, result)) {
+            ec->result_cache[file_idx] = result;
+            if (ec->result_owner) {
+                atomic_store_explicit(&ec->result_owner[file_idx], worker_id + 1,
+                                      memory_order_relaxed);
+            }
+        }
 
         /* Progress logging: log every 10 files (atomic read, no contention) */
         if ((sort_pos + SKIP_ONE) % PP_LOG_INTERVAL == 0 || sort_pos + SKIP_ONE == ec->file_count) {
@@ -1177,6 +1254,14 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
     atomic_init(&ec.oversized_warned, 0);
     atomic_init(&ec.bp_futile, 0);
     atomic_init(&ec.over_budget_abort, 0);
+    ec.spill = ctx->spill;
+    ec.result_owner =
+        ec.spill ? (_Atomic int *)calloc((size_t)file_count, sizeof(_Atomic int)) : NULL;
+    if (!ec.result_owner) {
+        ec.spill = NULL; /* no owner map, no spilling: the B3 path stays */
+    }
+    atomic_init(&ec.spilling,
+                ec.spill && atomic_load_explicit(&g_force_spill, memory_order_relaxed) ? 1 : 0);
 
     /* Sub-phase: Dispatch workers (parse + extract per file, PARALLEL) */
     CBM_PROF_START(t_dispatch);
@@ -1220,6 +1305,7 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
 
     cbm_aligned_free(workers);
     free(sorted);
+    free(ec.result_owner);
 
     /* The over-budget verdict outranks the cancel sentinel: a caller must be
      * able to name the cause. Every non-zero code stops before publication. */
@@ -1373,7 +1459,8 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
         }
     }
     CBMHashTable *namespace_map =
-        cbm_pipeline_namespace_map_build(ctx->project_name, result_cache, rels, file_count);
+        cbm_pipeline_namespace_map_build(ctx->project_name, result_cache, ctx->spill, rels,
+                                         file_count);
     free(rels);
 
     for (int i = 0; i < file_count; i++) {
@@ -1382,7 +1469,7 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             return CBM_NOT_FOUND;
         }
 
-        CBMFileResult *result = result_cache[i];
+        CBMFileResult *result = cbm_result_cache_acquire(result_cache, ctx->spill, i);
         if (!result) {
             continue;
         }
@@ -1396,6 +1483,7 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
 
         imports_edges += create_imports_edges(ctx, result, rel, namespace_map);
         create_channel_edges(ctx, result, rel);
+        cbm_result_cache_release(result_cache, i, result);
     }
 
     cbm_pipeline_namespace_map_free(namespace_map);
@@ -1431,6 +1519,7 @@ typedef struct {
     int max_workers;
 
     CBMFileResult **result_cache;
+    cbm_result_spill_t *spill; /* parked results (F1); NULL when nothing spilled */
     const cbm_gbuf_t *main_gbuf;    /* READ-ONLY during Phase 4 */
     const cbm_registry_t *registry; /* READ-ONLY during Phase 4 */
     _Atomic int64_t *shared_ids;
@@ -2749,7 +2838,15 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
      * lifetime in the parallel_resolve phase. */
     cbm_service_pattern_cache_begin();
 
+    /* A result loaded from the spill store lives for one iteration; it is
+     * released at the top of the next one (every `continue` passes there)
+     * and after the loop. */
+    CBMFileResult *loaded = NULL;
+    int loaded_idx = -1;
     while (SKIP_ONE) {
+        cbm_result_cache_release(rc->result_cache, loaded_idx, loaded);
+        loaded = NULL;
+        loaded_idx = -1;
         int file_idx =
             atomic_fetch_add_explicit(&rc->next_file_idx, SKIP_ONE, memory_order_relaxed);
         if (file_idx >= rc->file_count) {
@@ -2761,7 +2858,16 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
 
         uint64_t _loop_t0 = extract_now_ns();
 
-        CBMFileResult *result = rc->result_cache[file_idx];
+        CBMFileResult *result = cbm_result_cache_acquire(rc->result_cache, rc->spill, file_idx);
+        if (result && result != rc->result_cache[file_idx]) {
+            loaded = result;
+            loaded_idx = file_idx;
+            /* cbm_pxc_collect_all_defs stored the inferred JVM namespace on
+             * the in-memory result; a loaded copy needs it again. */
+            if (rc->all_defs) {
+                cbm_pxc_apply_inferred_namespace(result, &rc->files[file_idx]);
+            }
+        }
         if (!result) {
             atomic_fetch_add_explicit(&rc->time_ns_total_loop, extract_now_ns() - _loop_t0,
                                       memory_order_relaxed);
@@ -2972,6 +3078,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         atomic_fetch_add_explicit(&rc->time_ns_total_loop, extract_now_ns() - _loop_t0,
                                   memory_order_relaxed);
     }
+    cbm_result_cache_release(rc->result_cache, loaded_idx, loaded);
 
     /* Tear down this worker's thread-local parser + slab state, mirroring
      * extract_worker. Without this, resolve-worker pages keep an owner pointer
@@ -3007,7 +3114,8 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
 
     bool have_rust = false;
     for (int i = 0; i < file_count; i++) {
-        if (result_cache[i] && files[i].language == CBM_LANG_RUST) {
+        if (files[i].language == CBM_LANG_RUST &&
+            cbm_result_cache_present(result_cache, ctx->spill, i)) {
             have_rust = true;
             break;
         }
@@ -3032,6 +3140,7 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
         .workers = workers,
         .max_workers = worker_count,
         .result_cache = result_cache,
+        .spill = ctx->spill,
         .main_gbuf = ctx->gbuf,
         .registry = ctx->registry,
         .shared_ids = shared_ids,

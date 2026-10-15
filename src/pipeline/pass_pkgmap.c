@@ -1675,32 +1675,36 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
 /* ── Namespace map ───────────────────────────────────────────────── */
 
 CBMHashTable *cbm_pipeline_namespace_map_build(const char *project_name,
-                                               CBMFileResult *const *results,
+                                               CBMFileResult **results,
+                                               cbm_result_spill_t *spill,
                                                const char *const *rels, int count) {
     CBMHashTable *map = NULL;
     for (int i = 0; i < count; i++) {
-        const CBMFileResult *r = results[i];
-        if (!r || !r->namespace_name || !r->namespace_name[0] || !rels[i]) {
+        if (!rels[i]) {
+            continue;
+        }
+        CBMFileResult *r = cbm_result_cache_acquire(results, spill, i);
+        char *key = r && r->namespace_name && r->namespace_name[0] ? strdup(r->namespace_name)
+                                                                   : NULL;
+        cbm_result_cache_release(results, i, r);
+        if (!key) {
             continue;
         }
         if (!map) {
             map = cbm_ht_create(CBM_SZ_64);
             if (!map) {
+                free(key);
                 return NULL;
             }
         }
         char *file_qn = cbm_pipeline_fqn_compute(project_name, rels[i], "__file__");
         if (!file_qn) {
+            free(key);
             continue;
         }
         /* Normalize the namespace key to dot-separated form so it matches the
          * dot-normalized lookups in cbm_pipeline_resolve_import_node (PHP uses
          * '\\', some grammars '::' or '/'). */
-        char *key = strdup(r->namespace_name);
-        if (!key) {
-            free(file_qn);
-            continue;
-        }
         for (char *p = key; *p; p++) {
             if (*p == '\\' || *p == ':' || *p == '/') {
                 *p = '.';

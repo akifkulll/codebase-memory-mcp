@@ -8512,21 +8512,35 @@ TEST(pipeline_backpressure_futile_nap_disengages) {
      * (this test's init won) — the "restore" re-init was then a silent
      * no-op and the 1 MB budget leaked into every later budget consumer
      * in the runner (mem_over_budget_low_rss went red suite-order-wide). */
+    /* Pinned workers keep the cycle bound below the file count on any host. */
+    enum { BP_WORKERS = 4 };
+    const char *old_workers = getenv("CBM_WORKERS");
+    char *saved_workers = old_workers ? strdup(old_workers) : NULL;
+    if ((old_workers && !saved_workers) || cbm_setenv("CBM_WORKERS", "4", 1) != 0) {
+        free(saved_workers);
+        teardown_test_repo();
+        FAIL("failed to pin CBM_WORKERS");
+    }
     size_t saved_budget = cbm_mem_budget();
     cbm_mem_set_budget_for_tests((size_t)1024 * 1024);
-    ASSERT_TRUE(cbm_mem_budget() > 0);
-    ASSERT_TRUE(cbm_mem_over_budget());
+    bool budget_set = cbm_mem_budget() > 0;
+    bool over_at_start = cbm_mem_over_budget();
 
     cbm_pp_bp_nap_cycles_reset();
     cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
-    ASSERT_NOT_NULL(p);
-    int rc = cbm_pipeline_run(p);
+    int rc = p ? cbm_pipeline_run(p) : -1;
     long cycles = cbm_pp_bp_nap_cycles();
 
-    /* Restore the caller-visible budget BEFORE asserting. */
+    /* Restore the caller-visible budget and workers BEFORE asserting. */
     cbm_mem_set_budget_for_tests(saved_budget);
+    int restore_workers_rc =
+        saved_workers ? cbm_setenv("CBM_WORKERS", saved_workers, 1) : cbm_unsetenv("CBM_WORKERS");
+    free(saved_workers);
     cbm_pipeline_free(p);
     teardown_test_repo();
+    ASSERT_EQ(restore_workers_rc, 0);
+    ASSERT_TRUE(budget_set);
+    ASSERT_TRUE(over_at_start);
 
     /* A budget that never drains is not a soft overshoot any more: after the
      * latch and ONE confirmation cycle the attempt fails whole with the named
@@ -8539,10 +8553,11 @@ TEST(pipeline_backpressure_futile_nap_disengages) {
     if (cycles < 1) {
         FAIL("back-pressure gate never engaged (cycles==0) — fixture routed sequential?");
     }
-    /* Futile napping must disengage: at most one in-flight cycle per worker
-     * plus the single confirmation cycle and a small margin, never one per
-     * file (64). */
-    long bound = (long)cbm_system_info().total_cores + 3;
+    /* Futile napping must disengage: never one cycle per file (64). The first
+     * latch engages the spill store (F1) and re-arms the gate once, so each
+     * worker can be in flight in two rounds, plus the single confirmation
+     * cycle and a small margin. */
+    long bound = 2L * BP_WORKERS + 3;
     if (cycles > bound) {
         char msg[128];
         snprintf(msg, sizeof(msg), "nap cycles %ld > bound %ld (gate re-paid per pull)", cycles,
@@ -8669,6 +8684,342 @@ TEST(pipeline_over_budget_after_futility_fails_whole_and_preserves_generation) {
 #endif
 }
 
+/* ── Extraction result spill (F1) ────────────────────────────────── */
+
+/* Sources whose results between them fill the encoded field families: defs
+ * with bases and decorators, calls with args, imports, usages, throws,
+ * env accesses, type refs, impl traits and config string refs. */
+static const struct {
+    CBMLanguage lang;
+    const char *rel;
+    const char *src;
+} k_spill_sources[] = {
+    {CBM_LANG_GO, "svc/server.go",
+     "package svc\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\ntype Server struct {\n\tName string\n"
+     "\tPort int\n}\n\nfunc (s *Server) Start() error {\n\tif os.Getenv(\"PORT\") == \"\" {\n"
+     "\t\treturn fmt.Errorf(\"no port %d\", s.Port)\n\t}\n\treturn nil\n}\n"},
+    {CBM_LANG_PYTHON, "app/models.py",
+     "import os\nfrom base import Base\n\n@dataclass\nclass User(Base):\n"
+     "    def save(self, db):\n        url = os.environ['DB_URL']\n"
+     "        db.write(self, url=url)\n        raise ValueError('x')\n"},
+    {CBM_LANG_JAVA, "src/main/java/com/acme/Repo.java",
+     "package com.acme;\n\nimport java.util.List;\n\npublic class Repo extends Base implements Store {\n"
+     "    private List<String> items;\n    public void add(String s) { items.add(s); helper(s, 1); }\n"
+     "}\n"},
+    {CBM_LANG_TYPESCRIPT, "web/api.ts",
+     "import { get } from './http';\nexport class Api {\n  async load(id: number): Promise<string> {\n"
+     "    const r = await get(`/users/${id}`, { timeout: 5 });\n    return r.body;\n  }\n}\n"},
+    {CBM_LANG_RUST, "core/src/lib.rs",
+     "use std::fmt;\npub struct P { x: i32 }\npub trait Shape { fn area(&self) -> f64; }\n"
+     "impl Shape for P { fn area(&self) -> f64 { helper(self.x) as f64 } }\n"},
+    {CBM_LANG_YAML, "deploy/app.yaml",
+     "service:\n  push_endpoint: https://api.example.com/hook\n  topic: orders\n"},
+};
+enum { SPILL_SOURCE_COUNT = (int)(sizeof(k_spill_sources) / sizeof(k_spill_sources[0])) };
+
+/* Extract source i with its source bytes retained, as the parallel extract
+ * retains them for cross-file LSP. */
+static CBMFileResult *spill_extract(int i) {
+    const char *src = k_spill_sources[i].src;
+    int len = (int)strlen(src);
+    CBMFileResult *r = cbm_extract_file(src, len, k_spill_sources[i].lang, "spillproj",
+                                        k_spill_sources[i].rel, 0, NULL, NULL);
+    char *copy = r ? (char *)cbm_arena_alloc(&r->arena, (size_t)len + 1) : NULL;
+    if (copy) {
+        memcpy(copy, src, (size_t)len + 1);
+        r->source = copy;
+        r->source_len = len;
+    }
+    return r;
+}
+
+/* decode(encode(r)) re-encodes to the same bytes, so every encoded field
+ * survives the trip; the spot checks guard against an encoder that drops a
+ * field on both sides. */
+TEST(result_spill_round_trip_is_byte_identical) {
+    int defs = 0;
+    int calls = 0;
+    int imports = 0;
+    int usages = 0;
+    int string_refs = 0;
+    for (int i = 0; i < SPILL_SOURCE_COUNT; i++) {
+        CBMFileResult *r = spill_extract(i);
+        ASSERT_NOT_NULL(r);
+        defs += r->defs.count;
+        calls += r->calls.count;
+        imports += r->imports.count;
+        usages += r->usages.count;
+        string_refs += r->string_refs.count;
+        size_t len1 = 0;
+        size_t len2 = 0;
+        char *e1 = cbm_result_spill_encode(r, &len1);
+        CBMFileResult *d = e1 ? cbm_result_spill_decode(e1, len1) : NULL;
+        char *e2 = d ? cbm_result_spill_encode(d, &len2) : NULL;
+        bool same = e2 && len1 == len2 && memcmp(e1, e2, len1) == 0;
+        bool fields = d && d->defs.count == r->defs.count && d->calls.count == r->calls.count &&
+                      d->source_len == r->source_len && d->source &&
+                      memcmp(d->source, r->source, (size_t)r->source_len) == 0 &&
+                      (r->defs.count == 0 || strcmp(d->defs.items[0].qualified_name,
+                                                    r->defs.items[0].qualified_name) == 0) &&
+                      (r->module_qn == NULL) == (d->module_qn == NULL) &&
+                      (!r->module_qn || strcmp(r->module_qn, d->module_qn) == 0);
+        free(e1);
+        free(e2);
+        cbm_free_result(d);
+        cbm_free_result(r);
+        if (!same || !fields) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "round trip differs for %s (same=%d fields=%d)",
+                     k_spill_sources[i].rel, same, fields);
+            FAIL(msg);
+        }
+    }
+    ASSERT_GT(defs, 0);
+    ASSERT_GT(calls, 0);
+    ASSERT_GT(imports, 0);
+    ASSERT_GT(usages, 0);
+    ASSERT_GT(string_refs, 0);
+    PASS();
+}
+
+/* Every strict prefix of an encoding, and the encoding plus a trailing
+ * byte, is rejected rather than read past its end. */
+TEST(result_spill_decode_rejects_truncated_buffers) {
+    CBMFileResult *r = spill_extract(0);
+    ASSERT_NOT_NULL(r);
+    size_t len = 0;
+    char *e = cbm_result_spill_encode(r, &len);
+    cbm_free_result(r);
+    ASSERT_NOT_NULL(e);
+    char *longer = (char *)malloc(len + 1);
+    ASSERT_NOT_NULL(longer);
+    memcpy(longer, e, len);
+    longer[len] = 0;
+    size_t accepted_prefix = len;
+    for (size_t cut = 0; cut < len; cut++) {
+        CBMFileResult *d = cbm_result_spill_decode(e, cut);
+        if (d) {
+            cbm_free_result(d);
+            accepted_prefix = cut;
+            break;
+        }
+    }
+    CBMFileResult *trailing = cbm_result_spill_decode(longer, len + 1);
+    CBMFileResult *whole = cbm_result_spill_decode(e, len);
+    bool trailing_rejected = trailing == NULL;
+    bool whole_ok = whole != NULL;
+    cbm_free_result(trailing);
+    cbm_free_result(whole);
+    free(longer);
+    free(e);
+    ASSERT_EQ(accepted_prefix, len);
+    ASSERT_TRUE(trailing_rejected);
+    ASSERT_TRUE(whole_ok);
+    PASS();
+}
+
+/* A parked slot loads back into an equal result; the peek counts match; an
+ * unparked slot is empty; close deletes the store file. */
+TEST(result_spill_store_parks_and_loads) {
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/cbm_spill_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(dir));
+    cbm_result_spill_t *sp = cbm_result_spill_open(dir, SPILL_SOURCE_COUNT + 1);
+    ASSERT_NOT_NULL(sp);
+    bool ok = true;
+    for (int i = 0; i < SPILL_SOURCE_COUNT && ok; i++) {
+        CBMFileResult *r = spill_extract(i);
+        size_t len = 0;
+        char *before = r ? cbm_result_spill_encode(r, &len) : NULL;
+        int strrefs = r ? r->string_refs.count : -1;
+        ok = before && cbm_result_spill_park(sp, i, r); /* frees r */
+        if (!ok) {
+            cbm_free_result(r);
+        }
+        CBMFileResult *loaded = ok ? cbm_result_spill_load(sp, i) : NULL;
+        size_t len2 = 0;
+        char *after = loaded ? cbm_result_spill_encode(loaded, &len2) : NULL;
+        ok = ok && after && len == len2 && memcmp(before, after, len) == 0 &&
+             cbm_result_spill_has(sp, i) && cbm_result_spill_string_ref_count(sp, i) == strrefs;
+        free(before);
+        free(after);
+        cbm_free_result(loaded);
+    }
+    bool empty_slot = !cbm_result_spill_has(sp, SPILL_SOURCE_COUNT) &&
+                      cbm_result_spill_load(sp, SPILL_SOURCE_COUNT) == NULL;
+    int64_t parked = 0;
+    int64_t bytes = 0;
+    int64_t loads = 0;
+    cbm_result_spill_stats(sp, &parked, &bytes, &loads);
+    cbm_result_spill_close(sp);
+    bool dir_empty = rmdir(dir) == 0;
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(empty_slot);
+    ASSERT_EQ(parked, SPILL_SOURCE_COUNT);
+    ASSERT_EQ(loads, SPILL_SOURCE_COUNT);
+    ASSERT_GT(bytes, 0);
+    ASSERT_TRUE(dir_empty);
+    PASS();
+}
+
+#if CBM_WITH_ZOVA
+/* 61 files across Go, Python, Java (no package line, so the JVM namespace is
+ * inferred from the source root), TypeScript, Rust and YAML, with
+ * cross-file calls, inheritance and config URLs: above
+ * MIN_FILES_FOR_PARALLEL so the parallel path runs. */
+static bool write_spill_fixture(void) {
+    snprintf(g_tmpdir, sizeof(g_tmpdir), "%s/cbm_test_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(g_tmpdir)) {
+        return false;
+    }
+    static const char *const dirs[] = {"pkg", "app", "src", "src/main", "src/main/java",
+                                       "src/main/java/com", "src/main/java/com/acme", "web",
+                                       "core", "services", "src/test", "src/test/java",
+                                       "src/test/java/com", "src/test/java/com/acme"};
+    char path[512];
+    for (size_t d = 0; d < sizeof(dirs) / sizeof(dirs[0]); d++) {
+        snprintf(path, sizeof(path), "%s/%s", g_tmpdir, dirs[d]);
+        if (cbm_mkdir(path) != 0) {
+            return false;
+        }
+    }
+    char body[1024];
+    for (int i = 0; i < 60; i++) {
+        int k = i % 12;
+        int prev = k == 0 ? 0 : k - 1;
+        switch (i / 12) {
+        case 0:
+            snprintf(path, sizeof(path), "%s/pkg/g%02d.go", g_tmpdir, k);
+            snprintf(body, sizeof(body),
+                     "package pkg\n\ntype T%02d struct {\n\tNext *T%02d\n\tN int\n}\n\n"
+                     "func (t *T%02d) Run() int {\n\treturn t.Next.Run() + F%02d()\n}\n\n"
+                     "func F%02d() int {\n\treturn %d\n}\n",
+                     k, (k + 1) % 12, k, prev, k, k);
+            break;
+        case 1:
+            snprintf(path, sizeof(path), "%s/app/m%02d.py", g_tmpdir, k);
+            if (k == 0) {
+                snprintf(body, sizeof(body), "class C00:\n    def go(self):\n        return 0\n");
+            } else {
+                snprintf(body, sizeof(body),
+                         "from app.m%02d import C%02d\n\nclass C%02d(C%02d):\n"
+                         "    def go(self):\n        return C%02d().go() + 1\n",
+                         prev, prev, k, prev, prev);
+            }
+            break;
+        case 2:
+            snprintf(path, sizeof(path), "%s/src/main/java/com/acme/J%02d.java", g_tmpdir, k);
+            if (k == 0) {
+                snprintf(body, sizeof(body), "public class J00 {\n  public int run() { return 0; }\n}\n");
+            } else {
+                snprintf(body, sizeof(body),
+                         "public class J%02d extends J%02d {\n"
+                         "  public int run() { return new J%02d().run() + 1; }\n}\n",
+                         k, prev, prev);
+            }
+            break;
+        case 3:
+            snprintf(path, sizeof(path), "%s/web/t%02d.ts", g_tmpdir, k);
+            if (k == 0) {
+                snprintf(body, sizeof(body), "export function t00(): number { return 0; }\n");
+            } else {
+                snprintf(body, sizeof(body),
+                         "import { t%02d } from './t%02d';\n"
+                         "export function t%02d(): number { return t%02d() + 1; }\n",
+                         prev, prev, k, prev);
+            }
+            break;
+        default:
+            if (k < 6) {
+                snprintf(path, sizeof(path), "%s/core/r%02d.rs", g_tmpdir, k);
+                snprintf(body, sizeof(body), "pub fn r%02d() -> i32 {\n    r%02d() + 1\n}\n", k,
+                         prev);
+            } else {
+                snprintf(path, sizeof(path), "%s/services/s%02d.yaml", g_tmpdir, k);
+                snprintf(body, sizeof(body),
+                         "service:\n  push_endpoint: https://svc%02d.example.com/hook\n"
+                         "  jwks_url: https://auth.example.com/keys\n",
+                         k);
+            }
+            break;
+        }
+        FILE *f = fopen(path, "w");
+        if (!f) {
+            return false;
+        }
+        fputs(body, f);
+        fclose(f);
+    }
+    /* Same inferred package, other source root: J05 is visible to this file's
+     * cross-LSP only through the namespace, not its module or imports. */
+    snprintf(path, sizeof(path), "%s/src/test/java/com/acme/J05Test.java", g_tmpdir);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        return false;
+    }
+    fputs("public class J05Test {\n"
+          "  public int check() { J05 j = new J05(); return j.run(); }\n}\n",
+          f);
+    fclose(f);
+    return true;
+}
+
+/* One full index of the fixture from an empty cbm.zova; digests on success. */
+static int spill_full_index_digest(bool force_spill, long *parked, pipeline_sql_digest_t *nodes,
+                                   pipeline_sql_digest_t *edges) {
+    th_remove_zova_user_database();
+    cbm_pp_spill_parked_reset();
+    cbm_parallel_force_spill_for_test(force_spill ? 1 : 0);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, NULL, CBM_MODE_FULL);
+    int rc = p ? cbm_pipeline_run(p) : -1;
+    cbm_parallel_force_spill_for_test(0);
+    *parked = cbm_pp_spill_parked();
+    bool full = p && cbm_pipeline_get_last_route(p) == CBM_PIPELINE_ROUTE_FULL;
+    char *project = p ? strdup(cbm_pipeline_project_name(p)) : NULL;
+    cbm_pipeline_free(p);
+    int digest_rc = rc == 0 && full && project ? pipeline_zova_graph_digest(project, nodes, edges)
+                                               : -1;
+    free(project);
+    return digest_rc;
+}
+#endif
+
+/* Parking every extraction result and reading it back in each later pass
+ * (registry, namespace map, cross-LSP collection, resolve, infra) yields
+ * the same graph as keeping all results in memory. */
+TEST(pipeline_forced_spill_matches_in_memory_graph) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    if (!write_spill_fixture()) {
+        teardown_test_repo();
+        FAIL("failed to create fixture");
+    }
+    long parked_normal = -1;
+    long parked_spill = -1;
+    pipeline_sql_digest_t nodes_normal = {0};
+    pipeline_sql_digest_t edges_normal = {0};
+    pipeline_sql_digest_t nodes_spill = {0};
+    pipeline_sql_digest_t edges_spill = {0};
+    int normal_rc = spill_full_index_digest(false, &parked_normal, &nodes_normal, &edges_normal);
+    int spill_rc = spill_full_index_digest(true, &parked_spill, &nodes_spill, &edges_spill);
+    teardown_test_repo();
+
+    ASSERT_EQ(normal_rc, 0);
+    ASSERT_EQ(spill_rc, 0);
+    ASSERT_EQ(parked_normal, 0);
+    /* Engagement guard: every extracted file was parked. */
+    ASSERT_EQ(parked_spill, 61);
+    ASSERT_GT(nodes_normal.rows, 60);
+    ASSERT_GT(edges_normal.rows, 60);
+    ASSERT_EQ(nodes_spill.rows, nodes_normal.rows);
+    ASSERT_TRUE(nodes_spill.hash == nodes_normal.hash);
+    ASSERT_EQ(edges_spill.rows, edges_normal.rows);
+    ASSERT_TRUE(edges_spill.hash == edges_normal.hash);
+    PASS();
+#endif
+}
+
 /* TS cross-registry test hooks (ts_lsp.c) — extern to avoid pulling the
  * tree-sitter-typed ts_lsp.h into this store-level test. */
 extern long cbm_ts_full_registry_builds(void);
@@ -8752,6 +9103,11 @@ SUITE(pipeline) {
      * database dump, so these run in the default suite again. */
     RUN_TEST(pipeline_backpressure_futile_nap_disengages);
     RUN_TEST(pipeline_over_budget_after_futility_fails_whole_and_preserves_generation);
+    /* Extraction result spill (F1) */
+    RUN_TEST(result_spill_round_trip_is_byte_identical);
+    RUN_TEST(result_spill_decode_rejects_truncated_buffers);
+    RUN_TEST(result_spill_store_parks_and_loads);
+    RUN_TEST(pipeline_forced_spill_matches_in_memory_graph);
     /* Sequential cross-LSP shared registry (ms-typescript quadratic) */
     RUN_TEST(pipeline_seq_ts_cross_uses_shared_registry);
     /* File persistence */

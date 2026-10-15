@@ -604,18 +604,24 @@ static int process_one_infra_binding(cbm_gbuf_t *gbuf, const CBMInfraBinding *ib
 }
 
 void cbm_pipeline_process_infra_bindings(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
-                                         CBMFileResult **result_cache, int file_count) {
+                                         CBMFileResult **result_cache, cbm_result_spill_t *spill,
+                                         int file_count) {
     int bindings = 0;
     for (int i = 0; i < file_count; i++) {
-        if (!result_cache[i]) {
+        if (!result_cache[i] && cbm_result_spill_infra_binding_count(spill, i) == 0) {
             continue;
         }
-        for (int bi = 0; bi < result_cache[i]->infra_bindings.count; bi++) {
-            const CBMInfraBinding *ib = &result_cache[i]->infra_bindings.items[bi];
+        CBMFileResult *result = cbm_result_cache_acquire(result_cache, spill, i);
+        if (!result) {
+            continue;
+        }
+        for (int bi = 0; bi < result->infra_bindings.count; bi++) {
+            const CBMInfraBinding *ib = &result->infra_bindings.items[bi];
             if (ib->source_name && ib->target_url) {
                 bindings += process_one_infra_binding(gbuf, ib, files[i].rel_path);
             }
         }
+        cbm_result_cache_release(result_cache, i, result);
     }
     if (bindings > 0) {
         char buf[CBM_SZ_16];
@@ -729,7 +735,8 @@ static bool route_sr_denied(const CBMStringRef *sr) {
 }
 
 void cbm_pipeline_extract_infra_routes(cbm_gbuf_t *gbuf, const cbm_file_info_t *files,
-                                       CBMFileResult **result_cache, int file_count) {
+                                       CBMFileResult **result_cache, cbm_result_spill_t *spill,
+                                       int file_count) {
     /* DENY-WINS-BY-VALUE: the same URL is often extracted as several string_refs
      * at different key_path granularities (full path, leaf key, flat). The Route
      * node is keyed by VALUE, so it would be minted if ANY granularity passed the
@@ -737,27 +744,43 @@ void cbm_pipeline_extract_infra_routes(cbm_gbuf_t *gbuf, const cbm_file_info_t *
      * is defeated by a sibling leaf `url`. So pass 1 collects every URL value
      * denied under ANY of its refs; pass 2 mints only values never denied. (#521) */
     CBMHashTable *denied = cbm_ht_create(16);
+    /* `denied` borrows its keys; values from a loaded (spilled) result are
+     * copied here because the result is freed before pass 2 reads them. */
+    CBMArena denied_keys;
+    cbm_arena_init(&denied_keys);
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < file_count; i++) {
-            if (!result_cache[i] || !cbm_pipeline_is_infra_file(files[i].rel_path)) {
+            if (!cbm_pipeline_is_infra_file(files[i].rel_path) ||
+                (!result_cache[i] && cbm_result_spill_string_ref_count(spill, i) == 0)) {
                 continue;
             }
-            for (int si = 0; si < result_cache[i]->string_refs.count; si++) {
-                const CBMStringRef *sr = &result_cache[i]->string_refs.items[si];
+            CBMFileResult *result = cbm_result_cache_acquire(result_cache, spill, i);
+            if (!result) {
+                continue;
+            }
+            const bool loaded = result != result_cache[i];
+            for (int si = 0; si < result->string_refs.count; si++) {
+                const CBMStringRef *sr = &result->string_refs.items[si];
                 if (sr->kind != CBM_STRREF_URL || !sr->value || !strstr(sr->value, "://")) {
                     continue;
                 }
                 if (pass == 0) {
-                    if (denied && route_sr_denied(sr)) {
-                        cbm_ht_set(denied, sr->value, (void *)1);
+                    if (denied && route_sr_denied(sr) && !cbm_ht_has(denied, sr->value)) {
+                        const char *key =
+                            loaded ? cbm_arena_strdup(&denied_keys, sr->value) : sr->value;
+                        if (key) {
+                            cbm_ht_set(denied, key, (void *)1);
+                        }
                     }
                 } else if (!denied || !cbm_ht_has(denied, sr->value)) {
                     try_upsert_infra_route(gbuf, sr, files[i].rel_path);
                 }
             }
+            cbm_result_cache_release(result_cache, i, result);
         }
     }
     cbm_ht_free(denied);
+    cbm_arena_destroy(&denied_keys);
 }
 
 /* Run decorator_tags, configlink, and route matching passes. */
@@ -879,8 +902,8 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
      * one. process_one_infra_binding self-creates the topic Route node when no
      * code-side dispatch created it (e.g. a standalone scheduler manifest). */
     if (seq_cache && rc == 0) {
-        cbm_pipeline_extract_infra_routes(p->gbuf, files, seq_cache, file_count);
-        cbm_pipeline_process_infra_bindings(p->gbuf, files, seq_cache, file_count);
+        cbm_pipeline_extract_infra_routes(p->gbuf, files, seq_cache, NULL, file_count);
+        cbm_pipeline_process_infra_bindings(p->gbuf, files, seq_cache, NULL, file_count);
     }
     if (seq_cache) {
         for (int i = 0; i < file_count; i++) {
@@ -901,9 +924,9 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
 }
 
 /* Run the parallel pipeline path: extract, registry, resolve, infra, k8s. */
-static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
-                                 const cbm_file_info_t *files, int file_count, int worker_count,
-                                 struct timespec *t) {
+static int run_parallel_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
+                               const cbm_file_info_t *files, int file_count, int worker_count,
+                               struct timespec *t) {
     cbm_log_info("pipeline.mode", "mode", "parallel", "workers", itoa_buf(worker_count), "files",
                  itoa_buf(file_count));
     _Atomic int64_t shared_ids;
@@ -966,15 +989,19 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     if (!run_cross_lsp) {
         cbm_log_info("lsp_cross.skipped", "reason", "CBM_DISABLE_LSP_CROSS env set");
     }
+    /* Owns the per-language cross registries below and the def strings of
+     * spilled results, so it outlives all_defs. */
+    CBMArena cross_lsp_arena;
+    cbm_arena_init(&cross_lsp_arena);
     char **def_modules = NULL;
     int def_count = 0;
     CBMLSPDef *all_defs = NULL;
     if (run_cross_lsp) {
         def_modules = (char **)calloc((size_t)file_count, sizeof(char *));
-        all_defs = def_modules
-                       ? cbm_pxc_collect_all_defs(ctx, cache, files, file_count,
-                                                  ctx->project_name, def_modules, &def_count)
-                       : NULL;
+        all_defs = def_modules ? cbm_pxc_collect_all_defs(ctx, cache, files, file_count,
+                                                          ctx->project_name, def_modules,
+                                                          &cross_lsp_arena, &def_count)
+                               : NULL;
     }
     /* Build inverted index: module_qn → defs. The fused resolve_worker
      * uses this to filter the global all_defs[] down to just the defs
@@ -989,8 +1016,6 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
      * during resolve. Per-file work is then: parse + AST walk + O(1) lookups
      * — no registry build, no Phase 1b mutations. Languages added so far:
      * Go, Python. Others (C/C++, TS/JS, PHP, C#) fall back to per-file. */
-    CBMArena cross_lsp_arena;
-    cbm_arena_init(&cross_lsp_arena);
     CBMCrossLspRegistries cross_registries = {0};
     if (all_defs) {
         cross_registries.go = cbm_go_build_cross_registry(&cross_lsp_arena, all_defs, def_count);
@@ -1022,8 +1047,8 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         free(def_modules);
     }
     cbm_gbuf_set_next_id(p->gbuf, atomic_load(&shared_ids));
-    cbm_pipeline_extract_infra_routes(p->gbuf, files, cache, file_count);
-    cbm_pipeline_process_infra_bindings(p->gbuf, files, cache, file_count);
+    cbm_pipeline_extract_infra_routes(p->gbuf, files, cache, ctx->spill, file_count);
+    cbm_pipeline_process_infra_bindings(p->gbuf, files, cache, ctx->spill, file_count);
     for (int i = 0; i < file_count; i++) {
         if (cache[i]) {
             cbm_free_result(cache[i]);
@@ -1037,6 +1062,40 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     cbm_pipeline_pass_k8s(ctx, files, file_count);
     cbm_log_info("pass.timing", "pass", "k8s", "elapsed_ms", itoa_buf((int)elapsed_ms(*t)));
     return check_cancel(p) ? CBM_NOT_FOUND : 0;
+}
+
+/* run_parallel_passes with a spill store (F1) the extract can park results
+ * in when it runs over its memory budget. The store's file lives under the
+ * cache dir and is deleted when the run ends. */
+static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
+                                 const cbm_file_info_t *files, int file_count, int worker_count,
+                                 struct timespec *t) {
+    const char *cache_dir = cbm_resolve_cache_dir();
+    char spill_dir[CBM_SZ_1K];
+    if (cache_dir && snprintf(spill_dir, sizeof(spill_dir), "%s/spill", cache_dir) <
+                         (int)sizeof(spill_dir)) {
+        ctx->spill = cbm_result_spill_open(spill_dir, file_count);
+    }
+    int rc = run_parallel_passes(p, ctx, files, file_count, worker_count, t);
+    if (rc == 0 && cbm_result_spill_load_failures(ctx->spill) > 0) {
+        /* A pass ran without some parked results: never publish that graph. */
+        cbm_log_error("mem.spill.failed", "load_failures",
+                      itoa_buf((int)cbm_result_spill_load_failures(ctx->spill)));
+        rc = CBM_NOT_FOUND;
+    }
+    if (ctx->spill) {
+        int64_t parked = 0;
+        int64_t bytes = 0;
+        int64_t loads = 0;
+        cbm_result_spill_stats(ctx->spill, &parked, &bytes, &loads);
+        if (parked > 0) {
+            cbm_log_info("mem.spill.done", "parked", itoa_buf((int)parked), "mb",
+                         itoa_buf((int)(bytes / (1024 * 1024))), "loads", itoa_buf((int)loads));
+        }
+        cbm_result_spill_close(ctx->spill);
+        ctx->spill = NULL;
+    }
+    return rc;
 }
 
 enum { PIPELINE_INCREMENTAL_FATAL = -2 };

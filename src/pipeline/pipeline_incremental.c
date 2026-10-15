@@ -796,8 +796,8 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
             cbm_log_info("pass.timing", "pass", "incr_resolve", "elapsed_ms",
                          itoa_buf((int)elapsed_ms(t)));
 
-            cbm_pipeline_extract_infra_routes(ctx->gbuf, changed_files, cache, ci);
-            cbm_pipeline_process_infra_bindings(ctx->gbuf, changed_files, cache, ci);
+            cbm_pipeline_extract_infra_routes(ctx->gbuf, changed_files, cache, NULL, ci);
+            cbm_pipeline_process_infra_bindings(ctx->gbuf, changed_files, cache, NULL, ci);
             for (int j = 0; j < ci; j++) {
                 if (cache[j]) {
                     cbm_free_result(cache[j]);
@@ -818,8 +818,8 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
         cbm_pipeline_pass_semantic(ctx, changed_files, ci);
         ctx->result_cache = NULL;
         if (cache) {
-            cbm_pipeline_extract_infra_routes(ctx->gbuf, changed_files, cache, ci);
-            cbm_pipeline_process_infra_bindings(ctx->gbuf, changed_files, cache, ci);
+            cbm_pipeline_extract_infra_routes(ctx->gbuf, changed_files, cache, NULL, ci);
+            cbm_pipeline_process_infra_bindings(ctx->gbuf, changed_files, cache, NULL, ci);
             for (int j = 0; j < ci; j++) {
                 if (cache[j]) {
                     cbm_free_result(cache[j]);
