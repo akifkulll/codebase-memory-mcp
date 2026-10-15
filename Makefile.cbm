@@ -63,7 +63,7 @@ CXXFLAGS_PROD = $(CXXFLAGS_COMMON) -O2
 
 # Test flags: debug + sanitizers (override SANITIZE= to disable on Windows)
 SANITIZE = -fsanitize=address,undefined -fno-omit-frame-pointer
-CFLAGS_TEST = $(CFLAGS_COMMON) -g -O1 $(SANITIZE)
+CFLAGS_TEST = $(CFLAGS_COMMON) -g -O1 -Wno-unused-function $(SANITIZE)
 CXXFLAGS_TEST = $(CXXFLAGS_COMMON) -g -O1 $(SANITIZE)
 
 # TSan (can't combine with ASan)
@@ -323,6 +323,7 @@ TEST_FOUNDATION_SRCS = \
 
 TEST_EXTRACTION_SRCS = \
     tests/test_extraction.c \
+    tests/test_parse_coverage.c \
     tests/test_extraction_inheritance.c \
     tests/test_extraction_imports.c \
     tests/test_grammar_regression.c \
@@ -407,7 +408,7 @@ TEST_SIMHASH_SRCS = tests/test_simhash.c
 
 TEST_STACK_OVERFLOW_SRCS = tests/test_stack_overflow.c
 
-TEST_ZOVA_SRCS = tests/test_zova.c
+TEST_ZOVA_SRCS = tests/test_zova.c tests/test_zova_operations.c
 TEST_ZOVA_C_SQL_FUNCTIONS_SRCS = tests/test_zova_c_sql_functions.c
 TEST_ZOVA_BRIDGE_SRCS = tests/test_zova_bridge.c tests/test_zova_plugin.c
 
