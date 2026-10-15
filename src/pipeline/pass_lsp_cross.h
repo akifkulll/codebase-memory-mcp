@@ -38,6 +38,7 @@
 #include "lsp/rust_lsp.h" /* cbm_rust_build_cross_registry / cbm_run_rust_lsp_cross_with_registry */
 #include "pipeline/pipeline_internal.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 /* True iff this language has a cbm_run_X_lsp_cross resolver wired up. */
 bool cbm_pxc_has_cross_lsp(CBMLanguage lang);
@@ -160,6 +161,13 @@ void cbm_pxc_run_one_ts(CBMFileResult *r, const char *source, int source_len, co
                         CBMLSPDef *all_defs, int def_count, const char **imp_keys,
                         const char **imp_vals, int imp_count, bool js_mode, bool jsx_mode,
                         bool dts_mode);
+
+/* Per-file registry-build cost (upstream cffb4e37): defs registered by the
+ * per-file cross-LSP path, how many files built a per-file registry, and how
+ * often the module filter ran and found nothing. Reset per parallel resolve. */
+void cbm_pxc_filter_stats(uint64_t *defs_registered, uint64_t *build_files, uint64_t *filter_files,
+                          uint64_t *filter_failed);
+void cbm_pxc_filter_stats_reset(void);
 
 /* Per-file cross-LSP dispatch shared by the parallel resolve worker AND the
  * sequential driver (one path = one semantics): module-def-index filter →

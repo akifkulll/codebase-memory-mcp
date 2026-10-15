@@ -1265,6 +1265,160 @@ TEST(tool_check_index_coverage_reports_recorded_gaps) {
 #endif
 }
 
+/* #12 (upstream 2235af41/b5c89ee5): index_repository caps its parse_partial
+ * list, but check_index_coverage reads File rows per exact path, so a path
+ * past the cap keeps its exact status and a clean path stays recorded. */
+TEST(tool_check_index_coverage_exact_paths_beyond_partial_cap) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    enum { BROKEN_FILES = 55 };
+    char root[512];
+    char cache[512];
+    snprintf(root, sizeof(root), "%s/cbm-mcp-coverage-cap-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-coverage-cap-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    ASSERT_EQ(th_write_file(TH_PATH(root, "good.c"), "int helper(void) { return 42; }\n"), 0);
+    for (int i = 0; i < BROKEN_FILES; i++) {
+        char rel[32];
+        snprintf(rel, sizeof(rel), "b%02d.c", i);
+        ASSERT_EQ(th_write_file(TH_PATH(root, rel), COVERAGE_BROKEN_C("ok_fn")), 0);
+    }
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"fast\",\"name\":\"cov-cap\"}",
+             root);
+    char *indexed = cbm_mcp_handle_tool(srv, "index_repository", args);
+    bool index_ok = response_contains_json_fragment(indexed, "\"status\":\"indexed\"") &&
+                    response_contains_json_fragment(indexed, "\"count\":55") &&
+                    response_contains_json_fragment(indexed, "\"truncated\":true");
+
+    char *cov = cbm_mcp_handle_tool(
+        srv, "check_index_coverage",
+        "{\"project\":\"cov-cap\",\"paths\":[\"b00.c\",\"b54.c\",\"good.c\"]}");
+    bool paths_ok = response_contains_json_fragment(cov, "\"coverage_recorded\":true") &&
+                    coverage_path_is(cov, "b00.c", "status", "partial") &&
+                    coverage_path_is(cov, "b54.c", "status", "partial") &&
+                    coverage_path_is(cov, "good.c", "status", "no_recorded_issue") &&
+                    coverage_path_is(cov, "good.c", "freshness", "metadata_match");
+    char *ranges = coverage_path_field(cov, "b54.c", "parse_error_ranges");
+    bool ranges_ok = ranges && strstr(ranges, "\"start\":");
+    free(ranges);
+    free(cov);
+
+    cov = cbm_mcp_handle_tool(srv, "check_index_coverage",
+                              "{\"project\":\"cov-cap\",\"scopes\":[\".\"]}");
+    bool scope_ok = response_contains_json_fragment(cov, "\"status\":\"known_gaps\"") &&
+                    response_contains_json_fragment(cov, "\"files\":56") &&
+                    response_contains_json_fragment(cov, "\"partial\":55");
+    free(cov);
+
+    free(indexed);
+    cbm_mcp_server_free(srv);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+    th_rmtree(root);
+    th_rmtree(cache);
+
+    ASSERT_TRUE(index_ok);
+    ASSERT_TRUE(paths_ok);
+    ASSERT_TRUE(ranges_ok);
+    ASSERT_TRUE(scope_ok);
+    PASS();
+#endif
+}
+
+/* #12 (upstream d024f41e): coverage survives an index-mode downgrade. A
+ * fast re-index of a full index keeps files that fast discovery skips (the
+ * additive mode_skipped contract in pipeline_incremental.c), so their
+ * recorded gaps must survive a changed incremental publish rather than
+ * vanish or look healed; a real deletion still removes them. */
+TEST(tool_check_index_coverage_survives_mode_downgrade) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    char root[512];
+    char cache[512];
+    snprintf(root, sizeof(root), "%s/cbm-mcp-coverage-mode-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-coverage-mode-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    ASSERT_EQ(th_write_file(TH_PATH(root, "src/ok.c"), "int helper(void) { return 42; }\n"), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "examples/demo.c"), COVERAGE_BROKEN_C("demo_ok")), 0);
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+
+    const char *cov_args = "{\"project\":\"cov-mode\",\"paths\":[\"examples/demo.c\","
+                           "\"src/ok.c\"],\"scopes\":[\".\"]}";
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"full\",\"name\":\"cov-mode\"}",
+             root);
+    char *full = cbm_mcp_handle_tool(srv, "index_repository", args);
+    bool full_ok = response_contains_json_fragment(full, "\"status\":\"indexed\"");
+    free(full);
+    char *cov = cbm_mcp_handle_tool(srv, "check_index_coverage", cov_args);
+    bool full_cov = coverage_path_is(cov, "examples/demo.c", "status", "partial") &&
+                    response_contains_json_fragment(cov, "\"total_gaps\":1");
+    free(cov);
+
+    /* Fast re-index with a changed file: an incremental publish that must
+     * carry the fast-skipped file's row and gap forward. */
+    ASSERT_EQ(th_write_file(TH_PATH(root, "src/ok.c"),
+                            "int helper(void) { return 42; }\nint more(void) { return 1; }\n"),
+              0);
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"fast\",\"name\":\"cov-mode\"}",
+             root);
+    char *fast = cbm_mcp_handle_tool(srv, "index_repository", args);
+    bool fast_ok = response_contains_json_fragment(fast, "\"status\":\"indexed\"") &&
+                   response_contains_json_fragment(fast, "\"total_gaps\":1");
+    free(fast);
+    cov = cbm_mcp_handle_tool(srv, "check_index_coverage", cov_args);
+    bool fast_cov = coverage_path_is(cov, "examples/demo.c", "status", "partial") &&
+                    coverage_path_is(cov, "examples/demo.c", "freshness", "metadata_match") &&
+                    coverage_path_is(cov, "src/ok.c", "status", "no_recorded_issue") &&
+                    coverage_path_is(cov, "src/ok.c", "freshness", "metadata_match") &&
+                    response_contains_json_fragment(cov, "\"files\":2") &&
+                    response_contains_json_fragment(cov, "\"total_gaps\":1");
+    free(cov);
+
+    /* Deleting the skipped file is a real deletion, not a mode skip. */
+    ASSERT_EQ(remove(TH_PATH(root, "examples/demo.c")), 0);
+    fast = cbm_mcp_handle_tool(srv, "index_repository", args);
+    bool delete_ok = response_contains_json_fragment(fast, "\"status\":\"indexed\"");
+    free(fast);
+    cov = cbm_mcp_handle_tool(srv, "check_index_coverage", cov_args);
+    bool delete_cov = coverage_path_is(cov, "examples/demo.c", "status", "missing") &&
+                      response_contains_json_fragment(cov, "\"files\":1") &&
+                      response_contains_json_fragment(cov, "\"total_gaps\":0");
+    free(cov);
+
+    cbm_mcp_server_free(srv);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+    th_rmtree(root);
+    th_rmtree(cache);
+
+    ASSERT_TRUE(full_ok);
+    ASSERT_TRUE(full_cov);
+    ASSERT_TRUE(fast_ok);
+    ASSERT_TRUE(fast_cov);
+    ASSERT_TRUE(delete_ok);
+    ASSERT_TRUE(delete_cov);
+    PASS();
+#endif
+}
+
 /* #6: compact rendering is lossless for tables with missing cells and quotes
  * strings that would read back as another type. */
 TEST(mcp_render_compact_tables_and_scalars) {
@@ -5447,6 +5601,8 @@ SUITE(mcp) {
     RUN_TEST(tool_search_graph_searches_two_zova_projects_globally);
     RUN_TEST(tool_index_repository_reports_zova_committed_counts);
     RUN_TEST(tool_check_index_coverage_reports_recorded_gaps);
+    RUN_TEST(tool_check_index_coverage_exact_paths_beyond_partial_cap);
+    RUN_TEST(tool_check_index_coverage_survives_mode_downgrade);
     RUN_TEST(mcp_render_compact_tables_and_scalars);
     RUN_TEST(tool_list_projects_pages_and_detects_catalog_changes);
     RUN_TEST(tool_index_repository_refuses_while_workspace_lease_is_held);

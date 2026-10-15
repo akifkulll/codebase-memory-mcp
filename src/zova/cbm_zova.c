@@ -325,6 +325,15 @@ int cbm_zova_user_database_publish_model(
     return -1;
 }
 
+int cbm_zova_user_database_publish_prepared_view(
+    const char *zova_path, const cbm_zova_prepared_view_t *view,
+    cbm_zova_workspace_generation_result_t *out_result) {
+    (void)zova_path;
+    (void)view;
+    if (out_result) memset(out_result, 0, sizeof(*out_result));
+    return -1;
+}
+
 int cbm_zova_user_database_publish_delta(
     const char *zova_path, const cbm_zova_publish_model_t *after,
     const cbm_zova_workspace_delta_t *delta,

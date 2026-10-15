@@ -25,6 +25,8 @@
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/constants.h"
 
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -218,6 +220,14 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution(
     return best_tail;
 }
 
+/* Tail-match cost counters (upstream f6e3af43). The tail scan in
+ * cbm_pipeline_lsp_target_node has no candidate cap and its candidate set
+ * grows with the corpus, so candidates per lookup is what would turn resolve
+ * superlinear. Counted always (two relaxed adds), defined in pass_parallel.c
+ * and logged at the end of parallel resolve as parallel.resolve.scan_cost. */
+extern _Atomic uint64_t g_lsp_tail_lookups;
+extern _Atomic uint64_t g_lsp_tail_candidates;
+
 /* Resolve an LSP-emitted callee_qn to a graph-buffer node.
  *
  * Per-file LSPs sometimes emit `callee_qn` as the raw package-shaped
@@ -271,6 +281,8 @@ static inline const cbm_gbuf_node_t *cbm_pipeline_lsp_target_node(const cbm_gbuf
     if (cbm_gbuf_find_by_name(gbuf, short_name, &hits, &hit_count) != 0 || hit_count == 0) {
         return NULL;
     }
+    atomic_fetch_add_explicit(&g_lsp_tail_lookups, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_lsp_tail_candidates, (uint64_t)hit_count, memory_order_relaxed);
 
     const cbm_gbuf_node_t *match = NULL;
     for (int i = 0; i < hit_count; i++) {
@@ -470,12 +482,15 @@ typedef enum {
 
 static inline cbm_ref_join_t cbm_pipeline_join_lsp_reference(
     const cbm_gbuf_t *gbuf, const char *project_name, const cbm_pipeline_ref_index_t *index,
-    const CBMUsage *usage, bool allow_tail_match, const cbm_gbuf_node_t **out_target) {
+    const CBMUsage *usage, bool allow_tail_match, const cbm_gbuf_node_t **out_target,
+    const CBMResolvedCall **out_row) {
     *out_target = NULL;
+    *out_row = NULL;
     const CBMResolvedCall *row = cbm_pipeline_find_lsp_reference(index, usage, allow_tail_match);
     if (!row) {
         return CBM_REF_JOIN_NONE;
     }
+    *out_row = row;
     const cbm_gbuf_node_t *tgt =
         cbm_pipeline_lsp_target_node(gbuf, project_name, row->callee_qn, allow_tail_match);
     if (!tgt) {
@@ -483,6 +498,20 @@ static inline cbm_ref_join_t cbm_pipeline_join_lsp_reference(
     }
     *out_target = tgt;
     return cbm_pipeline_node_is_callable_target(tgt) ? CBM_REF_JOIN_CALLABLE : CBM_REF_JOIN_VALUE;
+}
+
+/* Edge properties for a USAGE / CALL_REFERENCE edge. A CALL_REFERENCE always
+ * comes from an LSP row (row non-NULL), whose strategy and confidence are the
+ * edge's provenance, in the same keys CALLS edges use; USAGE stays
+ * {"callee":...}. esc_ref is already JSON-escaped. */
+static inline void cbm_pipeline_reference_props(char *buf, size_t size, const char *esc_ref,
+                                                const CBMResolvedCall *row) {
+    if (row && row->strategy && row->strategy[0]) {
+        snprintf(buf, size, "{\"callee\":\"%s\",\"confidence\":%.2f,\"strategy\":\"%s\"}",
+                 esc_ref, row->confidence, row->strategy);
+    } else {
+        snprintf(buf, size, "{\"callee\":\"%s\"}", esc_ref);
+    }
 }
 
 /* Registry fallback for a usage the LSP did not prove. A candidate emitted

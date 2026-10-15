@@ -1782,6 +1782,22 @@ const CBMType *ts_eval_expr_type(TSLSPContext *ctx, TSNode node) {
         g_ts_eval_degraded++;
         return cbm_type_unknown();
     }
+    /* Depth alone does not bound work: crafted expressions stay under the
+     * depth cap while fanning out. Charge the per-file type budget (upstream
+     * f95fe55b) at 16 units per entry, since an eval entry does far more work
+     * than one type-text unit, and degrade to UNKNOWN on exhaustion. */
+    if (g_ts_type_budget >= 0) {
+        g_ts_type_budget -= 16;
+        if (g_ts_type_budget < 0) {
+            if (!g_ts_type_budget_warned) {
+                g_ts_type_budget_warned = true;
+                fprintf(stderr, "  [tslsp] expression-eval budget exhausted; degrading to "
+                                "unknown\n");
+            }
+            g_ts_eval_degraded++;
+            return cbm_type_unknown();
+        }
+    }
     g_ts_eval_entries++;
     ctx->eval_depth++;
     /* Snapshot for the memo-store guard: any degraded return in this subtree

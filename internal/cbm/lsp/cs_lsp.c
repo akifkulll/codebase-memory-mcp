@@ -1441,7 +1441,7 @@ static void cs_resolve_argument_references(CSLSPContext *ctx, TSNode call) {
         CBMResolvedCall rc = {0};
         rc.caller_qn = ctx->enclosing_func_qn;
         rc.callee_qn = f->qualified_name;
-        rc.strategy = "cs_method_group_reference";
+        rc.strategy = "lsp_method_group_reference";
         rc.confidence = 0.92f;
         rc.kind = CBM_RESOLVED_CALL_REFERENCE;
         rc.site_start_byte = ts_node_start_byte(value);

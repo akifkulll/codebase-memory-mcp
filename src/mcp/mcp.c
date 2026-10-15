@@ -437,7 +437,11 @@ static const tool_def_t TOOLS[] = {
      "\"},\"include_tests\":{\"type\":\"boolean\",\"default\":false,"
      "\"description\":\"Include test files in results. When false (default), test files are "
      "filtered out. When true, test nodes are included with is_test=true marker."
-     "\"}},\"required\":[\"function_name\",\"project\"]}"},
+     "\"},\"include_evidence\":{\"type\":\"boolean\",\"default\":false,"
+     "\"description\":\"Add how each hop's edge was resolved: strategy (lsp | language_rule | "
+     "heuristic | unresolved) and the resolver's confidence. Off by default. Use it to judge "
+     "whether an edge is trustworthy, not to find edges.\"}},"
+     "\"required\":[\"function_name\",\"project\"]}"},
 
     {"get_code_snippet", "Get code snippet",
      "Read source code for a function/class/symbol. IMPORTANT: First call search_graph to find the "
@@ -3439,8 +3443,58 @@ static const char *bfs_edge_args_for_hop(cbm_traverse_result_t *tr, int64_t hop_
     return NULL;
 }
 
+/* Map an internal resolver strategy (recorded on CALLS and CALL_REFERENCE
+ * edges) to the closed public class trace_path publishes with
+ * include_evidence (upstream 73cfb61d): lsp | language_rule | heuristic |
+ * unresolved. Publishing the raw ~20 internal names would make each resolver
+ * name public API by accident. NULL only for a NULL/empty strategy. */
+const char *cbm_mcp_edge_strategy_class(const char *strategy) {
+    if (!strategy || !strategy[0]) {
+        return NULL;
+    }
+    /* lsp_unresolved is an LSP attempt that did NOT resolve. */
+    if (strcmp(strategy, "lsp_unresolved") == 0 || strcmp(strategy, "unknown") == 0) {
+        return "unresolved";
+    }
+    if (strncmp(strategy, "lsp_", SLEN("lsp_")) == 0) {
+        return "lsp";
+    }
+    if (strncmp(strategy, "php_", SLEN("php_")) == 0 ||
+        strncmp(strategy, "perl_", SLEN("perl_")) == 0) {
+        return "language_rule";
+    }
+    return "heuristic"; /* callee_suffix, unique_name, field_type_hint, ... */
+}
+
+/* Resolution evidence on the edge leading to the given hop node, matched like
+ * bfs_edge_args_for_hop. tr is the trace result, so evidence covers only the
+ * rows returned. False when the edge records no strategy. */
+static bool bfs_edge_evidence_for_hop(cbm_traverse_result_t *tr, int64_t hop_node_id,
+                                      const char **class_out, double *confidence_out) {
+    for (int e = 0; e < tr->edge_count; e++) {
+        if (tr->edges[e].target_id != hop_node_id && tr->edges[e].source_id != hop_node_id) {
+            continue;
+        }
+        const char *pj = tr->edges[e].properties_json;
+        yyjson_doc *pdoc = pj ? yyjson_read(pj, strlen(pj), 0) : NULL;
+        yyjson_val *proot = yyjson_doc_get_root(pdoc);
+        const char *cls =
+            cbm_mcp_edge_strategy_class(yyjson_get_str(yyjson_obj_get(proot, "strategy")));
+        yyjson_val *conf = yyjson_obj_get(proot, "confidence");
+        double confidence = yyjson_is_num(conf) ? yyjson_get_num(conf) : -1.0;
+        yyjson_doc_free(pdoc);
+        if (cls) {
+            *class_out = cls;
+            *confidence_out = confidence;
+            return true;
+        }
+    }
+    return false;
+}
+
 static yyjson_mut_val *bfs_to_json_array(yyjson_mut_doc *doc, cbm_traverse_result_t *tr,
-                                         bool risk_labels, bool include_tests, bool data_flow) {
+                                         bool risk_labels, bool include_tests, bool data_flow,
+                                         bool include_evidence) {
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     for (int i = 0; i < tr->visited_count; i++) {
         const char *fp = tr->visited[i].node.file_path;
@@ -3449,6 +3503,15 @@ static yyjson_mut_val *bfs_to_json_array(yyjson_mut_doc *doc, cbm_traverse_resul
                               fp, tr->visited[i].hop, risk_labels, include_tests);
         if (!item) {
             continue;
+        }
+        const char *ev_class = NULL;
+        double ev_conf = -1.0;
+        if (include_evidence &&
+            bfs_edge_evidence_for_hop(tr, tr->visited[i].node.id, &ev_class, &ev_conf)) {
+            yyjson_mut_obj_add_str(doc, item, "strategy", ev_class);
+            if (ev_conf >= 0.0) {
+                yyjson_mut_obj_add_real(doc, item, "confidence", ev_conf);
+            }
         }
         /* data_flow mode promises argument expressions at each call site; surface
          * the CALLS edge's serialized args array as a raw JSON value (#514). */
@@ -3672,6 +3735,8 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     depth = clamp_mcp_depth(depth, "trace_call_path");
     bool risk_labels = cbm_mcp_get_bool_arg(args, "risk_labels");
     bool include_tests = cbm_mcp_get_bool_arg(args, "include_tests");
+    /* Off by default so the common response stays the same size. */
+    bool include_evidence = cbm_mcp_get_bool_arg(args, "include_evidence");
 
     if (!func_name) {
         free(project);
@@ -3794,14 +3859,14 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
                             depth, &tr_out);
         yyjson_mut_obj_add_val(doc, root, "callees",
                                bfs_to_json_array(doc, &tr_out, risk_labels, include_tests,
-                                                 data_flow));
+                                                 data_flow, include_evidence));
     }
     if (do_inbound) {
         bfs_union_same_name(store, nodes, node_count, "inbound", edge_types, edge_type_count,
                             depth, &tr_in);
         yyjson_mut_obj_add_val(doc, root, "callers",
                                bfs_to_json_array(doc, &tr_in, risk_labels, include_tests,
-                                                 data_flow));
+                                                 data_flow, include_evidence));
     }
 
     /* Serialize BEFORE freeing traversal results (yyjson borrows strings) */

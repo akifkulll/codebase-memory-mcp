@@ -103,6 +103,10 @@ enum { PP_CSHARP_M_PREFIX_LEN = 2 };
  * not re-pay the full nap tax on every file pull when napping cannot reclaim
  * memory (the resident floor, not in-flight transients, holds the budget). */
 static _Atomic long g_bp_nap_cycles = 0;
+/* Defined here, declared in lsp_resolve.h: the uncapped tail-match scan's
+ * cost, logged at the end of parallel resolve. */
+_Atomic uint64_t g_lsp_tail_lookups = 0;
+_Atomic uint64_t g_lsp_tail_candidates = 0;
 
 long cbm_pp_bp_nap_cycles(void) {
     return atomic_load_explicit(&g_bp_nap_cycles, memory_order_relaxed);
@@ -2387,8 +2391,9 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
             continue;
         }
         const cbm_gbuf_node_t *tgt = NULL;
+        const CBMResolvedCall *row = NULL;
         cbm_ref_join_t join = cbm_pipeline_join_lsp_reference(
-            rc->main_gbuf, rc->project_name, &ref_index, usage, allow_tail, &tgt);
+            rc->main_gbuf, rc->project_name, &ref_index, usage, allow_tail, &tgt, &row);
         if (join == CBM_REF_JOIN_SKIP || (join == CBM_REF_JOIN_VALUE && usage->reference_only)) {
             continue;
         }
@@ -2407,10 +2412,11 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        char uprops[CBM_SZ_256];
+        char uprops[CBM_SZ_512];
         char esc_ref[CBM_SZ_256]; /* sliced source text: escape quotes/newlines */
         cbm_json_escape(esc_ref, sizeof(esc_ref), usage->ref_name);
-        snprintf(uprops, sizeof(uprops), "{\"callee\":\"%s\"}", esc_ref);
+        cbm_pipeline_reference_props(uprops, sizeof(uprops), esc_ref,
+                                     join == CBM_REF_JOIN_CALLABLE ? row : NULL);
         cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, tgt->id,
                              join == CBM_REF_JOIN_CALLABLE ? "CALL_REFERENCE" : "USAGE", uprops);
         ws->usages_resolved++;
@@ -2917,6 +2923,9 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     atomic_init(&rc.next_file_idx, 0);
     atomic_init(&rc.lsp_cross_processed, 0);
     atomic_init(&rc.lsp_cross_skipped_no_source, 0);
+    atomic_store_explicit(&g_lsp_tail_lookups, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_lsp_tail_candidates, 0, memory_order_relaxed);
+    cbm_pxc_filter_stats_reset();
     /* F4 lazy shared Rust registry: mutex up before workers spawn. */
     atomic_init(&rc.rust_shared_reg, NULL);
     cbm_mutex_init(&rc.rust_shared_mu);
@@ -2975,6 +2984,51 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
         "files_skipped_no_source",
         itoa_log(atomic_load_explicit(&rc.lsp_cross_skipped_no_source, memory_order_relaxed)),
         "defs_total", itoa_log(def_count));
+
+    /* Cross-LSP cost normalised per file (upstream f6e3af43/cffb4e37). Wall
+     * time cannot tell "big repo" from "superlinear pass"; us_per_file can:
+     * for a pass linear in file count it stays roughly constant across repo
+     * sizes. defs_per_file is the lever behind it: if it tracks defs_total
+     * rather than the file's own module plus imports, the module filter is
+     * not containing the work and cross-file LSP is O(files x corpus_defs). */
+    int cross_files = atomic_load_explicit(&rc.lsp_cross_processed, memory_order_relaxed);
+    uint64_t cross_us =
+        atomic_load_explicit(&rc.time_ns_cross_lsp, memory_order_relaxed) / 1000ULL;
+    if (cross_files > 0) {
+        char cf_buf[CBM_SZ_32];
+        char nf_buf[CBM_SZ_32];
+        char cu_buf[CBM_SZ_32];
+        char pk_buf[CBM_SZ_32];
+        snprintf(cf_buf, sizeof(cf_buf), "%llu",
+                 (unsigned long long)(cross_us / (uint64_t)cross_files));
+        snprintf(nf_buf, sizeof(nf_buf), "%d", cross_files);
+        snprintf(cu_buf, sizeof(cu_buf), "%llu", (unsigned long long)(cross_us / 1000ULL));
+        snprintf(pk_buf, sizeof(pk_buf), "%llu",
+                 (unsigned long long)(def_count > 0 ? (cross_us * 1000ULL) /
+                                                          ((uint64_t)cross_files *
+                                                           (uint64_t)def_count)
+                                                    : 0ULL));
+        cbm_log_info("parallel.resolve.cross_lsp_cost", "cross_lsp_ms", cu_buf, "files", nf_buf,
+                     "us_per_file", cf_buf, "defs_total", itoa_log(def_count),
+                     "us_per_file_per_kdef", pk_buf);
+
+        uint64_t reg_defs = 0;
+        uint64_t reg_files = 0;
+        uint64_t flt_files = 0;
+        uint64_t flt_failed = 0;
+        cbm_pxc_filter_stats(&reg_defs, &reg_files, &flt_files, &flt_failed);
+        if (reg_files > 0) {
+            char rd_buf[CBM_SZ_32];
+            char ff_buf[CBM_SZ_32];
+            char fp_buf[CBM_SZ_32];
+            snprintf(rd_buf, sizeof(rd_buf), "%llu", (unsigned long long)(reg_defs / reg_files));
+            snprintf(ff_buf, sizeof(ff_buf), "%llu", (unsigned long long)flt_failed);
+            snprintf(fp_buf, sizeof(fp_buf), "%llu", (unsigned long long)flt_files);
+            cbm_log_info("parallel.resolve.perfile_registry", "defs_per_file", rd_buf,
+                         "defs_total", itoa_log(def_count), "filtered_files", fp_buf,
+                         "filter_failed", ff_buf);
+        }
+    }
 
     cbm_log_info("parallel.resolve.done", "calls", itoa_log(total_calls), "usages",
                  itoa_log(total_usages), "semantic", itoa_log(total_semantic + go_impl),
@@ -3053,5 +3107,20 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
                  "resolve", rsv_buf);
     cbm_log_info("parallel.resolve.calls_breakdown2", "field_hint", hnt_buf, "find_target", tgt_buf,
                  "emit_edge", emt_buf);
+
+    /* Candidate-scan cost (upstream f6e3af43). per_lookup is a property of
+     * the corpus, not the machine; if it grows with repo size the tail-match
+     * scan is turning resolve superlinear. */
+    uint64_t tail_lookups = atomic_load_explicit(&g_lsp_tail_lookups, memory_order_relaxed);
+    uint64_t tail_cands = atomic_load_explicit(&g_lsp_tail_candidates, memory_order_relaxed);
+    char tl_buf[CBM_SZ_32];
+    char tc_buf[CBM_SZ_32];
+    char tp_buf[CBM_SZ_32];
+    snprintf(tl_buf, sizeof(tl_buf), "%llu", (unsigned long long)tail_lookups);
+    snprintf(tc_buf, sizeof(tc_buf), "%llu", (unsigned long long)tail_cands);
+    snprintf(tp_buf, sizeof(tp_buf), "%llu",
+             (unsigned long long)(tail_lookups ? tail_cands / tail_lookups : 0ULL));
+    cbm_log_info("parallel.resolve.scan_cost", "tail_lookups", tl_buf, "tail_candidates", tc_buf,
+                 "per_lookup", tp_buf);
     return 0;
 }

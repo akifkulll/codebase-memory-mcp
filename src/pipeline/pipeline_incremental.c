@@ -16,6 +16,7 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24 };
 #include <stdio.h>
 #include <time.h>
 #include "pipeline/pipeline_internal.h"
+#include "pipeline/lsp_resolve.h" /* cbm_pipeline_node_is_callable_target */
 #include "store/store.h"
 #include "zova/cbm_zova.h"
 #include "zova/cbm_zova_repository.h"
@@ -674,6 +675,13 @@ static int incr_restore_inbound_edges(cbm_gbuf_t *gbuf, cbm_edge_capture_t *cap)
         const cbm_gbuf_node_t *tgt = cbm_gbuf_find_by_qn(gbuf, s->target_qn);
         if (!tgt && s->type && strcmp(s->type, "CALLS") == 0) {
             continue; /* rebuilt from source so resolver owns its properties */
+        }
+        /* Incremental runs skip cross-file LSP, so an unchanged source cannot
+         * re-prove its CALL_REFERENCE. Keep the snapshot edge only while the
+         * same QN is still a callable; never guess a rename. */
+        if (s->type && strcmp(s->type, "CALL_REFERENCE") == 0 &&
+            !cbm_pipeline_node_is_callable_target(tgt)) {
+            continue;
         }
         if (!tgt) {
             tgt = incr_find_unique_renamed_target(gbuf, s);

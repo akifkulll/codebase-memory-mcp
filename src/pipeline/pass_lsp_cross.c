@@ -30,6 +30,8 @@
 #include "foundation/log.h"
 #include "foundation/compat_fs.h"
 
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -648,6 +650,28 @@ void cbm_pxc_run_one_ts(CBMFileResult *r, const char *source, int source_len, co
  * `rust_shared_get` supplies the lazily-built shared Rust all-defs registry
  * (the parallel resolver owns its once-guard); NULL means "no shared rust
  * registry available" and rust NULL-filter files take the per-file build. */
+/* Per-file registry-build cost counters (upstream cffb4e37), logged by
+ * pass_parallel at the end of resolve. */
+static _Atomic uint64_t g_pxc_defs_registered = 0;
+static _Atomic uint64_t g_pxc_build_files = 0;
+static _Atomic uint64_t g_pxc_filter_files = 0;
+static _Atomic uint64_t g_pxc_filter_failed = 0;
+
+void cbm_pxc_filter_stats(uint64_t *defs_registered, uint64_t *build_files, uint64_t *filter_files,
+                          uint64_t *filter_failed) {
+    *defs_registered = atomic_load_explicit(&g_pxc_defs_registered, memory_order_relaxed);
+    *build_files = atomic_load_explicit(&g_pxc_build_files, memory_order_relaxed);
+    *filter_files = atomic_load_explicit(&g_pxc_filter_files, memory_order_relaxed);
+    *filter_failed = atomic_load_explicit(&g_pxc_filter_failed, memory_order_relaxed);
+}
+
+void cbm_pxc_filter_stats_reset(void) {
+    atomic_store_explicit(&g_pxc_defs_registered, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_pxc_build_files, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_pxc_filter_files, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_pxc_filter_failed, 0, memory_order_relaxed);
+}
+
 void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *source,
                            int source_len, const char *rel, const char *def_module,
                            const CBMCrossLspRegistries *cross_registries,
@@ -749,7 +773,15 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
             file_defs = filtered;
             file_def_count = filtered_count;
         }
+        atomic_fetch_add_explicit(&g_pxc_filter_files, 1, memory_order_relaxed);
+        if (!filtered) {
+            atomic_fetch_add_explicit(&g_pxc_filter_failed, 1, memory_order_relaxed);
+        }
     }
+    /* Per-file registry build cost is driven by this count. */
+    atomic_fetch_add_explicit(&g_pxc_defs_registered, (uint64_t)file_def_count,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_pxc_build_files, 1, memory_order_relaxed);
     if (lang == CBM_LANG_RUST) {
         CBMTypeRegistry *shared = rust_shared_get ? rust_shared_get(rust_shared_ctx) : NULL;
         if (shared) {

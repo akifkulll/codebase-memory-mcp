@@ -236,8 +236,9 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         }
 
         const cbm_gbuf_node_t *tgt = NULL;
-        cbm_ref_join_t join = cbm_pipeline_join_lsp_reference(ctx->gbuf, ctx->project_name,
-                                                              &ref_index, usage, allow_tail, &tgt);
+        const CBMResolvedCall *row = NULL;
+        cbm_ref_join_t join = cbm_pipeline_join_lsp_reference(
+            ctx->gbuf, ctx->project_name, &ref_index, usage, allow_tail, &tgt, &row);
         if (join == CBM_REF_JOIN_SKIP || (join == CBM_REF_JOIN_VALUE && usage->reference_only)) {
             continue;
         }
@@ -262,7 +263,8 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         char esc_ref[CBM_SZ_256];
         cbm_json_escape(esc_ref, sizeof(esc_ref), usage->ref_name);
         char uprops[CBM_SZ_512];
-        snprintf(uprops, sizeof(uprops), "{\"callee\":\"%s\"}", esc_ref);
+        cbm_pipeline_reference_props(uprops, sizeof(uprops), esc_ref,
+                                     join == CBM_REF_JOIN_CALLABLE ? row : NULL);
         cbm_gbuf_insert_edge(ctx->gbuf, src->id, tgt->id,
                              join == CBM_REF_JOIN_CALLABLE ? "CALL_REFERENCE" : "USAGE", uprops);
         resolved++;

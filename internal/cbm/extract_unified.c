@@ -1112,27 +1112,22 @@ static void scan_infra_bindings(CBMExtractCtx *ctx, TSNode node) {
 // JS/TS `export_statement` appears in import_node_types so re-exports
 // (`export { X } from './m'`) are treated as an import boundary.  But it also
 // wraps exported *declarations* (`export function f(cfg: Config) {}`), and
-// treating those as an import boundary wrongly suppresses USAGE edges for type
-// references inside the exported declaration's signature.  Return true when the
-// node is an export that contains a declaration child (i.e. NOT a bare re-export),
-// so the caller skips the import-scope push for it.
+// treating those as an import boundary wrongly suppresses USAGE edges inside
+// the exported declaration.  Only the re-export forms are an import context:
+// a `source` field, or a bare `export { a, b }` clause with no declaration.
+// Positive detection (upstream a4126427) replaces a declaration-kind
+// blacklist that missed TS-only forms (ambient_declaration,
+// function_signature, module_declaration).  Returns true when the caller must
+// skip the import-scope push.
 static bool is_export_of_declaration(TSNode node) {
     if (strcmp(ts_node_type(node), "export_statement") != 0) {
         return false;
     }
-    uint32_t n = ts_node_child_count(node);
-    for (uint32_t i = 0; i < n; i++) {
-        const char *ck = ts_node_type(ts_node_child(node, i));
-        if (strcmp(ck, "function_declaration") == 0 || strcmp(ck, "class_declaration") == 0 ||
-            strcmp(ck, "lexical_declaration") == 0 ||
-            strcmp(ck, "abstract_class_declaration") == 0 ||
-            strcmp(ck, "interface_declaration") == 0 || strcmp(ck, "enum_declaration") == 0 ||
-            strcmp(ck, "type_alias_declaration") == 0 || strcmp(ck, "variable_declaration") == 0 ||
-            strcmp(ck, "generator_function_declaration") == 0) {
-            return true;
-        }
+    if (!ts_node_is_null(ts_node_child_by_field_name(node, TS_FIELD("source")))) {
+        return false;
     }
-    return false;
+    return ts_node_is_null(cbm_find_child_by_kind(node, "export_clause")) ||
+           !ts_node_is_null(ts_node_child_by_field_name(node, TS_FIELD("declaration")));
 }
 
 // Push scope markers for function, class, call, and import boundary nodes.

@@ -3411,6 +3411,7 @@ void cbm_zova_file_coverage_free(cbm_zova_file_coverage_t*r,int c){(void)r;(void
 int cbm_zova_repository_project_summary(cbm_zova_repository_t*r,const char*w,cbm_project_summary_export_t*o){(void)r;(void)w;(void)o;return CBM_STORE_ERR;}
 int cbm_zova_repository_export_snapshot(const char*p,const char*w,cbm_zova_workspace_snapshot_t*o){(void)p;(void)w;if(o)memset(o,0,sizeof(*o));return -1;}
 int cbm_zova_repository_export_incremental_snapshot(const char*p,const char*w,cbm_zova_workspace_snapshot_t*o){(void)p;(void)w;if(o)memset(o,0,sizeof(*o));return -1;}
+int cbm_zova_repository_export_incremental_snapshot_to_graph(const char*p,const char*w,cbm_zova_workspace_snapshot_t*o,cbm_gbuf_t*g){(void)p;(void)w;(void)g;if(o)memset(o,0,sizeof(*o));return -1;}
 int cbm_zova_repository_hydrate_incremental_components(const char*p,const char*w,int64_t g,cbm_zova_snapshot_components_t c,cbm_zova_workspace_snapshot_t*s){(void)p;(void)w;(void)g;(void)c;(void)s;return CBM_ZOVA_SNAPSHOT_ERROR;}
 int cbm_zova_workspace_snapshot_format_edge_id(const cbm_zova_workspace_snapshot_t*s,int i,char*o,size_t z){(void)s;(void)i;if(o&&z)o[0]='\0';return -1;}
 void cbm_zova_workspace_snapshot_free(cbm_zova_workspace_snapshot_t*s){if(s)memset(s,0,sizeof(*s));}

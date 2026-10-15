@@ -3483,6 +3483,112 @@ static int store_zova_workspace_bfs(cbm_store_t *s, int64_t start_id, const char
     return CBM_STORE_OK;
 }
 
+/* The native workspace walk follows CALLS only. Every other edge-type set
+ * (CALL_REFERENCE, HTTP_CALLS, mixed sets) walks level by level over the
+ * workspace edge lookup with the SQL route's hop ordering and limit, and keeps
+ * the traversed edges so callers can read their properties. */
+static bool bfs_edge_type_selected(const char *type, const char **edge_types,
+                                   int edge_type_count) {
+    if (!type) return false;
+    if (edge_type_count <= 0) return strcmp(type, "CALLS") == 0;
+    for (int i = 0; i < edge_type_count; i++)
+        if (edge_types[i] && strcmp(type, edge_types[i]) == 0) return true;
+    return false;
+}
+
+static int bfs_hop_index(const cbm_node_hop_t *hops, int count, int64_t id) {
+    for (int i = 0; i < count; i++)
+        if (hops[i].node.id == id) return i;
+    return CBM_NOT_FOUND;
+}
+
+static int bfs_hop_order(const void *a, const void *b) {
+    const cbm_node_t *x = &((const cbm_node_hop_t *)a)->node;
+    const cbm_node_t *y = &((const cbm_node_hop_t *)b)->node;
+    int c = strcmp(x->file_path ? x->file_path : "", y->file_path ? y->file_path : "");
+    if (!c) c = strcmp(x->qualified_name ? x->qualified_name : "",
+                       y->qualified_name ? y->qualified_name : "");
+    if (!c) c = strcmp(x->label ? x->label : "", y->label ? y->label : "");
+    if (c) return c;
+    if (x->start_line != y->start_line) return x->start_line < y->start_line ? -1 : 1;
+    if (x->end_line != y->end_line) return x->end_line < y->end_line ? -1 : 1;
+    return x->id < y->id ? -1 : (x->id > y->id);
+}
+
+static int store_zova_workspace_bfs_typed(cbm_store_t *s, int64_t start_id,
+                                          const char *direction, const char **edge_types,
+                                          int edge_type_count, int max_depth, int max_results,
+                                          cbm_traverse_result_t *out) {
+    bool inbound = direction && strcmp(direction, "inbound") == 0;
+    cbm_node_hop_t *hops = NULL;
+    cbm_edge_t *seen = NULL;
+    int hop_count = 0, hop_cap = 0, seen_count = 0, seen_cap = 0;
+    int level_start = 0, level_end = 0; /* hops[level_start, level_end) is the frontier */
+    int rc = CBM_STORE_OK;
+    for (int depth = 0; depth < max_depth && rc == CBM_STORE_OK; depth++) {
+        int frontier = depth == 0 ? SKIP_ONE : level_end - level_start;
+        int next_start = hop_count;
+        for (int f = 0; f < frontier && rc == CBM_STORE_OK; f++) {
+            int64_t from = depth == 0 ? start_id : hops[level_start + f].node.id;
+            cbm_edge_t *edges = NULL;
+            int edge_count = 0;
+            rc = store_zova_workspace_edges(s, from, inbound ? "inbound" : "outbound", NULL,
+                                            &edges, &edge_count);
+            for (int e = 0; e < edge_count && rc == CBM_STORE_OK; e++) {
+                if (!bfs_edge_type_selected(edges[e].type, edge_types, edge_type_count))
+                    continue;
+                int64_t next = inbound ? edges[e].source_id : edges[e].target_id;
+                if (seen_count == seen_cap) {
+                    seen_cap = seen_cap ? seen_cap * ST_GROWTH : ST_INIT_CAP_16;
+                    seen = safe_realloc(seen, (size_t)seen_cap * sizeof(*seen));
+                }
+                seen[seen_count++] = edges[e];
+                memset(&edges[e], 0, sizeof(edges[e]));
+                if (next == start_id || bfs_hop_index(hops, hop_count, next) >= 0) continue;
+                if (hop_count == hop_cap) {
+                    hop_cap = hop_cap ? hop_cap * ST_GROWTH : ST_INIT_CAP_16;
+                    hops = safe_realloc(hops, (size_t)hop_cap * sizeof(*hops));
+                }
+                memset(&hops[hop_count], 0, sizeof(hops[hop_count]));
+                rc = cbm_store_find_node_by_id(s, next, &hops[hop_count].node);
+                if (rc == CBM_STORE_OK) hops[hop_count++].hop = depth + SKIP_ONE;
+                else if (rc == CBM_STORE_NOT_FOUND) rc = CBM_STORE_OK;
+            }
+            cbm_store_free_edges(edges, edge_count);
+        }
+        qsort(hops + next_start, (size_t)(hop_count - next_start), sizeof(*hops), bfs_hop_order);
+        while (hop_count > max_results) cbm_node_free_fields(&hops[--hop_count].node);
+        level_start = next_start;
+        level_end = hop_count;
+        if (level_start == level_end) break;
+    }
+    /* Keep the edges whose endpoints both survived, as the SQL route does. */
+    cbm_edge_info_t *infos = seen_count ? calloc((size_t)seen_count, sizeof(*infos)) : NULL;
+    int info_count = 0;
+    for (int e = 0; e < seen_count && infos; e++) {
+        int si = bfs_hop_index(hops, hop_count, seen[e].source_id);
+        int ti = bfs_hop_index(hops, hop_count, seen[e].target_id);
+        if ((si < 0 && seen[e].source_id != start_id) ||
+            (ti < 0 && seen[e].target_id != start_id)) continue;
+        cbm_edge_info_t *info = &infos[info_count++];
+        info->from_name = heap_strdup(si < 0 ? out->root.name : hops[si].node.name);
+        info->to_name = heap_strdup(ti < 0 ? out->root.name : hops[ti].node.name);
+        info->type = seen[e].type;
+        seen[e].type = NULL;
+        info->confidence = (double)SKIP_ONE;
+        info->source_id = seen[e].source_id;
+        info->target_id = seen[e].target_id;
+        info->properties_json = seen[e].properties_json;
+        seen[e].properties_json = NULL;
+    }
+    cbm_store_free_edges(seen, seen_count);
+    out->visited = hops;
+    out->visited_count = hop_count;
+    out->edges = infos;
+    out->edge_count = info_count;
+    return rc;
+}
+
 int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const char **edge_types,
                   int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out) {
     memset(out, 0, sizeof(*out));
@@ -3504,6 +3610,9 @@ int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const
     rc = store_zova_workspace_bfs(s, start_id, direction, edge_types, edge_type_count,
                                   max_depth, max_results, out);
     if (rc == CBM_STORE_OK) return rc;
+    if (s->zova_workspace_query && rc == CBM_STORE_NOT_FOUND)
+        return store_zova_workspace_bfs_typed(s, start_id, direction, edge_types,
+                                              edge_type_count, max_depth, max_results, out);
     if (s->zova_workspace_query) return rc;
 
     char types_clause[CBM_SZ_512];

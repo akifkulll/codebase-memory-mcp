@@ -94,6 +94,11 @@ int cbm_mcp_get_int_arg(const char *args_json, const char *key, int default_val)
 /* Extract a bool argument. Returns false if not found. */
 bool cbm_mcp_get_bool_arg(const char *args_json, const char *key);
 
+/* Map an internal resolver strategy recorded on an edge to the closed class
+ * trace_path publishes with include_evidence: "lsp" | "language_rule" |
+ * "heuristic" | "unresolved". NULL only for a NULL/empty strategy. */
+const char *cbm_mcp_edge_strategy_class(const char *strategy);
+
 /* Extract the tool name from a tools/call params JSON. Heap-allocated. */
 char *cbm_mcp_get_tool_name(const char *params_json);
 
