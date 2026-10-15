@@ -1292,6 +1292,224 @@ TEST(tool_search_graph_rejects_empty_projects) {
     PASS();
 }
 
+#if CBM_WITH_ZOVA
+enum { CURSOR_TEST_NODES = 5 };
+
+/* Publishes CURSOR_TEST_NODES functions with vectors that all match the
+ * token "request" at distinct scores. Each call publishes a new generation. */
+static int cursor_publish_project(const char *path, const char *indexed_at) {
+    static int8_t values[CURSOR_TEST_NODES][768];
+    static int8_t token_values[768];
+    CBMDumpNode nodes[CURSOR_TEST_NODES];
+    CBMDumpVector vectors[CURSOR_TEST_NODES];
+    char names[CURSOR_TEST_NODES][16];
+    char qns[CURSOR_TEST_NODES][48];
+    memset(token_values, 0, sizeof(token_values));
+    token_values[0] = 127;
+    for (int i = 0; i < CURSOR_TEST_NODES; i++) {
+        memset(values[i], 0, sizeof(values[i]));
+        values[i][0] = 127;
+        values[i][1 + i] = (int8_t)(20 * (i + 1));
+        snprintf(names[i], sizeof(names[i]), "F%d", i);
+        snprintf(qns[i], sizeof(qns[i]), "cursor-proj.F%d", i);
+        nodes[i] = (CBMDumpNode){.id = i + 1, .project = "cursor-proj", .label = "Function",
+                                 .name = names[i], .qualified_name = qns[i],
+                                 .file_path = "src/f.c", .start_line = i + 1,
+                                 .end_line = i + 1, .properties = "{}"};
+        vectors[i] = (CBMDumpVector){.node_id = i + 1, .project = "cursor-proj",
+                                     .vector = (const uint8_t *)values[i],
+                                     .vector_len = sizeof(values[i])};
+    }
+    const CBMDumpTokenVec token = {.id = 1, .project = "cursor-proj", .token = "request",
+                                   .vector = (const uint8_t *)token_values,
+                                   .vector_len = sizeof(token_values), .idf = 1.0f};
+    const cbm_zova_workspace_generation_input_t input = {
+        .root_path = "/tmp/cursor-proj", .project = "cursor-proj", .indexed_at = indexed_at,
+        .model_fingerprint = CBM_ZOVA_MODEL_FINGERPRINT, .vector_dimensions = 768,
+        .nodes = nodes, .node_count = CURSOR_TEST_NODES, .node_vectors = vectors,
+        .node_vector_count = CURSOR_TEST_NODES, .token_vectors = &token,
+        .token_vector_count = 1};
+    cbm_zova_workspace_generation_result_t published = {0};
+    return cbm_zova_user_database_publish_workspace(path, &input, &published);
+}
+
+/* Runs one search_graph page. Appends each row's qualified_name from
+ * rows_key to seen (counting duplicates against `unique`) and copies the
+ * continuation from cursor_key into next ("" when absent). Returns the
+ * number of rows, or -1 when the call failed. */
+static int cursor_page(cbm_mcp_server_t *srv, const char *args, const char *rows_key,
+                       const char *cursor_key, char seen[][48], int *seen_count, char *next,
+                       size_t next_sz) {
+    char *response = cbm_mcp_handle_tool(srv, "search_graph", args);
+    char *inner = response && !strstr(response, "\"isError\":true")
+                      ? extract_text_content(response) : NULL;
+    yyjson_doc *doc = inner ? yyjson_read(inner, strlen(inner), 0) : NULL;
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    int rows = -1;
+    if (root) {
+        rows = 0;
+        size_t idx, max;
+        yyjson_val *row;
+        yyjson_arr_foreach(yyjson_obj_get(root, rows_key), idx, max, row) {
+            const char *qn = yyjson_get_str(yyjson_obj_get(row, "qualified_name"));
+            if (qn && *seen_count < CURSOR_TEST_NODES * 2) {
+                snprintf(seen[(*seen_count)++], 48, "%s", qn);
+            }
+            rows++;
+        }
+        const char *cursor = yyjson_get_str(yyjson_obj_get(root, cursor_key));
+        snprintf(next, next_sz, "%s", cursor ? cursor : "");
+    } else {
+        printf("  search_graph %s -> %s\n", args, response ? response : "(null)");
+    }
+    yyjson_doc_free(doc);
+    free(inner);
+    free(response);
+    return rows;
+}
+
+static bool cursor_all_seen_once(char seen[][48], int seen_count) {
+    if (seen_count != CURSOR_TEST_NODES) {
+        return false;
+    }
+    for (int i = 0; i < seen_count; i++) {
+        for (int j = i + 1; j < seen_count; j++) {
+            if (strcmp(seen[i], seen[j]) == 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool cursor_call_fails_with(cbm_mcp_server_t *srv, const char *args,
+                                   const char *message) {
+    char *response = cbm_mcp_handle_tool(srv, "search_graph", args);
+    bool ok = response && strstr(response, "\"isError\":true") && strstr(response, message);
+    if (!ok) {
+        printf("  expected '%s' from %s, got %s\n", message, args,
+               response ? response : "(null)");
+    }
+    free(response);
+    return ok;
+}
+#endif
+
+TEST(tool_search_graph_cursors_page_structural_and_semantic_rows_once) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    char cache[512];
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-cursor-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    char path[512];
+    ASSERT_EQ(cbm_zova_user_database_path(path, sizeof(path)), 0);
+    ASSERT_EQ(cursor_publish_project(path, "2026-10-15T00:00:00Z"), 0);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+
+    /* Structural rows: follow next_cursor with the arguments reordered. */
+    char seen[CURSOR_TEST_NODES * 2][48];
+    int seen_count = 0;
+    char next[128];
+    char first_cursor[128];
+    char args[512];
+    int pages = 0;
+    int rows = cursor_page(srv, "{\"project\":\"cursor-proj\",\"label\":\"Function\",\"limit\":2}",
+                           "results", "next_cursor", seen, &seen_count, next, sizeof(next));
+    snprintf(first_cursor, sizeof(first_cursor), "%s", next);
+    while (rows > 0 && next[0] && pages < 10) {
+        pages++;
+        snprintf(args, sizeof(args),
+                 "{\"limit\":2,\"cursor\":\"%s\",\"label\":\"Function\",\"project\":"
+                 "\"cursor-proj\"}",
+                 next);
+        rows = cursor_page(srv, args, "results", "next_cursor", seen, &seen_count, next,
+                           sizeof(next));
+    }
+    bool structural_ok = rows > 0 && pages == 2 && cursor_all_seen_once(seen, seen_count);
+
+    /* Semantic rows page independently through semantic_next_cursor. */
+    char semantic_cursor[128];
+    seen_count = 0;
+    pages = 0;
+    rows = cursor_page(srv,
+                       "{\"project\":\"cursor-proj\",\"semantic_query\":[\"request\"],"
+                       "\"semantic_limit\":2}",
+                       "semantic_results", "semantic_next_cursor", seen, &seen_count, next,
+                       sizeof(next));
+    snprintf(semantic_cursor, sizeof(semantic_cursor), "%s", next);
+    while (rows > 0 && next[0] && pages < 10) {
+        pages++;
+        snprintf(args, sizeof(args),
+                 "{\"project\":\"cursor-proj\",\"semantic_query\":[\"request\"],"
+                 "\"semantic_limit\":2,\"semantic_cursor\":\"%s\"}",
+                 next);
+        rows = cursor_page(srv, args, "semantic_results", "semantic_next_cursor", seen,
+                           &seen_count, next, sizeof(next));
+    }
+    bool semantic_ok = rows > 0 && pages == 2 && cursor_all_seen_once(seen, seen_count);
+
+    /* Cursors fail closed: other arguments, both offset forms, garbage, the
+     * wrong kind, bad semantic paging, multi-project scope, and a re-index. */
+    bool rejects = first_cursor[0] && semantic_cursor[0];
+    snprintf(args, sizeof(args),
+             "{\"project\":\"cursor-proj\",\"label\":\"Method\",\"limit\":2,\"cursor\":\"%s\"}",
+             first_cursor);
+    rejects = cursor_call_fails_with(srv, args, "different query arguments") && rejects;
+    snprintf(args, sizeof(args),
+             "{\"project\":\"cursor-proj\",\"label\":\"Function\",\"offset\":2,"
+             "\"cursor\":\"%s\"}",
+             first_cursor);
+    rejects = cursor_call_fails_with(srv, args, "mutually exclusive") && rejects;
+    rejects = cursor_call_fails_with(srv,
+                                     "{\"project\":\"cursor-proj\",\"label\":\"Function\","
+                                     "\"cursor\":\"sg1.s.1.zz.2\"}",
+                                     "invalid_cursor") &&
+              rejects;
+    snprintf(args, sizeof(args),
+             "{\"project\":\"cursor-proj\",\"semantic_query\":[\"request\"],"
+             "\"semantic_limit\":2,\"cursor\":\"%s\"}",
+             semantic_cursor);
+    rejects = cursor_call_fails_with(srv, args, "not a structural cursor") && rejects;
+    rejects = cursor_call_fails_with(srv,
+                                     "{\"project\":\"cursor-proj\",\"semantic_query\":"
+                                     "[\"request\"],\"semantic_limit\":0}",
+                                     "semantic_limit must be between 1 and 500") &&
+              rejects;
+    rejects = cursor_call_fails_with(srv,
+                                     "{\"projects\":[\"cursor-proj\"],\"query\":\"F0\","
+                                     "\"cursor\":\"x\"}",
+                                     "single-project search only") &&
+              rejects;
+    ASSERT_EQ(cursor_publish_project(path, "2026-10-15T01:00:00Z"), 0);
+    snprintf(args, sizeof(args),
+             "{\"project\":\"cursor-proj\",\"label\":\"Function\",\"limit\":2,\"cursor\":\"%s\"}",
+             first_cursor);
+    rejects = cursor_call_fails_with(srv, args, "stale_cursor") && rejects;
+    cbm_mcp_server_free(srv);
+
+    static const char *const db_suffixes[] = {"", "-wal", "-shm", ".writer.lock"};
+    for (size_t i = 0; i < sizeof(db_suffixes) / sizeof(db_suffixes[0]); i++) {
+        char db_file[600];
+        snprintf(db_file, sizeof(db_file), "%s%s", path, db_suffixes[i]);
+        cbm_unlink(db_file);
+    }
+    if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+    else cbm_unsetenv("CBM_CACHE_DIR");
+    free(saved_cache_copy);
+    cbm_rmdir(cache);
+
+    ASSERT_TRUE(structural_ok);
+    ASSERT_TRUE(semantic_ok);
+    ASSERT_TRUE(rejects);
+    PASS();
+#endif
+}
+
 TEST(tool_search_graph_searches_two_zova_projects_globally) {
 #if !CBM_WITH_ZOVA
     PASS();
@@ -6332,6 +6550,7 @@ SUITE(mcp) {
     RUN_TEST(tool_search_graph_rejects_project_and_projects);
     RUN_TEST(tool_search_graph_rejects_empty_projects);
     RUN_TEST(tool_search_graph_searches_two_zova_projects_globally);
+    RUN_TEST(tool_search_graph_cursors_page_structural_and_semantic_rows_once);
     RUN_TEST(tool_index_repository_reports_zova_committed_counts);
     RUN_TEST(tool_check_index_coverage_reports_recorded_gaps);
     RUN_TEST(tool_check_index_coverage_exact_paths_beyond_partial_cap);

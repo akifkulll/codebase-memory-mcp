@@ -476,12 +476,14 @@ promotion tests, not routine development tests.
 
 | Tool | Description |
 |------|-------------|
-| `search_graph` | Structured search by label, name pattern, file pattern, degree filters. Pagination via limit/offset. |
+| `search_graph` | Structured search by label, name pattern, file pattern, degree filters. Pagination via limit/offset, or pass `next_cursor` back as `cursor`; semantic rows page separately with `semantic_offset`/`semantic_limit` or `semantic_next_cursor`. Cursors are tied to the query arguments and the index generation, so a cursor used after a re-index fails with `stale_cursor` instead of skipping or repeating rows. |
 | `trace_path` | BFS traversal — who calls a function and what it calls (alias: `trace_call_path`). Depth 1-5. |
 | `detect_changes` | Map git diff to affected symbols + blast radius with risk classification. |
 | `query_graph` | Execute Cypher-like graph queries (read-only). |
 | `get_graph_schema` | Node/edge counts, relationship patterns, property definitions per label. Run this first. |
 | `get_code_snippet` | Read source code for a function by qualified name. |
+| `get_file_outline` | Bounded symbol outline of one indexed file. |
+| `compare_graphs` | Bounded diff of nodes and edges added and removed between two indexed projects. |
 | `get_architecture` | Codebase overview: languages, packages, routes, hotspots, clusters. |
 | `search_code` | Grep-like text search within indexed project files. |
 | `ingest_traces` | Ingest runtime traces to validate HTTP_CALLS edges. |

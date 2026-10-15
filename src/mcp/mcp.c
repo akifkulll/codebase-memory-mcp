@@ -358,8 +358,11 @@ static const tool_def_t TOOLS[] = {
      "PAGINATION: results are capped at limit (default 200) — broader queries are silently "
      "truncated. The response always includes 'total' (full match count before limit) and "
      "'has_more' (true when total > offset+returned). Detect truncation with has_more, then "
-     "page by re-calling with offset=offset+limit until has_more is false. Narrow first via "
-     "label/file_pattern/min_degree before paginating large result sets.",
+     "page by re-calling with offset=offset+limit until has_more is false, or pass next_cursor "
+     "back as cursor; semantic rows page independently with semantic_offset/semantic_limit or "
+     "semantic_next_cursor. Cursors are bound to the arguments and the index generation and "
+     "fail with stale_cursor after a re-index instead of skipping or repeating rows. Narrow "
+     "first via label/file_pattern/min_degree before paginating large result sets.",
      "{\"type\":\"object\",\"properties\":{"
      "\"format\":{\"type\":\"string\",\"enum\":[\"json\",\"compact\"],\"default\":\"json\","
      "\"description\":\"compact: indented key/value text with flat object arrays as "
@@ -384,7 +387,17 @@ static const tool_def_t TOOLS[] = {
      "keyword strings (e.g. [\\\"send\\\",\\\"pubsub\\\",\\\"publish\\\"]) — NOT a single string. "
      "Each keyword is scored independently via per-keyword min-cosine; results reflect functions "
      "that score well on ALL keywords. Requires moderate/full index mode. Results appear in the "
-     "'semantic_results' field (separate from 'results').\"},\"limit\":{\"type\":"
+     "'semantic_results' field (separate from 'results').\"},"
+     "\"semantic_limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":500,"
+     "\"description\":\"Semantic rows per call. Default: limit, capped at 500.\"},"
+     "\"semantic_offset\":{\"type\":\"integer\",\"default\":0,\"minimum\":0,"
+     "\"maximum\":99998},"
+     "\"semantic_cursor\":{\"type\":\"string\",\"description\":\"semantic_next_cursor "
+     "from the previous page. Single-project only; mutually exclusive with "
+     "semantic_offset.\"},"
+     "\"cursor\":{\"type\":\"string\",\"description\":\"next_cursor from the previous "
+     "page. Single-project only; mutually exclusive with offset.\"},"
+     "\"limit\":{\"type\":"
      "\"integer\",\"description\":\"Max results per call. Default 200. Response carries "
      "'total' (full match count) and 'has_more' (true if truncated) so callers can "
      "detect the limit and paginate.\"},\"offset\":{\"type\":\"integer\",\"default\":0,"
@@ -2125,7 +2138,8 @@ static void emit_search_results(yyjson_mut_doc *doc, yyjson_mut_val *root,
 }
 
 static bool run_semantic_query(yyjson_mut_doc *doc, yyjson_mut_val *root, const char *args,
-                               cbm_store_t *store, const char *project, int limit);
+                               cbm_store_t *store, const char *project, int offset, int limit,
+                               int *next_offset);
 
 static bool search_args_has_semantic_query(const char *args) {
     yyjson_doc *args_doc = yyjson_read(args, strlen(args), 0);
@@ -2160,6 +2174,130 @@ static void emit_flagged_fts_results(yyjson_mut_doc *doc, yyjson_mut_val *root,
     yyjson_mut_obj_add_bool(doc, root, "has_more", out->total > offset + out->count);
 }
 
+/* search_graph continuation cursors. A cursor names the next offset of one
+ * result list (s = structural/BM25 rows, v = semantic rows) and binds it to the
+ * query arguments (everything except paging and format) and to the Zova
+ * generation it was issued against. A cursor replayed against other arguments
+ * or a re-indexed graph fails closed instead of skipping or repeating rows.
+ * Format: sg1.<kind>.<generation>.<query hash>.<offset> */
+enum { SG_CURSOR_SZ = 96, SG_SEMANTIC_MAX_LIMIT = 500, SG_SEMANTIC_MAX_OFFSET = 99998 };
+
+static bool sg_is_paging_key(const char *key) {
+    static const char *const keys[] = {"project",         "offset",         "limit",
+                                       "cursor",          "semantic_offset", "semantic_limit",
+                                       "semantic_cursor", "format"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if (strcmp(key, keys[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int sg_key_cmp(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static uint64_t sg_fnv(uint64_t h, const char *s) {
+    for (const unsigned char *c = (const unsigned char *)s; c && *c; c++) {
+        h = (h ^ *c) * 1099511628211ULL;
+    }
+    return (h ^ 0x1fU) * 1099511628211ULL; /* field separator */
+}
+
+/* FNV-1a over the project and every non-paging argument in key order, so a
+ * client may reorder arguments between pages. Returns false on OOM. */
+static bool sg_query_hash(yyjson_val *args_root, const char *project, uint64_t *out) {
+    uint64_t h = sg_fnv(1469598103934665603ULL, project);
+    size_t n = yyjson_is_obj(args_root) ? yyjson_obj_size(args_root) : 0;
+    const char **keys = n ? calloc(n, sizeof(*keys)) : NULL;
+    if (n && !keys) {
+        return false;
+    }
+    size_t count = 0;
+    size_t idx = 0;
+    size_t max = 0;
+    yyjson_val *key = NULL;
+    yyjson_val *value = NULL;
+    if (n) {
+        yyjson_obj_foreach(args_root, idx, max, key, value) {
+            if (!sg_is_paging_key(yyjson_get_str(key))) {
+                keys[count++] = yyjson_get_str(key);
+            }
+        }
+    }
+    qsort(keys, count, sizeof(*keys), sg_key_cmp);
+    bool ok = true;
+    for (size_t i = 0; i < count && ok; i++) {
+        char *encoded = yyjson_val_write(yyjson_obj_get(args_root, keys[i]), 0, NULL);
+        ok = encoded != NULL;
+        h = sg_fnv(sg_fnv(h, keys[i]), encoded);
+        free(encoded);
+    }
+    free(keys);
+    *out = h;
+    return ok;
+}
+
+static void sg_cursor_format(char *out, size_t out_sz, char kind, int64_t generation,
+                             uint64_t hash, int offset) {
+    snprintf(out, out_sz, "sg1.%c.%lld.%016llx.%d", kind, (long long)generation,
+             (unsigned long long)hash, offset);
+}
+
+/* Resolve the start offset of one result list from its cursor or offset
+ * argument. Returns NULL on success, otherwise an error written to err. */
+static const char *sg_resume_offset(yyjson_val *args_root, const char *cursor_key,
+                                    const char *offset_key, char kind, int64_t generation,
+                                    uint64_t hash, int *offset, char *err, size_t err_sz) {
+    yyjson_val *cursor = yyjson_obj_get(args_root, cursor_key);
+    if (!cursor) {
+        return NULL;
+    }
+    if (yyjson_obj_get(args_root, offset_key)) {
+        snprintf(err, err_sz, "%s and %s are mutually exclusive", cursor_key, offset_key);
+        return err;
+    }
+    const char *token = yyjson_get_str(cursor);
+    char parsed_kind = 0;
+    long long parsed_generation = 0;
+    unsigned long long parsed_hash = 0;
+    int parsed_offset = -1;
+    char canonical[SG_CURSOR_SZ];
+    if (!token || sscanf(token, "sg1.%c.%lld.%16llx.%d", &parsed_kind, &parsed_generation,
+                         &parsed_hash, &parsed_offset) != 4 ||
+        parsed_kind != kind || parsed_offset < 0) {
+        snprintf(err, err_sz,
+                 "invalid_cursor: %s is not a %s cursor from this tool; re-run the query "
+                 "without it",
+                 cursor_key, kind == 'v' ? "semantic" : "structural");
+        return err;
+    }
+    sg_cursor_format(canonical, sizeof(canonical), parsed_kind, parsed_generation, parsed_hash,
+                     parsed_offset);
+    if (strcmp(canonical, token) != 0) {
+        snprintf(err, err_sz, "invalid_cursor: %s is malformed; re-run the query without it",
+                 cursor_key);
+        return err;
+    }
+    if (parsed_hash != hash) {
+        snprintf(err, err_sz,
+                 "invalid_cursor: %s was issued for different query arguments; re-run the "
+                 "query without it",
+                 cursor_key);
+        return err;
+    }
+    if (parsed_generation != generation) {
+        snprintf(err, err_sz,
+                 "stale_cursor: the project was re-indexed since %s was issued (generation "
+                 "%lld, now %lld); re-run the query without it",
+                 cursor_key, parsed_generation, (long long)generation);
+        return err;
+    }
+    *offset = parsed_offset;
+    return NULL;
+}
+
 static char *handle_search_graph_flagged(const char *args, char *project) {
     char path[CBM_SZ_1K];
     cbm_zova_repository_t *repo = NULL;
@@ -2168,13 +2306,53 @@ static char *handle_search_graph_flagged(const char *args, char *project) {
         return project_not_found_result(project);
     }
     const char *workspace_id = cbm_zova_repository_workspace_id(repo);
+    /* Cursors bind to the generation read before the search; the search is
+     * accepted only if the same generation is still published after it. */
+    int64_t generation = 0;
+    char *indexed_at = NULL;
+    int status_rc = cbm_zova_repository_index_status(repo, workspace_id, &generation, &indexed_at);
+    free(indexed_at);
+    yyjson_doc *args_doc = yyjson_read(args, strlen(args), 0);
+    yyjson_val *args_root = args_doc ? yyjson_doc_get_root(args_doc) : NULL;
+    uint64_t query_hash = 0;
+    if (status_rc != CBM_STORE_OK || !sg_query_hash(args_root, project, &query_hash)) {
+        yyjson_doc_free(args_doc);
+        cbm_zova_repository_close(repo);
+        free(project);
+        return cbm_mcp_text_result("could not bind search_graph request to a generation", true);
+    }
+    int offset = cbm_mcp_get_int_arg(args, "offset", 0);
+    int semantic_offset = cbm_mcp_get_int_arg(args, "semantic_offset", 0);
+    int semantic_limit = cbm_mcp_get_int_arg(args, "semantic_limit", 0);
+    char paging_error[CBM_SZ_512];
+    const char *paging_failure =
+        sg_resume_offset(args_root, "cursor", "offset", 's', generation, query_hash, &offset,
+                         paging_error, sizeof(paging_error));
+    if (!paging_failure) {
+        paging_failure = sg_resume_offset(args_root, "semantic_cursor", "semantic_offset", 'v',
+                                          generation, query_hash, &semantic_offset,
+                                          paging_error, sizeof(paging_error));
+    }
+    if (!paging_failure && (semantic_offset < 0 || semantic_offset > SG_SEMANTIC_MAX_OFFSET)) {
+        paging_failure = "semantic_offset must be between 0 and 99998";
+    }
+    bool semantic_limit_given = yyjson_obj_get(args_root, "semantic_limit") != NULL;
+    if (!paging_failure && semantic_limit_given &&
+        (semantic_limit < 1 || semantic_limit > SG_SEMANTIC_MAX_LIMIT)) {
+        paging_failure = "semantic_limit must be between 1 and 500";
+    }
+    yyjson_doc_free(args_doc);
+    if (paging_failure) {
+        cbm_zova_repository_close(repo);
+        free(project);
+        return cbm_mcp_text_result(paging_failure, true);
+    }
     char *query = cbm_mcp_get_string_arg(args, "query");
     char *name_pattern = cbm_mcp_get_string_arg(args, "name_pattern");
     char *qn_pattern = cbm_mcp_get_string_arg(args, "qn_pattern");
     char *label = cbm_mcp_get_string_arg(args, "label");
     char *file_pattern = cbm_mcp_get_string_arg(args, "file_pattern");
     char *relationship = cbm_mcp_get_string_arg(args, "relationship");
-    int offset = cbm_mcp_get_int_arg(args, "offset", 0);
     cbm_search_params_t params = {
         .project = project,
         .label = label,
@@ -2224,13 +2402,43 @@ static char *handle_search_graph_flagged(const char *args, char *project) {
                                 &props_docs, &props_doc_count);
         }
     }
+    bool structural_ran = (query && query[0]) || has_structural_filters;
+    if (rc == CBM_STORE_OK && structural_ran && out.count > 0 &&
+        out.total > offset + out.count) {
+        char cursor[SG_CURSOR_SZ];
+        sg_cursor_format(cursor, sizeof(cursor), 's', generation, query_hash,
+                         offset + out.count);
+        yyjson_mut_obj_add_strcpy(doc, root, "next_cursor", cursor);
+    }
+    if (!semantic_limit_given) {
+        semantic_limit = params.limit > 0 ? (params.limit < SG_SEMANTIC_MAX_LIMIT
+                                                 ? params.limit
+                                                 : SG_SEMANTIC_MAX_LIMIT)
+                                          : CBM_SZ_16;
+    }
     bool semantic_type_error = false;
+    int semantic_next = -1;
     cbm_store_t *vector_store = cbm_store_open_zova_workspace_query(path, workspace_id);
     if (rc == CBM_STORE_OK && vector_store) {
         semantic_type_error = run_semantic_query(doc, root, args, vector_store, project,
-                                                 params.limit);
+                                                 semantic_offset, semantic_limit,
+                                                 &semantic_next);
     }
     if (vector_store) cbm_store_close(vector_store);
+    if (semantic_next > 0) {
+        char cursor[SG_CURSOR_SZ];
+        sg_cursor_format(cursor, sizeof(cursor), 'v', generation, query_hash, semantic_next);
+        yyjson_mut_obj_add_strcpy(doc, root, "semantic_next_cursor", cursor);
+    }
+    int64_t generation_after = 0;
+    char *indexed_after = NULL;
+    /* A publish that landed mid-request may have mixed generations. */
+    bool generation_changed =
+        rc == CBM_STORE_OK &&
+        (cbm_zova_repository_index_status(repo, workspace_id, &generation_after,
+                                          &indexed_after) != CBM_STORE_OK ||
+         generation_after != generation);
+    free(indexed_after);
     if (semantic_type_error) {
         for (int i = 0; i < props_doc_count; i++) yyjson_doc_free(props_docs[i]);
         free(props_docs);
@@ -2253,6 +2461,11 @@ static char *handle_search_graph_flagged(const char *args, char *project) {
     cbm_zova_repository_close(repo);
     free(query); free(name_pattern); free(qn_pattern); free(label); free(file_pattern);
     free(relationship); free(project);
+    if (generation_changed) {
+        free(json);
+        return cbm_mcp_text_result(
+            "the project was re-indexed during search_graph; retry the request", true);
+    }
     if (!json) return cbm_mcp_text_result("shared cbm.zova search failed", true);
     char *result = cbm_mcp_text_result(json, false);
     free(json);
@@ -2297,11 +2510,16 @@ static void emit_semantic_results(yyjson_mut_doc *doc, yyjson_mut_val *root,
     yyjson_mut_obj_add_val(doc, root, "semantic_results", sem_results);
 }
 
-/* Append the semantic_query vector-search results onto the doc.  Returns
- * true if semantic_query was provided as a non-array (type error — caller
- * should surface to the user). */
+/* Append one page of semantic_query vector-search results onto the doc:
+ * ranks [offset, offset+limit). One extra ranked hit is materialized so
+ * semantic_has_more is exact; semantic_total is exact ("eq") only when the
+ * search ran out of hits, otherwise a lower bound ("gte"). *next_offset is the
+ * next rank when more remain, else -1. Returns true if semantic_query was
+ * provided as a non-array (type error — caller should surface to the user). */
 static bool run_semantic_query(yyjson_mut_doc *doc, yyjson_mut_val *root, const char *args,
-                               cbm_store_t *store, const char *project, int limit) {
+                               cbm_store_t *store, const char *project, int offset, int limit,
+                               int *next_offset) {
+    *next_offset = -1;
     enum { MAX_KW_SEARCH = 32 };
     yyjson_doc *args_doc = yyjson_read(args, strlen(args), 0);
     yyjson_val *args_root = args_doc ? yyjson_doc_get_root(args_doc) : NULL;
@@ -2314,11 +2532,21 @@ static bool run_semantic_query(yyjson_mut_doc *doc, yyjson_mut_val *root, const 
         int ki = extract_semantic_keywords(sq_val, keywords, MAX_KW_SEARCH);
         cbm_vector_result_t *vresults = NULL;
         int vcount = 0;
-        int sem_limit = limit > 0 ? limit : CBM_SZ_16;
-        if (cbm_store_vector_search(store, project, keywords, ki, sem_limit, &vresults, &vcount) ==
-                CBM_STORE_OK &&
-            vcount > 0) {
-            emit_semantic_results(doc, root, vresults, vcount);
+        int materialize = offset + limit + 1;
+        if (cbm_store_vector_search(store, project, keywords, ki, materialize, &vresults,
+                                    &vcount) == CBM_STORE_OK) {
+            int returned = vcount > offset ? vcount - offset : 0;
+            returned = returned < limit ? returned : limit;
+            bool has_more = vcount > offset + returned;
+            yyjson_mut_obj_add_int(doc, root, "semantic_total", vcount);
+            yyjson_mut_obj_add_str(doc, root, "semantic_total_relation",
+                                   vcount < materialize ? "eq" : "gte");
+            yyjson_mut_obj_add_int(doc, root, "semantic_returned", returned);
+            yyjson_mut_obj_add_bool(doc, root, "semantic_has_more", has_more);
+            emit_semantic_results(doc, root, returned > 0 ? vresults + offset : NULL, returned);
+            if (has_more && returned > 0) {
+                *next_offset = offset + returned;
+            }
             cbm_store_free_vector_results(vresults, vcount);
         }
     }
@@ -2545,6 +2773,25 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result(scope_error ? scope_error : "invalid project scope", true);
     }
     if (scope.project_count > 0) {
+        static const char *const single_project_args[] = {"cursor", "semantic_cursor",
+                                                          "semantic_offset", "semantic_limit"};
+        yyjson_doc *args_doc = yyjson_read(args, strlen(args), 0);
+        yyjson_val *args_root = args_doc ? yyjson_doc_get_root(args_doc) : NULL;
+        const char *rejected = NULL;
+        for (size_t i = 0; i < sizeof(single_project_args) / sizeof(single_project_args[0]); i++) {
+            if (!rejected && yyjson_obj_get(args_root, single_project_args[i])) {
+                rejected = single_project_args[i];
+            }
+        }
+        if (rejected) {
+            char message[CBM_SZ_128];
+            snprintf(message, sizeof(message), "%s is supported for single-project search only",
+                     rejected);
+            yyjson_doc_free(args_doc);
+            project_scope_free(&scope);
+            return cbm_mcp_text_result(message, true);
+        }
+        yyjson_doc_free(args_doc);
         char *result = handle_search_graph_catalog(args, &scope);
         project_scope_free(&scope);
         return result;
