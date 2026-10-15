@@ -212,9 +212,29 @@ static const char *cbm_string_read(void *payload, uint32_t byte, TSPoint point,
 
 // --- Parse timeout callback ---
 
+/* Budget for the tree-sitter progress callback (upstream 52701625). The
+ * primary gate is per-thread CPU time: a worker descheduled under contention
+ * burns wall time but not CPU, so a parseable file must not be abandoned (and
+ * its defs, and every cross-file edge they anchor, dropped) because the budget
+ * elapsed in wall-clock against near-zero CPU. A generous wall ceiling stays as
+ * a backstop so a stuck parse still ends in bounded time. */
+#define CBM_PARSE_WALL_CEILING_FACTOR 12ULL /* ~60 s ceiling for the 5 s CPU budget */
+
+typedef struct {
+    uint64_t cpu_deadline_ns; // trip once this thread's CPU time passes it
+    uint64_t wall_ceiling_ns; // hard wall backstop for a stuck parse
+    uint64_t wall_offset_ns;  // CBM_TEST_WALL_STALL_ON: emulated descheduling
+    bool tripped;             // the budget, not tree-sitter, ended the parse
+} CBMParseBudget;
+
 static bool cbm_timeout_cb(TSParseState *state) {
-    uint64_t deadline = *(uint64_t *)state->payload;
-    return now_ns() > deadline;
+    CBMParseBudget *budget = (CBMParseBudget *)state->payload;
+    bool over = cbm_thread_cpu_time_ns() > budget->cpu_deadline_ns ||
+                now_ns() + budget->wall_offset_ns > budget->wall_ceiling_ns;
+    if (over) {
+        budget->tripped = true;
+    }
+    return over;
 }
 
 // --- Thread-local parser pool ---
@@ -1150,10 +1170,19 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
     };
 
     TSParseOptions opts = {0};
-    uint64_t deadline_ns = 0; // cppcheck-suppress unreadVariable
+    CBMParseBudget budget = {0}; // cppcheck-suppress unreadVariable
     if (timeout_micros > 0) {
-        deadline_ns = t0 + ((uint64_t)timeout_micros * USEC_TO_NSEC);
-        opts.payload = &deadline_ns;
+        uint64_t budget_ns = (uint64_t)timeout_micros * USEC_TO_NSEC;
+        budget.cpu_deadline_ns = cbm_thread_cpu_time_ns() + budget_ns;
+        budget.wall_ceiling_ns = t0 + (budget_ns * CBM_PARSE_WALL_CEILING_FACTOR);
+        /* Test hook, like CBM_TEST_CRASH_ON: read the wall clock budget + 1 s
+         * ahead for the named file, as if the worker had been descheduled that
+         * long. Past the old wall-only budget, under the ceiling. */
+        const char *stall_on = getenv("CBM_TEST_WALL_STALL_ON");
+        if (stall_on && stall_on[0] && rel_path && strstr(rel_path, stall_on)) {
+            budget.wall_offset_ns = budget_ns + NSEC_PER_SEC;
+        }
+        opts.payload = &budget;
         opts.progress_callback = cbm_timeout_cb;
     }
 
@@ -1162,8 +1191,7 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
 
     if (!tree) {
         result->has_error = true;
-        result->error_msg =
-            cbm_arena_strdup(a, timeout_micros > 0 ? "parse timeout" : "parse failed");
+        result->error_msg = cbm_arena_strdup(a, budget.tripped ? "parse timeout" : "parse failed");
         return result;
     }
 

@@ -9,6 +9,7 @@
 #define CBM_COMPAT_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 /* stdlib.h declares getenv (cbm_tmpdir) and, on Windows, _putenv_s (cbm_setenv/
  * cbm_unsetenv). The x86-64 mingw toolchain pulled it in transitively, but the
@@ -104,6 +105,14 @@ static inline int cbm_nanosleep(const struct timespec *req, struct timespec *rem
 #define cbm_clock_gettime clock_gettime
 #define cbm_nanosleep nanosleep
 #endif
+
+/* Per-CALLING-THREAD CPU time in nanoseconds. Unlike cbm_clock_gettime, which
+ * measures wall time on every platform (QueryPerformanceCounter on Windows),
+ * this advances only while the calling thread runs on a CPU, so a descheduled
+ * thread accrues (almost) none. POSIX (incl. macOS): CLOCK_THREAD_CPUTIME_ID.
+ * Windows: GetThreadTimes kernel+user. Returns 0 if the clock is unavailable.
+ * Implemented in compat.c (upstream 52701625). */
+uint64_t cbm_thread_cpu_time_ns(void);
 
 /* ── gmtime_r (Windows lacks it) ─────────────────────────────── */
 #ifdef _WIN32

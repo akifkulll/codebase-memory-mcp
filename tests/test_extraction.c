@@ -96,6 +96,50 @@ TEST(extract_parse_incomplete_reports_error_ranges) {
     PASS();
 }
 
+/* --- Parse budget is thread CPU time, not wall clock (upstream 52701625) --- */
+TEST(extract_parse_budget_survives_wall_stall) {
+    /* The hook reads the wall clock budget + 1 s ahead for this file, as if the
+     * worker had been descheduled: a wall-only budget would drop the file. */
+    enum { LINES = 2000 };
+    size_t cap = (size_t)LINES * 40;
+    char *src = malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t off = 0;
+    for (int i = 0; i < LINES; i++) {
+        off += (size_t)snprintf(src + off, cap - off, "def f%d(x):\n    return x + %d\n", i, i);
+    }
+    cbm_setenv("CBM_TEST_WALL_STALL_ON", "stalled.py", 1);
+    CBMFileResult *r = cbm_extract_file(src, (int)off, CBM_LANG_PYTHON, "t", "pkg/stalled.py",
+                                        5000000, NULL, NULL);
+    cbm_unsetenv("CBM_TEST_WALL_STALL_ON");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_GTE(r->defs.count, 2000);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_parse_budget_still_trips_on_cpu) {
+    /* A large parse against a 1 us CPU budget must still stop, and say why. */
+    enum { LINES = 50000 };
+    size_t cap = (size_t)LINES * 40;
+    char *src = malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t off = 0;
+    for (int i = 0; i < LINES; i++) {
+        off += (size_t)snprintf(src + off, cap - off, "def f%d(x):\n    return x + %d\n", i, i);
+    }
+    CBMFileResult *r =
+        cbm_extract_file(src, (int)off, CBM_LANG_PYTHON, "t", "big.py", 1, NULL, NULL);
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->has_error);
+    ASSERT_STR_EQ(r->error_msg, "parse timeout");
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- R: box::use imports (#218) + module$fn calls (#219) --- */
 TEST(extract_r_box_use_imports_issue218) {
     CBMFileResult *r = extract("box::use(\n"
@@ -4465,6 +4509,8 @@ SUITE(extraction) {
 
     /* R box-module imports + member calls */
     RUN_TEST(extract_parse_incomplete_reports_error_ranges);
+    RUN_TEST(extract_parse_budget_survives_wall_stall);
+    RUN_TEST(extract_parse_budget_still_trips_on_cpu);
     RUN_TEST(extract_r_box_use_imports_issue218);
     RUN_TEST(extract_r_dollar_call_issue219);
     RUN_TEST(extract_ts_factory_object_methods_issue341);
