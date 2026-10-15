@@ -3567,7 +3567,9 @@ static int store_zova_workspace_bfs_typed(cbm_store_t *s, int64_t start_id,
             }
             cbm_store_free_edges(edges, edge_count);
         }
-        qsort(hops + next_start, (size_t)(hop_count - next_start), sizeof(*hops), bfs_hop_order);
+        if (hop_count - next_start > 1) /* hops stays NULL until the first hop */
+            qsort(hops + next_start, (size_t)(hop_count - next_start), sizeof(*hops),
+                  bfs_hop_order);
         while (hop_count > max_results) cbm_node_free_fields(&hops[--hop_count].node);
         level_start = next_start;
         level_end = hop_count;
@@ -3795,7 +3797,9 @@ static int trail_adjacency(cbm_store_t *s, trail_adj_t **cache, int *count, int 
         if (bfs_edge_type_selected(edges[e].type, edge_types, edge_type_count))
             adj.next[adj.count++] = inbound ? edges[e].source_id : edges[e].target_id;
     cbm_store_free_edges(edges, edge_count);
-    qsort(adj.next, (size_t)adj.count, sizeof(*adj.next), trail_next_order);
+    /* glibc declares qsort's base nonnull: an empty adjacency has next == NULL. */
+    if (adj.count > 1)
+        qsort(adj.next, (size_t)adj.count, sizeof(*adj.next), trail_next_order);
     if (*count == *cap) {
         *cap = *cap ? *cap * ST_GROWTH : ST_INIT_CAP_16;
         *cache = safe_realloc(*cache, (size_t)*cap * sizeof(**cache));
