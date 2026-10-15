@@ -3111,6 +3111,48 @@ TEST(search_code_scoped_path_with_spaces_issue687) {
 /* Upstream 7a1e069b: the scoped scan must not depend on GNU grep's --include
  * (BusyBox grep in the static Alpine/musl runtime has none). A fake grep that
  * rejects --include stands in for BusyBox; file_pattern is applied in C. */
+/* Upstream cc9c2f4c: the scoped scan list is the canonical File-node set —
+ * Folder directories and synthetic paths such as <python-builtins> are graph
+ * identities, not scannable files. */
+TEST(store_list_files_prefers_canonical_file_nodes) {
+    cbm_store_t *st = cbm_store_open_memory();
+    ASSERT_NOT_NULL(st);
+    const char *proj = "list-files-canonical";
+    ASSERT_EQ(cbm_store_upsert_project(st, proj, "/nonexistent"), CBM_STORE_OK);
+    cbm_node_t folder = {.project = proj,
+                         .label = "Folder",
+                         .name = "src",
+                         .qualified_name = "list-files-canonical.src",
+                         .file_path = "src"};
+    cbm_node_t builtin = {.project = proj,
+                          .label = "Function",
+                          .name = "len",
+                          .qualified_name = "builtins.len",
+                          .file_path = "<python-builtins>",
+                          .start_line = 1,
+                          .end_line = 1};
+    cbm_node_t file = {.project = proj,
+                       .label = "File",
+                       .name = "main.c",
+                       .qualified_name = "list-files-canonical.src.main.c",
+                       .file_path = "src/main.c"};
+    ASSERT_GT(cbm_store_upsert_node(st, &folder), 0);
+    ASSERT_GT(cbm_store_upsert_node(st, &builtin), 0);
+    ASSERT_GT(cbm_store_upsert_node(st, &file), 0);
+
+    char **files = NULL;
+    int count = 0;
+    ASSERT_EQ(cbm_store_list_files(st, proj, &files, &count), CBM_STORE_OK);
+    bool only_canonical = count == 1 && strcmp(files[0], "src/main.c") == 0;
+    for (int i = 0; i < count; i++) {
+        free(files[i]);
+    }
+    free(files);
+    cbm_store_close(st);
+    ASSERT_TRUE(only_canonical);
+    PASS();
+}
+
 TEST(search_code_scoped_file_pattern_is_busybox_portable) {
 #ifdef _WIN32
     SKIP_PLATFORM("POSIX BusyBox-compatible grep contract");
@@ -5800,6 +5842,7 @@ SUITE(mcp) {
     RUN_TEST(search_code_multi_word);
     RUN_TEST(search_code_scoped_path_with_spaces_issue687);
     RUN_TEST(search_code_scoped_file_pattern_is_busybox_portable);
+    RUN_TEST(store_list_files_prefers_canonical_file_nodes);
     RUN_TEST(search_code_path_filter_prefilter_keeps_matches);
     RUN_TEST(search_code_path_filter_matches_nothing);
     RUN_TEST(search_code_invalid_regex_errors_issue283);

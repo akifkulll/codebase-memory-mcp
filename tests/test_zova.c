@@ -4164,7 +4164,8 @@ TEST(zova_workspace_store_reports_schema_counts_and_architecture) {
     char **files = NULL;
     int file_count = 0;
     ASSERT_EQ(cbm_store_list_files(store, "any-selector", &files, &file_count), CBM_STORE_OK);
-    ASSERT_EQ(file_count, 3);
+    /* Canonical File-node paths only: src/b.c has symbols but no File node. */
+    ASSERT_EQ(file_count, 2);
     for (int i = 0; i < file_count; i++) free(files[i]);
     free(files);
 

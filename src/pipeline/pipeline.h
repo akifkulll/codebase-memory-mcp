@@ -99,6 +99,10 @@ double cbm_pipeline_get_zova_publish_ms(const cbm_pipeline_t *p);
  * same extraction breadth, while the route describes persistence behavior. */
 cbm_pipeline_route_t cbm_pipeline_get_last_route(const cbm_pipeline_t *p);
 
+/* True when the most recent cbm_pipeline_run() found a generation written in
+ * an older index format and rebuilt it in full (CBM_INDEX_FORMAT_VERSION_STR). */
+bool cbm_pipeline_had_format_migration(const cbm_pipeline_t *p);
+
 typedef struct {
     bool completed;
     bool delta;
@@ -234,6 +238,13 @@ void cbm_pipeline_get_file_errors(const cbm_pipeline_t *p, cbm_file_error_t **ou
 #define CBM_COVERAGE_PARTIAL "partial"
 #define CBM_COVERAGE_MISSED "missed"
 #define CBM_COVERAGE_VERSION_STR "1"
+
+/* Index format, stamped as "index_format" on the Project node. Bump it when a
+ * change alters the QN scheme or node identity of an already-written graph:
+ * an older (or unstamped) generation then takes the full route once instead
+ * of being mixed with new-format nodes by the incremental route.
+ * 1 = File QNs keep the file extension (upstream #769/#1108). */
+#define CBM_INDEX_FORMAT_VERSION_STR "1"
 
 /* Runs share no process-global state, so several may run in one process.
  * Same-workspace exclusion is the workspace lease

@@ -114,7 +114,14 @@ char *cbm_pipeline_fqn_compute(const char *project, const char *rel_path, const 
 
     char *path = strdup(rel_path ? rel_path : "");
     cbm_normalize_path_sep(path);
-    strip_file_extension(path);
+    /* File-node QNs (name=="__file__") keep the full filename so files that
+     * share a stem get distinct nodes: auth.py/auth.ts, node.h/node.c,
+     * .env/.env.local (upstream #769/#1077/#964). Module and symbol QNs keep
+     * stripping; C/C++ declaration<->definition resolution relies on that.
+     * Changing this scheme requires bumping CBM_INDEX_FORMAT_VERSION_STR. */
+    if (!name || strcmp(name, "__file__") != 0) {
+        strip_file_extension(path);
+    }
 
     const char *segments[CBM_SZ_256];
     int seg_count = 0;

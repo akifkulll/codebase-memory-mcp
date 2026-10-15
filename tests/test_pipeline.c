@@ -6616,6 +6616,110 @@ TEST(pipeline_incremental_direct_zova_matches_fresh_full) {
 #endif
 }
 
+/* B1 (upstream #769/#1108): File QNs keep the file extension, so node.h and
+ * node.c get distinct File nodes. A generation written before that (collapsed
+ * File QNs, no index_format stamp) is rebuilt in full once instead of being
+ * mixed with new-format nodes by the incremental route. */
+TEST(pipeline_stale_index_format_rebuilds_in_full_once) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    char root[512];
+    snprintf(root, sizeof(root), "%s/cbm_fmt_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    static const char *const sources[][2] = {
+        {"node.h", "int node_count(void);\n"},
+        {"node.c", "#include \"node.h\"\nint node_count(void) { return 1; }\n"},
+        {"main.c", "#include \"node.h\"\nint main(void) { return node_count(); }\n"},
+    };
+    for (size_t i = 0; i < sizeof(sources) / sizeof(sources[0]); i++) {
+        char path[640];
+        snprintf(path, sizeof(path), "%s/%s", root, sources[i][0]);
+        FILE *f = fopen(path, "w");
+        ASSERT_NOT_NULL(f);
+        fputs(sources[i][1], f);
+        fclose(f);
+    }
+
+    cbm_pipeline_t *p = cbm_pipeline_new(root, NULL, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    ASSERT_FALSE(cbm_pipeline_had_format_migration(p));
+    char *project = strdup(cbm_pipeline_project_name(p));
+    ASSERT_NOT_NULL(project);
+    cbm_pipeline_free(p);
+
+    char header_qn[512], source_qn[512], main_qn[512], legacy_qn[512];
+    snprintf(header_qn, sizeof(header_qn), "%s.node.h.__file__", project);
+    snprintf(source_qn, sizeof(source_qn), "%s.node.c.__file__", project);
+    snprintf(main_qn, sizeof(main_qn), "%s.main.__file__", project);
+    snprintf(legacy_qn, sizeof(legacy_qn), "%s.node.__file__", project);
+    bool exists = false;
+    ASSERT_EQ(pipeline_zova_trace_node_exists(project, "File", "node.h", header_qn, &exists), 0);
+    ASSERT_TRUE(exists);
+    ASSERT_EQ(pipeline_zova_trace_node_exists(project, "File", "node.c", source_qn, &exists), 0);
+    ASSERT_TRUE(exists);
+
+    /* Republish the workspace in the pre-B1 shape: no index_format stamp, and
+     * node.h/node.c collapsed onto one extensionless File QN. */
+    char db_path[1024], workspace_id[256];
+    ASSERT_EQ(pipeline_zova_workspace(project, db_path, sizeof(db_path), workspace_id,
+                                      sizeof(workspace_id)), 0);
+    cbm_zova_repository_t *repo = cbm_zova_repository_open(db_path, project);
+    ASSERT_NOT_NULL(repo);
+    cbm_project_t info = {0};
+    ASSERT_EQ(cbm_zova_repository_get_project(repo, workspace_id, &info), CBM_STORE_OK);
+    cbm_zova_repository_close(repo);
+    const CBMDumpNode legacy_nodes[] = {
+        {.id = 1, .project = project, .label = "Project", .name = project,
+         .qualified_name = project, .file_path = "", .properties = "{\"coverage_version\":1}"},
+        {.id = 2, .project = project, .label = "File", .name = "node.c",
+         .qualified_name = legacy_qn, .file_path = "node.c", .properties = "{}"},
+        {.id = 3, .project = project, .label = "File", .name = "main.c",
+         .qualified_name = main_qn, .file_path = "main.c", .properties = "{}"},
+    };
+    const cbm_zova_file_hash_input_t legacy_hashes[] = {
+        {.file_path = "main.c", .content_hash = "legacy-main", .mtime_ns = 1, .size_bytes = 1},
+        {.file_path = "node.c", .content_hash = "legacy-node-c", .mtime_ns = 1, .size_bytes = 1},
+        {.file_path = "node.h", .content_hash = "legacy-node-h", .mtime_ns = 1, .size_bytes = 1},
+    };
+    const cbm_zova_workspace_generation_input_t legacy = {
+        .root_path = info.root_path, .project = project, .indexed_at = "2026-01-01T00:00:00Z",
+        .model_fingerprint = CBM_ZOVA_MODEL_FINGERPRINT, .vector_dimensions = 768,
+        .nodes = legacy_nodes, .node_count = 3, .file_hashes = legacy_hashes,
+        .file_hash_count = 3};
+    cbm_zova_workspace_generation_result_t published = {0};
+    ASSERT_EQ(cbm_zova_user_database_publish_workspace(db_path, &legacy, &published), 0);
+    cbm_project_free_fields(&info);
+
+    /* The stale generation takes the full route once and is repaired. */
+    p = cbm_pipeline_new(root, NULL, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    ASSERT_EQ(cbm_pipeline_get_last_route(p), CBM_PIPELINE_ROUTE_FULL);
+    ASSERT_TRUE(cbm_pipeline_had_format_migration(p));
+    cbm_pipeline_free(p);
+    ASSERT_EQ(pipeline_zova_trace_node_exists(project, "File", "node.c", legacy_qn, &exists), 0);
+    ASSERT_FALSE(exists);
+    ASSERT_EQ(pipeline_zova_trace_node_exists(project, "File", "node.h", header_qn, &exists), 0);
+    ASSERT_TRUE(exists);
+    ASSERT_EQ(pipeline_zova_trace_node_exists(project, "File", "node.c", source_qn, &exists), 0);
+    ASSERT_TRUE(exists);
+
+    /* The rebuilt generation is stamped, so the next run is incremental. */
+    p = cbm_pipeline_new(root, NULL, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    ASSERT_EQ(cbm_pipeline_get_last_route(p), CBM_PIPELINE_ROUTE_INCREMENTAL);
+    ASSERT_FALSE(cbm_pipeline_had_format_migration(p));
+    cbm_pipeline_free(p);
+
+    free(project);
+    th_rmtree(root);
+    PASS();
+#endif
+}
+
 TEST(pipeline_single_file_default_publishes_full_and_incremental_generation) {
 #if !CBM_WITH_ZOVA
     PASS();
@@ -8726,6 +8830,7 @@ SUITE(pipeline) {
     RUN_TEST(incremental_full_then_noop);
     RUN_TEST(incremental_detects_changed_file);
     RUN_TEST(pipeline_incremental_direct_zova_matches_fresh_full);
+    RUN_TEST(pipeline_stale_index_format_rebuilds_in_full_once);
     RUN_TEST(pipeline_single_file_default_publishes_full_and_incremental_generation);
     RUN_TEST(pipeline_single_file_preserves_and_removes_exact_project_summary);
     RUN_TEST(pipeline_incremental_delete_direct_zova_matches_fresh_full);

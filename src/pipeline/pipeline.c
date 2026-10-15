@@ -37,6 +37,7 @@ enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6 };
 #include "foundation/mem.h"
 #include "yyjson/yyjson.h"
 
+#include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,6 +94,8 @@ struct cbm_pipeline {
     int committed_edges;
     double zova_publish_ms;
     cbm_pipeline_route_t last_route;
+    /* The last run rebuilt a generation stamped with an older index format. */
+    bool format_migration;
     cbm_pipeline_zova_publish_stats_t zova_publish_stats;
 
     cbm_project_summary_export_t saved_summary;
@@ -373,6 +376,10 @@ cbm_pipeline_route_t cbm_pipeline_get_last_route(const cbm_pipeline_t *p) {
     return p ? p->last_route : CBM_PIPELINE_ROUTE_UNKNOWN;
 }
 
+bool cbm_pipeline_had_format_migration(const cbm_pipeline_t *p) {
+    return p && p->format_migration;
+}
+
 bool cbm_pipeline_get_zova_publish_stats(
     const cbm_pipeline_t *p, cbm_pipeline_zova_publish_stats_t *out_stats) {
     if (!p || !out_stats || !p->zova_publish_stats.completed) return false;
@@ -452,9 +459,11 @@ static int pass_structure(cbm_pipeline_t *p, const cbm_file_info_t *files, int f
     /* Project node */
     /* coverage_version marks a generation whose File nodes carry coverage
      * stamps; incremental runs keep the node, so older generations stay
-     * unmarked until the next full index. */
+     * unmarked until the next full index. index_format is checked by
+     * try_incremental before an existing generation is reused. */
     cbm_gbuf_upsert_node(p->gbuf, "Project", p->project_name, p->project_name, NULL, 0, 0,
-                         "{\"coverage_version\":" CBM_COVERAGE_VERSION_STR "}");
+                         "{\"coverage_version\":" CBM_COVERAGE_VERSION_STR
+                         ",\"index_format\":" CBM_INDEX_FORMAT_VERSION_STR "}");
     const char *branch_qn = p->branch_qn ? p->branch_qn : p->project_name;
     const char *branch_name = p->git_ctx.branch ? p->git_ctx.branch : "working-tree";
     char branch_props[CBM_SZ_2K];
@@ -1024,6 +1033,15 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
 
 enum { PIPELINE_INCREMENTAL_FATAL = -2 };
 
+/* True when the stored generation's Project node carries the current
+ * index_format. Unstamped generations predate the stamp. */
+static bool stored_index_format_current(const cbm_gbuf_t *stored, const char *project) {
+    static const char key[] = "\"index_format\":" CBM_INDEX_FORMAT_VERSION_STR;
+    const cbm_gbuf_node_t *node = cbm_gbuf_find_by_qn(stored, project);
+    const char *hit = node && node->properties_json ? strstr(node->properties_json, key) : NULL;
+    return hit && !isdigit((unsigned char)hit[sizeof(key) - 1]);
+}
+
 /* Try the incremental pipeline against the project's committed cbm.zova
  * workspace. Returns >= 0 if incremental was used (the return code), or -1 to
  * proceed with full. */
@@ -1045,7 +1063,14 @@ static int try_incremental(cbm_pipeline_t *p, cbm_file_info_t *files, int file_c
             if (preloaded && cbm_zova_repository_export_incremental_snapshot_to_graph(
                     zova_path, workspace_id, &snapshot, preloaded) == 0) {
                 int hash_count = snapshot.file_hash_count;
-                if (hash_count > 0 && file_count <= hash_count + (hash_count / PAIR_LEN)) {
+                if (hash_count > 0 && !stored_index_format_current(preloaded, p->project_name)) {
+                    /* Reusing it would mix old-format QNs with new ones. */
+                    cbm_log_info("pipeline.route", "path", "format_change_reindex",
+                                 "required_format", CBM_INDEX_FORMAT_VERSION_STR,
+                                 "authority", "zova");
+                    p->format_migration = true;
+                } else if (hash_count > 0 &&
+                           file_count <= hash_count + (hash_count / PAIR_LEN)) {
                     cbm_log_info("pipeline.route", "path", "incremental", "stored_hashes",
                                  itoa_buf(hash_count), "authority", "zova");
                     /* The exported snapshot owns all of its data. Release the
@@ -1059,7 +1084,7 @@ static int try_incremental(cbm_pipeline_t *p, cbm_file_info_t *files, int file_c
                     cbm_zova_workspace_snapshot_free(&snapshot);
                     return rc == 0 ? 0 : PIPELINE_INCREMENTAL_FATAL;
                 }
-                if (hash_count > 0) {
+                if (hash_count > 0 && !p->format_migration) {
                     cbm_log_info("pipeline.route", "path", "mode_change_reindex",
                                  "stored_hashes", itoa_buf(hash_count), "discovered",
                                  itoa_buf(file_count), "authority", "zova");
@@ -1405,6 +1430,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         return CBM_NOT_FOUND;
     }
     p->last_route = CBM_PIPELINE_ROUTE_UNKNOWN;
+    p->format_migration = false;
 
     CBM_PROF_START(t_pipeline_total);
     struct timespec t0;

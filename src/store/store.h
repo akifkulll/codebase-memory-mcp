@@ -75,7 +75,8 @@ int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const
 /* Get CALLS degree of a node (inbound and outbound). */
 void cbm_store_node_degree(cbm_store_t *s, int64_t node_id, int *in_deg, int *out_deg);
 
-/* Get distinct file paths for a project. Caller must free each out[i] and out itself.
+/* Get distinct canonical File-node paths, with a non-Folder node fallback for stores
+ * that have no File nodes. Caller frees each out[i] and out itself.
  * Returns CBM_STORE_OK or CBM_STORE_ERR. */
 int cbm_store_list_files(cbm_store_t *s, const char *project, char ***out, int *count);
 
