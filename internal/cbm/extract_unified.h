@@ -11,8 +11,10 @@
 #define SCOPE_IMPORT 4
 #define SCOPE_LOOP 5
 #define SCOPE_BRANCH 6
+#define SCOPE_PY_PARAMS 7 // Python def/lambda parameter frame; carries no walk flags
 
 #define MAX_SCOPES 64
+#define MAX_PY_PARAMS 256
 
 // WalkState tracks scope context during the unified cursor walk.
 // Replaces parent-chain walks for enclosing_func_qn, inside_call, etc.
@@ -28,9 +30,21 @@ typedef struct {
         const char *qn;
         uint32_t depth;
         uint8_t kind;
+        int py_param_base; // py_param_count on entry; popping unwinds back to it
     } scopes[MAX_SCOPES];
     int scope_top;
+
+    /* Names bound as parameters by the Python defs/lambdas currently open on the
+     * scope stack (upstream #1912). Bound when the frame is pushed and unwound
+     * when it pops, so a bare-call guard never ascends the tree. Overflow only
+     * loses names, so a lookup can miss (no suppression) but never invent one. */
+    const char *py_params[MAX_PY_PARAMS];
+    int py_param_count;
 } WalkState;
+
+// True when `name` is bound as a parameter of a Python def or lambda that
+// encloses the current walk position.
+bool cbm_walk_python_param_is_bound(const WalkState *state, const char *name);
 
 // Per-node handler prototypes. Each is called once per node during the
 // unified cursor walk, replacing the old recursive walk_* functions.

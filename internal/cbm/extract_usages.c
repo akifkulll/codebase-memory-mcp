@@ -109,15 +109,15 @@ static void try_emit_usage(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *s
 // Iterative usage walker — explicit stack
 static void walk_usages(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, 4096);
-    ts_nstack_push(&stack, ctx->arena, root);
+    ts_nstack_init(&stack, ctx, 4096);
+    ts_nstack_push(&stack, root);
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         try_emit_usage(ctx, node, spec);
         uint32_t count = ts_node_child_count(node);
         for (int i = (int)count - LAST_IDX; i >= 0; i--) {
-            ts_nstack_push(&stack, ctx->arena, ts_node_child(node, (uint32_t)i));
+            ts_nstack_push(&stack, ts_node_child(node, (uint32_t)i));
         }
     }
 }
@@ -336,6 +336,10 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
         usage.site_end_byte = ts_node_end_byte(node);
         usage.may_be_call_reference = is_candidate_value_kind(node, ctx->language) &&
                                       is_binding_value(node, ctx->language);
+        /* The member half of a selector is its own reference node
+         * (field_identifier); record that shape — the name alone cannot carry
+         * it, and the Go Field guard keys on it (#1962). */
+        usage.is_member_access = strcmp(ts_node_type(node), "field_identifier") == 0;
         cbm_usages_push(&ctx->result->usages, ctx->arena, usage);
     }
 }

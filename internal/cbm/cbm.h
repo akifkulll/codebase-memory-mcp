@@ -236,9 +236,15 @@ typedef struct {
     int loop_depth;                     // enclosing loop nesting at the call site
     int branch_depth;                   // enclosing branch nesting at the call site
     int start_line;                     // 1-based source line of the call (for def range-match)
-    bool is_method;                     // method/member call with a non-self receiver. Perl:
+    bool is_method;                     // method/member call with an UNRESOLVED receiver. Perl:
                                         // arrow/method call ($obj->m). TS/JS/TSX: member call
-                                        // x.foo() whose receiver is not this/super. Default false.
+                                        // x.foo() whose receiver is not this/super. Python:
+                                        // x.foo() where x is not self/cls/super() and is not
+                                        // rooted in an imported name. Default false.
+    bool callee_is_locally_bound;       // bare call foo() whose callee identifier is bound as a
+                                        // parameter of an enclosing function, so it cannot be the
+                                        // module-level foo. Python only today. Read by the
+                                        // weak-local-binding guard. Default false.
 } CBMCall;
 
 typedef struct {
@@ -260,6 +266,10 @@ typedef struct {
     bool may_be_call_reference;    // syntactic candidate; exact LSP proof may upgrade its edge
     bool reference_only;           // emitted only as a candidate (inside a call): no USAGE
                                    // fallback when the LSP proves nothing
+    bool is_member_access;         // token is the member half of a selector/attribute
+                                   // (Go x.f — field_identifier). The extractor strips
+                                   // the receiver, so this is the only surviving record
+                                   // of selector shape (#1962). Default false.
 } CBMUsage;
 
 typedef struct {
@@ -271,6 +281,9 @@ typedef struct {
     const char *var_name;          // variable name
     const char *enclosing_func_qn; // QN of enclosing function
     bool is_write;                 // true = write, false = read
+    bool is_member_access;         // var_name is the field half of a selector/member LHS
+                                   // (`t.err = x` → "err"); the receiver is stripped here,
+                                   // so this is the only record of selector shape (#1962)
 } CBMReadWrite;
 
 typedef struct {
@@ -534,6 +547,13 @@ typedef struct {
 
 typedef struct {
     CBMArena *arena;
+    /* Scratch for AST traversal, owned by the cbm_extract_file_ex call that
+     * built this context and destroyed when it returns. Nothing a
+     * CBMFileResult points at may be allocated here: `arena` is the result's
+     * own, and it outlives extraction by the whole pipeline (#1997). NULL in a
+     * context built without one, in which case the stacks fall back to
+     * `arena`. */
+    CBMArena *scratch;
     CBMFileResult *result;
     const char *source;
     int source_len;

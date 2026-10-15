@@ -5,6 +5,10 @@
  * TestNodeDedup, TestProjectCRUD, TestUpsertNodeBatch, etc.)
  */
 #include "test_framework.h"
+#include "test_helpers.h"
+#include "../src/foundation/compat.h"
+#include "../src/foundation/compat_thread.h"
+#include <stdatomic.h>
 #include <store/store.h>
 #include <sqlite3.h>
 #include <string.h>
@@ -1002,6 +1006,63 @@ TEST(store_pragma_settings) {
     PASS();
 }
 
+/* A query open that races a writer must wait for it. The probe used to fail
+ * with SQLITE_BUSY and fall back to the immutable open, which takes no locks
+ * and so reads the WAL while the writer is still changing it. */
+typedef struct {
+    const char *path;
+    atomic_int locked;
+} query_busy_writer_t;
+
+static void *query_busy_writer(void *arg) {
+    query_busy_writer_t *ctx = arg;
+    sqlite3 *w = NULL;
+    if (sqlite3_open_v2(ctx->path, &w, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
+        /* EXCLUSIVE keeps the write lock past COMMIT, so readers see BUSY. */
+        (void)sqlite3_exec(w, "PRAGMA locking_mode=EXCLUSIVE; INSERT INTO t VALUES(2);", NULL,
+                           NULL, NULL);
+    }
+    atomic_store(&ctx->locked, 1);
+    cbm_usleep(300000);
+    sqlite3_close(w);
+    return NULL;
+}
+
+TEST(store_query_open_waits_for_busy_writer) {
+    char dir[512], path[600];
+    snprintf(dir, sizeof(dir), "%s/cbm_query_busy_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(dir)) FAIL("tmpdir");
+    snprintf(path, sizeof(path), "%s/graph.db", dir);
+    sqlite3 *db = NULL;
+    ASSERT_EQ(sqlite3_open(path, &db), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db,
+                           "PRAGMA journal_mode=WAL; CREATE TABLE t(x INTEGER);"
+                           "INSERT INTO t VALUES(1);",
+                           NULL, NULL, NULL),
+              SQLITE_OK);
+    sqlite3_close(db);
+
+    query_busy_writer_t ctx = {.path = path};
+    cbm_thread_t t;
+    ASSERT_EQ(cbm_thread_create(&t, 0, query_busy_writer, &ctx), 0);
+    while (!atomic_load(&ctx.locked)) cbm_usleep(1000);
+    cbm_store_t *q = cbm_store_open_path_query(path);
+    cbm_thread_join(&t);
+    ASSERT_NOT_NULL(q);
+    ASSERT_FALSE(sqlite3_uri_boolean(sqlite3_db_filename(cbm_store_get_db(q), "main"),
+                                     "immutable", 0));
+    sqlite3_stmt *stmt = NULL;
+    ASSERT_EQ(sqlite3_prepare_v2(cbm_store_get_db(q), "SELECT count(*) FROM t", -1, &stmt, NULL),
+              SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+    int rows = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    cbm_store_close(q);
+    th_rmtree(dir);
+    ASSERT_EQ(rows, 2);
+    PASS();
+}
+
 TEST(store_find_node_ids_by_qns) {
     cbm_store_t *s = cbm_store_open_memory();
     ASSERT_NOT_NULL(s);
@@ -1595,6 +1656,7 @@ SUITE(store_nodes) {
     RUN_TEST(store_find_edges_by_url_path);
     RUN_TEST(store_restore_from);
     RUN_TEST(store_pragma_settings);
+    RUN_TEST(store_query_open_waits_for_busy_writer);
     RUN_TEST(store_find_node_ids_by_qns);
     RUN_TEST(store_node_null_project);
     RUN_TEST(store_node_null_qn);

@@ -13,20 +13,77 @@ enum { MAX_INFRA_BINDINGS = 8 };
 
 // --- Scope stack management ---
 
-static void push_scope(WalkState *state, uint8_t kind, uint32_t depth, const char *qn) {
+static bool push_scope(WalkState *state, uint8_t kind, uint32_t depth, const char *qn) {
     if (state->scope_top >= MAX_SCOPES) {
-        return;
+        return false;
     }
     state->scopes[state->scope_top].kind = kind;
     state->scopes[state->scope_top].depth = depth;
     state->scopes[state->scope_top].qn = qn;
+    state->scopes[state->scope_top].py_param_base = state->py_param_count;
     state->scope_top++;
+    return true;
 }
 
 // Pop scopes that we've ascended out of (depth >= current cursor depth).
 static void pop_expired_scopes(WalkState *state, uint32_t cur_depth) {
     while (state->scope_top > 0 && state->scopes[state->scope_top - SKIP_ONE].depth >= cur_depth) {
         state->scope_top--;
+        state->py_param_count = state->scopes[state->scope_top].py_param_base;
+    }
+}
+
+bool cbm_walk_python_param_is_bound(const WalkState *state, const char *name) {
+    if (!state || !name || !name[0]) {
+        return false;
+    }
+    for (int i = state->py_param_count - SKIP_ONE; i >= 0; i--) {
+        if (strcmp(state->py_params[i], name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Name bound by one Python parameter node, or NULL when the shape binds none:
+ * a bare `identifier`, the `name` field of default/typed parameters, or the
+ * identifier under a `*args` / `**kwargs` splat. The bare `*` separator binds
+ * nothing. */
+static const char *python_parameter_name(CBMExtractCtx *ctx, TSNode param) {
+    if (strcmp(ts_node_type(param), "identifier") == 0) {
+        return cbm_node_text(ctx->arena, param, ctx->source);
+    }
+    TSNode name = ts_node_child_by_field_name(param, TS_FIELD("name"));
+    if (!ts_node_is_null(name) && strcmp(ts_node_type(name), "identifier") == 0) {
+        return cbm_node_text(ctx->arena, name, ctx->source);
+    }
+    TSNode first = ts_node_named_child(param, 0);
+    if (!ts_node_is_null(first) && strcmp(ts_node_type(first), "identifier") == 0) {
+        return cbm_node_text(ctx->arena, first, ctx->source);
+    }
+    return NULL;
+}
+
+/* Open a parameter frame for a Python def or lambda and bind its parameter
+ * names into it. Nothing is bound when the frame cannot be pushed, so names
+ * never outlive the scope that declares them. */
+static void push_python_param_scope(CBMExtractCtx *ctx, TSNode node, WalkState *state,
+                                    uint32_t depth) {
+    const char *kind = ts_node_type(node);
+    if (strcmp(kind, "function_definition") != 0 && strcmp(kind, "lambda") != 0) {
+        return;
+    }
+    TSNode params = ts_node_child_by_field_name(node, TS_FIELD("parameters"));
+    if (ts_node_is_null(params) || ts_node_named_child_count(params) == 0 ||
+        !push_scope(state, SCOPE_PY_PARAMS, depth, NULL)) {
+        return;
+    }
+    uint32_t count = ts_node_named_child_count(params);
+    for (uint32_t i = 0; i < count && state->py_param_count < MAX_PY_PARAMS; i++) {
+        const char *pname = python_parameter_name(ctx, ts_node_named_child(params, i));
+        if (pname && pname[0]) {
+            state->py_params[state->py_param_count++] = pname;
+        }
     }
 }
 
@@ -1204,6 +1261,9 @@ static void push_boundary_scopes(CBMExtractCtx *ctx, TSNode node, const CBMLangS
         push_scope(state, SCOPE_LOOP, depth, NULL);
     } else if (spec->branching_node_types && cbm_kind_in_set(node, spec->branching_node_types)) {
         push_scope(state, SCOPE_BRANCH, depth, NULL);
+    }
+    if (ctx->language == CBM_LANG_PYTHON) {
+        push_python_param_scope(ctx, node, state, depth);
     }
 }
 

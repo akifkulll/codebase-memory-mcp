@@ -31,6 +31,8 @@ enum {
      * CBM_SZ_1K; percent-encoding can triple it, plus the "file://" prefix,
      * the "?immutable=1" suffix and a leading '/'. */
     ST_QUERY_URI_MAX = 3 * 1024 + 64,
+    /* Matches the PRAGMA busy_timeout configure_pragmas applies. */
+    ST_BUSY_TIMEOUT_MS = 10000,
     ST_GROWTH = 2,
     ST_MAX_DEGREE = 8192,
     ST_HALF_SEC = 500000,
@@ -800,11 +802,20 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
      * (no ghost .db for unknown/unindexed projects). */
     int rc = sqlite3_open_v2(db_path, &s->db, SQLITE_OPEN_READONLY, NULL);
     if (rc == SQLITE_OK) {
+        /* Wait out a concurrent writer before probing: a busy probe is not a
+         * read-only filesystem, and the immutable fallback below ignores the
+         * WAL, so it would serve a stale snapshot without recent commits. */
+        sqlite3_busy_timeout(s->db, ST_BUSY_TIMEOUT_MS);
         /* Force first DB access so a read-only-FS WAL failure surfaces now. */
         if (sqlite3_exec(s->db, "SELECT 1 FROM sqlite_master LIMIT 1;", NULL, NULL, NULL) !=
             SQLITE_OK) {
+            bool busy = (sqlite3_errcode(s->db) & 0xFF) == SQLITE_BUSY;
             sqlite3_close(s->db);
             s->db = NULL;
+            if (busy) {
+                free(s);
+                return NULL;
+            }
             rc = SQLITE_CANTOPEN; /* trigger immutable fallback */
         }
     }

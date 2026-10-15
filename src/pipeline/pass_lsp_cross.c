@@ -266,6 +266,73 @@ static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const ch
     return 0;
 }
 
+/* Go: fold per-field "Field" definitions into their owning struct's
+ * field_defs. extract_defs.c emits one flat CBMDefinition per struct field
+ * (label "Field", parent_class = owning struct QN, name = field name,
+ * return_type = raw type text). Those rows are dropped by pxc_build_lsp_def
+ * (pxc_map_label excludes "Field"), so without this fold every Go struct
+ * registers with zero fields and field-chain calls (h.svc.Handle) can
+ * never resolve. Fields are always declared in the same file as their struct,
+ * so scanning the file's own defs covers every case. Runs inside
+ * cbm_pxc_collect_all_defs — one site covers both the prebuilt-registry path
+ * and the per-file fallback, since both consume all_defs. */
+static void pxc_fold_go_struct_fields(CBMArena *arena, const CBMFileResult *result,
+                                      CBMLSPDef *defs, int start, int end) {
+    if (!arena || !result || !defs || start >= end) {
+        return;
+    }
+    for (int si = start; si < end; si++) {
+        CBMLSPDef *dst = &defs[si];
+        if (!dst->label || strcmp(dst->label, "Struct") != 0 || !dst->qualified_name) {
+            continue;
+        }
+        int count = 0;
+        size_t total = 0; /* "name:type" bytes; separators and NUL added below */
+        for (int di = 0; di < result->defs.count; di++) {
+            const CBMDefinition *fd = &result->defs.items[di];
+            if (!fd->label || !fd->parent_class || !fd->name || !fd->name[0] || !fd->return_type ||
+                !fd->return_type[0] || strcmp(fd->label, "Field") != 0 ||
+                strcmp(fd->parent_class, dst->qualified_name) != 0) {
+                continue;
+            }
+            total += strlen(fd->name) + 1 + strlen(fd->return_type);
+            count++;
+        }
+        if (count == 0) {
+            continue;
+        }
+        /* count - 1 separators + NUL. */
+        size_t bufsz = total + (size_t)(count - 1) + 1;
+        char *buf = (char *)cbm_arena_alloc(arena, bufsz);
+        if (!buf) {
+            continue;
+        }
+        char *p = buf;
+        int written = 0;
+        for (int di = 0; di < result->defs.count; di++) {
+            const CBMDefinition *fd = &result->defs.items[di];
+            if (!fd->label || !fd->parent_class || !fd->name || !fd->name[0] || !fd->return_type ||
+                !fd->return_type[0] || strcmp(fd->label, "Field") != 0 ||
+                strcmp(fd->parent_class, dst->qualified_name) != 0) {
+                continue;
+            }
+            size_t n = strlen(fd->name);
+            memcpy(p, fd->name, n);
+            p += n;
+            *p++ = ':';
+            n = strlen(fd->return_type);
+            memcpy(p, fd->return_type, n);
+            p += n;
+            if (written + 1 < count) {
+                *p++ = '|';
+            }
+            written++;
+        }
+        *p = '\0';
+        dst->field_defs = buf;
+    }
+}
+
 /* Collect a project-wide CBMLSPDef[] from all cached results. Returns a
  * malloc'd array (caller frees) of length *out_count. String fields are
  * borrowed from cache[i]->arena and from def_modules[i] (also borrowed). */
@@ -288,6 +355,7 @@ CBMLSPDef *cbm_pxc_collect_all_defs(CBMFileResult **cache, const cbm_file_info_t
     }
     int idx = 0;
     for (int fi = 0; fi < file_count; fi++) {
+        const int file_start = idx;
         if (!cache[fi])
             continue;
         if (!def_modules[fi]) {
@@ -307,6 +375,9 @@ CBMLSPDef *cbm_pxc_collect_all_defs(CBMFileResult **cache, const cbm_file_info_t
                                   namespace_name, files[fi].language, &defs[idx]) == 0) {
                 idx++;
             }
+        }
+        if (files[fi].language == CBM_LANG_GO) {
+            pxc_fold_go_struct_fields(&cache[fi]->arena, cache[fi], defs, file_start, idx);
         }
     }
     *out_count = idx;
@@ -689,8 +760,16 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
         switch (lang) {
         case CBM_LANG_GO:
             /* Tier 3 (metadata-driven): pure lookup over the Tier-1
-             * lsp_unresolved entries — no parse, no AST walk. */
+             * lsp_unresolved entries — no parse, no AST walk. Then the
+             * AST walk on the shared Tier-2 registry (mirroring every
+             * other language) so NAMED receivers evaluated against
+             * project-wide defs also resolve. The walk variant below is
+             * read-only — the sealed registry is safe for parallel
+             * workers. */
             cbm_go_fast_resolve_qualified_calls(result, prebuilt, imp_keys, imp_vals, imp_count);
+            cbm_run_go_lsp_cross_with_registry(&result->arena, source, source_len, def_module,
+                                               prebuilt, imp_keys, imp_vals, imp_count,
+                                               result->cached_tree, &result->resolved_calls);
             used_prebuilt = true;
             break;
         case CBM_LANG_PYTHON:
@@ -808,8 +887,8 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
     free(filtered);
 }
 
-static bool pxc_build_rust_manifest(const cbm_pipeline_ctx_t *ctx, CBMArena *marena,
-                                    CBMCargoManifest *out_m) {
+bool cbm_pxc_build_rust_manifest(const cbm_pipeline_ctx_t *ctx, CBMArena *marena,
+                                 CBMCargoManifest *out_m) {
     if (!ctx || !ctx->repo_path || !marena || !out_m)
         return false;
     char path[1024];
@@ -851,7 +930,7 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
     bool have_manifest = false;
     if (have_rust) {
         cbm_arena_init(&cargo_arena);
-        have_manifest = pxc_build_rust_manifest(ctx, &cargo_arena, &cargo_manifest);
+        have_manifest = cbm_pxc_build_rust_manifest(ctx, &cargo_arena, &cargo_manifest);
         cbm_pxc_set_rust_manifest(have_manifest ? &cargo_manifest : NULL);
     }
 

@@ -1371,7 +1371,9 @@ TEST(contract_edge_parallel_service_edges) {
         {"gql.py", "def gql(query_string):\n    return query_string\n"},
         {"client.py",
          "from gql import gql\n\n\ndef fetch_user():\n"
-         "    return gql(\"query GetUser { user { id name } }\")\n\n\n"
+         /* The embedded double quote survives extraction from this single-quoted
+          * Python string and breaks GRAPHQL_CALLS JSON unless operation is escaped. */
+         "    return gql('query GetUser { user(name: \"quoted\") { id name } }')\n\n\n"
          "def create_user():\n"
          "    return gql(\"mutation CreateUser { addUser(name: \\\"x\\\") { id } }\")\n"},
         /* TRPC_CALLS: local createTRPCProxyClient (same-module resolution). */
@@ -1412,6 +1414,25 @@ TEST(contract_edge_parallel_service_edges) {
     int grpc = store ? cbm_store_count_edges_by_type(store, lp.project, "GRPC_CALLS") : -1;
     int trpc = store ? cbm_store_count_edges_by_type(store, lp.project, "TRPC_CALLS") : -1;
     int infra = store ? cbm_store_count_edges_by_type(store, lp.project, "INFRA_MAPS") : -1;
+    /* Every GRAPHQL_CALLS property blob must parse as JSON. */
+    int invalid_props = -1;
+    if (store) {
+        cbm_edge_t *edges = NULL;
+        int edge_count = 0;
+        if (cbm_store_find_edges_by_type(store, lp.project, "GRAPHQL_CALLS", &edges,
+                                         &edge_count) == CBM_STORE_OK) {
+            invalid_props = 0;
+            for (int i = 0; i < edge_count; i++) {
+                const char *props = edges[i].properties_json;
+                yyjson_doc *doc = props && props[0] ? yyjson_read(props, strlen(props), 0) : NULL;
+                if (props && props[0] && !doc) {
+                    invalid_props++;
+                }
+                yyjson_doc_free(doc);
+            }
+            cbm_store_free_edges(edges, edge_count);
+        }
+    }
     if (graphql < 1 || grpc < 1 || trpc < 1 || infra < 1) {
         fprintf(stderr,
                 "  [EDGE] parallel-service: GRAPHQL_CALLS=%d GRPC_CALLS=%d TRPC_CALLS=%d "
@@ -1424,6 +1445,7 @@ TEST(contract_edge_parallel_service_edges) {
     ASSERT_TRUE(grpc >= 1);
     ASSERT_TRUE(trpc >= 1);
     ASSERT_TRUE(infra >= 1);
+    ASSERT_EQ(invalid_props, 0);
     PASS();
 }
 

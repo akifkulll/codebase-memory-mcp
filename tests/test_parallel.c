@@ -1061,6 +1061,176 @@ TEST(grpc_no_phantom_route_from_plain_var_issue294) {
 
 /* ── Suite Registration ──────────────────────────────────────────── */
 
+/* Upstream 0f1e65d6: parallel Rust resolution keeps the Cargo context. */
+static bool callable_has_call_target_fragment(const cbm_gbuf_t *gbuf, const char *source_tail,
+                                              const char *target_fragment) {
+    const cbm_gbuf_node_t *source = find_unique_callable_node_by_tail(gbuf, source_tail);
+    if (!source || !target_fragment)
+        return false;
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_edges_by_source_type(gbuf, source->id, "CALLS", &edges, &count) != 0)
+        return false;
+    for (int i = 0; i < count; i++) {
+        const cbm_gbuf_node_t *target =
+            edges[i] ? cbm_gbuf_find_by_id(gbuf, edges[i]->target_id) : NULL;
+        if (target && target->qualified_name && strstr(target->qualified_name, target_fragment))
+            return true;
+    }
+    return false;
+}
+
+static const cbm_gbuf_edge_t *find_call_edge_to_target_fragment(const cbm_gbuf_t *gbuf,
+                                                                const char *source_tail,
+                                                                const char *target_fragment) {
+    const cbm_gbuf_node_t *source = find_unique_callable_node_by_tail(gbuf, source_tail);
+    if (!source || !target_fragment)
+        return NULL;
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_edges_by_source_type(gbuf, source->id, "CALLS", &edges, &count) != 0)
+        return NULL;
+    for (int i = 0; i < count; i++) {
+        const cbm_gbuf_node_t *target =
+            edges[i] ? cbm_gbuf_find_by_id(gbuf, edges[i]->target_id) : NULL;
+        if (target && target->qualified_name && strstr(target->qualified_name, target_fragment))
+            return edges[i];
+    }
+    return NULL;
+}
+
+/* Build the smallest real Cargo workspace that exercises the direct parallel
+ * resolve API.  crate_a is a declared workspace member, while unlisted is a
+ * graph-visible decoy with the same helper name.  That decoy is intentional:
+ * without manifest-aware routing, a bare-name match cannot accidentally make
+ * the test green.  The optional crate_b-local helper pins the second failure
+ * mode where a confident in-file resolution used to suppress cross-LSP. */
+static cbm_gbuf_t *run_issue56_parallel_workspace(bool local_decoy) {
+    static const char workspace_toml[] =
+        "[workspace]\n"
+        "members = [\"crate_a\", \"crate_b\"]\n"
+        "resolver = \"2\"\n";
+    static const char crate_a_toml[] =
+        "[package]\nname = \"crate_a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    static const char crate_b_toml[] =
+        "[package]\nname = \"crate_b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+        "\n[dependencies]\ncrate_a = { path = \"../crate_a\" }\n";
+    static const char crate_a_source[] = "pub fn helper() {}\n";
+    static const char unlisted_source[] = "pub fn helper() {}\n";
+    static const char caller_without_local[] =
+        "fn run() { crate_a::helper(); }\n"
+        "fn main() { run(); }\n";
+    static const char caller_with_local[] =
+        "fn helper() {}\n"
+        "fn run() { crate_a::helper(); }\n"
+        "fn main() { run(); }\n";
+
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cbm_issue56_parallel_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmpdir))
+        return NULL;
+
+    char crate_a[512];
+    char crate_a_src[512];
+    char crate_b[512];
+    char crate_b_src[512];
+    char unlisted[512];
+    char unlisted_src[512];
+    snprintf(crate_a, sizeof(crate_a), "%s/crate_a", tmpdir);
+    snprintf(crate_a_src, sizeof(crate_a_src), "%s/src", crate_a);
+    snprintf(crate_b, sizeof(crate_b), "%s/crate_b", tmpdir);
+    snprintf(crate_b_src, sizeof(crate_b_src), "%s/src", crate_b);
+    snprintf(unlisted, sizeof(unlisted), "%s/unlisted", tmpdir);
+    snprintf(unlisted_src, sizeof(unlisted_src), "%s/src", unlisted);
+    if (cbm_mkdir(crate_a) != 0 || cbm_mkdir(crate_a_src) != 0 || cbm_mkdir(crate_b) != 0 ||
+        cbm_mkdir(crate_b_src) != 0 || cbm_mkdir(unlisted) != 0 || cbm_mkdir(unlisted_src) != 0) {
+        th_rmtree(tmpdir);
+        return NULL;
+    }
+
+    char root_manifest[512];
+    char crate_a_manifest[512];
+    char crate_b_manifest[512];
+    char crate_a_file[512];
+    char crate_b_file[512];
+    char unlisted_file[512];
+    snprintf(root_manifest, sizeof(root_manifest), "%s/Cargo.toml", tmpdir);
+    snprintf(crate_a_manifest, sizeof(crate_a_manifest), "%s/Cargo.toml", crate_a);
+    snprintf(crate_b_manifest, sizeof(crate_b_manifest), "%s/Cargo.toml", crate_b);
+    snprintf(crate_a_file, sizeof(crate_a_file), "%s/lib.rs", crate_a_src);
+    snprintf(crate_b_file, sizeof(crate_b_file), "%s/main.rs", crate_b_src);
+    snprintf(unlisted_file, sizeof(unlisted_file), "%s/lib.rs", unlisted_src);
+    if (th_write_file(root_manifest, workspace_toml) != 0 ||
+        th_write_file(crate_a_manifest, crate_a_toml) != 0 ||
+        th_write_file(crate_b_manifest, crate_b_toml) != 0 ||
+        th_write_file(crate_a_file, crate_a_source) != 0 ||
+        th_write_file(crate_b_file, local_decoy ? caller_with_local : caller_without_local) != 0 ||
+        th_write_file(unlisted_file, unlisted_source) != 0) {
+        th_rmtree(tmpdir);
+        return NULL;
+    }
+
+    cbm_discover_opts_t opts = {.mode = CBM_MODE_FULL};
+    cbm_file_info_t *files = NULL;
+    int file_count = 0;
+    if (cbm_discover(tmpdir, &opts, &files, &file_count) != 0 || file_count < 3) {
+        cbm_discover_free(files, file_count);
+        th_rmtree(tmpdir);
+        return NULL;
+    }
+    cbm_gbuf_t *gbuf =
+        run_parallel("cbm_issue56_parallel", tmpdir, files, file_count, 2 /* real workers */);
+    cbm_discover_free(files, file_count);
+    th_rmtree(tmpdir);
+    return gbuf;
+}
+
+TEST(parallel_rust_cross_crate_worker_receives_workspace_manifest) {
+    cbm_gbuf_t *gbuf = run_issue56_parallel_workspace(false);
+    ASSERT_NOT_NULL(gbuf);
+
+    const cbm_gbuf_edge_t *correct =
+        find_call_edge_to_target_fragment(gbuf, "main.run", ".crate_a.");
+    const bool correct_found = correct != NULL;
+    const bool unlisted =
+        callable_has_call_target_fragment(gbuf, "main.run", ".unlisted.");
+    const bool manifest_strategy =
+        correct && correct->properties_json && strstr(correct->properties_json, "lsp_cross_crate");
+    if (!correct || unlisted || !manifest_strategy) {
+        printf("  issue56 manifest diagnostic: correct=%d unlisted=%d strategy=%d\n",
+               correct_found, unlisted, manifest_strategy);
+    }
+    cbm_gbuf_free(gbuf);
+
+    ASSERT_TRUE(correct_found);
+    ASSERT_FALSE(unlisted);
+    ASSERT_TRUE(manifest_strategy);
+    PASS();
+}
+
+TEST(parallel_rust_cross_crate_manifest_beats_confident_local_resolution) {
+    cbm_gbuf_t *gbuf = run_issue56_parallel_workspace(true);
+    ASSERT_NOT_NULL(gbuf);
+
+    const cbm_gbuf_edge_t *correct =
+        find_call_edge_to_target_fragment(gbuf, "main.run", ".crate_a.");
+    const bool correct_found = correct != NULL;
+    const bool wrong_local =
+        callable_has_call_target_fragment(gbuf, "main.run", ".crate_b.");
+    const bool manifest_strategy =
+        correct && correct->properties_json && strstr(correct->properties_json, "lsp_cross_crate");
+    if (!correct || wrong_local || !manifest_strategy) {
+        printf("  issue56 local-shadow diagnostic: correct=%d wrong_local=%d strategy=%d\n",
+               correct_found, wrong_local, manifest_strategy);
+    }
+    cbm_gbuf_free(gbuf);
+
+    ASSERT_TRUE(correct_found);
+    ASSERT_FALSE(wrong_local);
+    ASSERT_TRUE(manifest_strategy);
+    PASS();
+}
+
 SUITE(parallel) {
     RUN_TEST(grpc_service_name_preserves_service_suffix_issue294);
     RUN_TEST(grpc_no_phantom_route_from_plain_var_issue294);
@@ -1092,4 +1262,6 @@ SUITE(parallel) {
 
     /* Cleanup shared state */
     parity_teardown();
+    RUN_TEST(parallel_rust_cross_crate_worker_receives_workspace_manifest);
+    RUN_TEST(parallel_rust_cross_crate_manifest_beats_confident_local_resolution);
 }

@@ -23,6 +23,7 @@
 #define MAX_PARAMS_MINUS_1 31
 #define MAX_RETURN_TYPES 16
 #define MAX_RETURN_TYPES_MINUS_1 15
+#define MAX_ATTR_WRAPPERS 16 // stacked C#/PHP attribute_list siblings per declaration (#1692)
 
 // Tree traversal limits.
 enum {
@@ -688,9 +689,14 @@ TSNode cbm_resolve_func_name(TSNode node, CBMLanguage lang) {
         }
 
         /* Swift and newer tree-sitter-kotlin: function_declaration has no `name`
-         * field; the function name is a `simple_identifier` child. */
+         * field; the function name is a `simple_identifier` child. A Swift
+         * protocol requirement (a bodyless `func` inside a protocol) is a
+         * separate node type with the same shape; it is named here as well as in
+         * resolve_method_name because swift_func_types now admits it, so it can
+         * reach the free-function path too and would otherwise land unnamed. */
         if ((lang == CBM_LANG_SWIFT || lang == CBM_LANG_KOTLIN) &&
-            strcmp(kind, "function_declaration") == 0) {
+            (strcmp(kind, "function_declaration") == 0 ||
+             strcmp(kind, "protocol_function_declaration") == 0)) {
             TSNode si = cbm_find_child_by_kind(node, "simple_identifier");
             if (!ts_node_is_null(si)) {
                 return si;
@@ -1242,7 +1248,7 @@ static const char *extract_docstring(CBMArena *a, TSNode node, const char *sourc
     return NULL;
 }
 
-static TSNode find_jvm_modifiers(TSNode node, CBMLanguage lang);
+static int find_jvm_modifiers(TSNode node, CBMLanguage lang, TSNode *out, int max);
 
 /* HTTP method names recognized in decorator calls (e.g., @router.post → "POST") */
 static const char *decorator_method_name(const char *attr_text) {
@@ -1616,11 +1622,12 @@ static bool try_route_from_annotation(CBMArena *a, TSNode annotation, const char
 static bool extract_route_from_annotations(CBMArena *a, TSNode func_node, const char *source,
                                            const CBMLangSpec *spec, const char **out_path,
                                            const char **out_method) {
-    TSNode modifiers = find_jvm_modifiers(func_node, spec->language);
-    if (!ts_node_is_null(modifiers)) {
-        uint32_t mc = ts_node_child_count(modifiers);
+    TSNode wrappers[MAX_ATTR_WRAPPERS];
+    int wn = find_jvm_modifiers(func_node, spec->language, wrappers, MAX_ATTR_WRAPPERS);
+    for (int w = 0; w < wn; w++) {
+        uint32_t mc = ts_node_child_count(wrappers[w]);
         for (uint32_t mi = 0; mi < mc; mi++) {
-            TSNode mchild = ts_node_child(modifiers, mi);
+            TSNode mchild = ts_node_child(wrappers[w], mi);
             if (cbm_kind_in_set(mchild, spec->decorator_node_types) &&
                 try_route_from_annotation(a, mchild, source, out_path, out_method)) {
                 return true;
@@ -1728,13 +1735,23 @@ static int count_modifier_annotations(TSNode modifiers, const CBMLangSpec *spec)
     return count;
 }
 
-// Find the wrapper child that holds annotations/attributes for languages where
-// they are nested under an intermediate node rather than being a prev-sibling:
-//   Java/Kotlin/C#/Swift → `modifiers` (contains annotation/attribute)
-//   PHP 8                → `attribute_list` (contains attribute_group)
-// Returns a null node when the language has no such wrapper.
-static TSNode find_jvm_modifiers(TSNode node, CBMLanguage lang) {
-    TSNode null_node = {0};
+// Find every wrapper child that holds annotations/attributes for languages
+// where they are nested under an intermediate node rather than being a
+// prev-sibling:
+//   Java/Kotlin/Swift → `modifiers` (one node, contains every annotation)
+//   C#/PHP 8          → `attribute_list` (contains attribute/attribute_group)
+//
+// C#/PHP attribute stacks are NOT a single wrapper: each bracketed group
+// (`[Foo]`, `[Bar]`, ...) compiles to its own `attribute_list` node, so
+// `[A] [B] [C]` above a declaration produces three separate `attribute_list`
+// siblings among that declaration's children — not one `attribute_list`
+// holding three entries. A field-name lookup (`ts_node_child_by_field_name`)
+// only ever returns the first child registered under a given field, so using
+// it here silently dropped every attribute after the first bracket group
+// (#1692). Scanning all children by kind fixes that for C#/PHP and is a
+// no-op change for Java/Kotlin/Swift, where `modifiers` never repeats.
+// Writes up to `max` wrapper nodes into `out`; returns how many were found.
+static int find_jvm_modifiers(TSNode node, CBMLanguage lang, TSNode *out, int max) {
     const char *wrapper = NULL;
     switch (lang) {
     case CBM_LANG_JAVA:
@@ -1744,19 +1761,12 @@ static TSNode find_jvm_modifiers(TSNode node, CBMLanguage lang) {
         break;
     case CBM_LANG_CSHARP:
     case CBM_LANG_PHP:
-        /* C# attributes live in an `attribute_list` child (modifiers like
-         * `public` are separate `modifier` nodes); PHP 8 likewise nests
-         * `attribute_group` under `attribute_list`. */
         wrapper = "attribute_list";
         break;
     default:
-        return null_node;
+        return 0;
     }
-    TSNode w = ts_node_child_by_field_name(node, wrapper, (uint32_t)strlen(wrapper));
-    if (ts_node_is_null(w)) {
-        w = cbm_find_child_by_kind(node, wrapper);
-    }
-    return w;
+    return cbm_find_children_by_kind(node, wrapper, out, max);
 }
 
 // Count direct children of `node` that are decorator/annotation nodes (used by
@@ -1821,13 +1831,14 @@ static const char **extract_decorators(CBMArena *a, TSNode node, const char *sou
         prev = ts_node_prev_sibling(prev);
     }
 
-    TSNode modifiers = {0};
+    TSNode wrappers[MAX_ATTR_WRAPPERS];
+    int wn = 0;
     int mod_count = 0;
     int child_count = 0;
     if (count == 0) {
-        modifiers = find_jvm_modifiers(node, lang);
-        if (!ts_node_is_null(modifiers)) {
-            mod_count = count_modifier_annotations(modifiers, spec);
+        wn = find_jvm_modifiers(node, lang, wrappers, MAX_ATTR_WRAPPERS);
+        for (int w = 0; w < wn; w++) {
+            mod_count += count_modifier_annotations(wrappers[w], spec);
         }
         /* Languages like Scala attach the annotation directly as a child of the
          * definition node (no wrapper, no prev-sibling). */
@@ -1857,8 +1868,8 @@ static const char **extract_decorators(CBMArena *a, TSNode node, const char *sou
         }
         prev = ts_node_prev_sibling(prev);
     }
-    if (!ts_node_is_null(modifiers)) {
-        idx = collect_modifier_decorators(a, modifiers, source, spec, result, idx, total);
+    for (int w = 0; w < wn && mod_count > 0; w++) {
+        idx = collect_modifier_decorators(a, wrappers[w], source, spec, result, idx, total);
     }
     if (child_count > 0) {
         idx = collect_child_decorators(a, node, source, spec, result, idx, total);
@@ -2288,7 +2299,13 @@ static int collect_bases_from_field(CBMArena *a, TSNode field_node, const char *
              * dotted base like `mod.Base`). Without these the raw-text fallback
              * below captured the whole "(Base)" field text, which never
              * resolved -> zero INHERITS edges for Python subclasses. */
-            strcmp(ck, "identifier") == 0 || strcmp(ck, "attribute") == 0) {
+            strcmp(ck, "identifier") == 0 || strcmp(ck, "attribute") == 0 ||
+            /* Ruby `class C < Base` wraps the base in a `superclass` node whose
+             * child is a `constant` (or `scope_resolution` for `A::B`). Without
+             * these the raw-text fallback captured "< Base" (operator included),
+             * which never resolves — breaking INHERITS and the Ruby LSP's
+             * superclass chain. */
+            strcmp(ck, "constant") == 0 || strcmp(ck, "scope_resolution") == 0) {
             char *t = cbm_node_text(a, child, source);
             if (t) {
                 char *angle = strchr(t, '<');
@@ -3969,6 +3986,7 @@ static TSNode find_class_body(TSNode class_node, CBMLanguage lang) {
     static const char *body_types[] = {"class_body",
                                        "interface_body",
                                        "enum_body",
+                                       "protocol_body",
                                        "template_body",
                                        "interface_type",
                                        "struct_type",
@@ -4005,6 +4023,20 @@ static TSNode find_class_member_body(TSNode class_node, CBMLanguage lang) {
     }
     TSNode declarations = cbm_find_child_by_kind(body, "enum_body_declarations");
     return ts_node_is_null(declarations) ? body : declarations;
+}
+
+/* Go structs keep their field_declaration nodes one level below the body that
+ * find_class_body() returns: type_spec's `type` child is a struct_type whose
+ * only named child is a field_declaration_list. Interfaces need no such step --
+ * interface_type holds its method specs directly, which is why interface members
+ * extracted correctly while every struct field was silently skipped. Normalize
+ * here, the same way the Java enum_body_declarations step above does. */
+static TSNode go_normalize_struct_body(TSNode body) {
+    if (ts_node_is_null(body) || strcmp(ts_node_type(body), "struct_type") != 0) {
+        return body;
+    }
+    TSNode list = cbm_find_child_by_kind(body, "field_declaration_list");
+    return ts_node_is_null(list) ? body : list;
 }
 
 // Dart: resolve method name from method_signature/function_signature.
@@ -4088,7 +4120,8 @@ static TSNode resolve_method_name(TSNode child, CBMLanguage lang) {
     }
 
     if ((lang == CBM_LANG_SWIFT || lang == CBM_LANG_KOTLIN) &&
-        strcmp(ck, "function_declaration") == 0) {
+        (strcmp(ck, "function_declaration") == 0 ||
+         strcmp(ck, "protocol_function_declaration") == 0)) {
         return cbm_find_child_by_kind(child, "simple_identifier");
     }
 
@@ -4449,8 +4482,8 @@ static TSNode emit_elixir_module_class(CBMExtractCtx *ctx, TSNode cur) {
 static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
     (void)spec;
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CBM_SZ_64);
-    ts_nstack_push(&stack, ctx->arena, node);
+    ts_nstack_init(&stack, ctx, CBM_SZ_64);
+    ts_nstack_push(&stack, node);
 
     while (stack.count > 0) {
         TSNode cur = ts_nstack_pop(&stack);
@@ -4478,7 +4511,7 @@ static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSp
                 for (int di = (int)dbc - SKIP_CHAR; di >= 0; di--) {
                     TSNode dchild = ts_node_child(do_block, (uint32_t)di);
                     if (!ts_node_is_null(dchild) && strcmp(ts_node_type(dchild), "call") == 0) {
-                        ts_nstack_push(&stack, ctx->arena, dchild);
+                        ts_nstack_push(&stack, dchild);
                     }
                 }
             }
@@ -5276,8 +5309,8 @@ static void extract_var_names(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
 // Used by YAML, TOML, INI, JSON.
 static void walk_variables_iter(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CBM_SZ_256);
-    ts_nstack_push(&stack, ctx->arena, root);
+    ts_nstack_init(&stack, ctx, CBM_SZ_256);
+    ts_nstack_push(&stack, root);
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
@@ -5301,7 +5334,7 @@ static void walk_variables_iter(CBMExtractCtx *ctx, TSNode root, const CBMLangSp
                 strcmp(ck, "section") == 0 || strcmp(ck, "object") == 0 ||
                 strcmp(ck, "array") == 0 || strcmp(ck, "pair") == 0 || strcmp(ck, "element") == 0 ||
                 strcmp(ck, "content") == 0) {
-                ts_nstack_push(&stack, ctx->arena, child);
+                ts_nstack_push(&stack, child);
             }
         }
     }
@@ -5532,6 +5565,9 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
     }
 
     TSNode body = find_class_member_body(class_node, ctx->language);
+    if (ctx->language == CBM_LANG_GO) {
+        body = go_normalize_struct_body(body);
+    }
     if (ts_node_is_null(body)) {
         return;
     }
@@ -5605,6 +5641,13 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
 
         char *name = cbm_node_text(a, name_node, ctx->source);
         if (!name || !name[0]) {
+            continue;
+        }
+
+        /* Go: `_` is the blank identifier, used for explicit struct padding in
+         * generated code. It is not a referenceable field, and emitting it gives
+         * every `_` in the repository a same-named node to collide with. */
+        if (ctx->language == CBM_LANG_GO && strcmp(name, "_") == 0) {
             continue;
         }
 
@@ -5770,10 +5813,10 @@ static void wd_push_children_reverse(wd_stack_t *s, TSNode node, const char *enc
 // Push nested class nodes from a class body container onto the defs stack.
 // Iteratively walks into wrapper nodes (field_declaration, template_declaration).
 static void push_nested_class_nodes(TSNode body, const CBMLangSpec *spec, wd_stack_t *s,
-                                    const char *enclosing_qn, CBMArena *arena) {
+                                    const char *enclosing_qn, const CBMExtractCtx *ctx) {
     TSNodeStack nc_stack;
-    ts_nstack_init(&nc_stack, arena, NESTED_CLASS_STACK_CAP);
-    ts_nstack_push(&nc_stack, arena, body);
+    ts_nstack_init(&nc_stack, ctx, NESTED_CLASS_STACK_CAP);
+    ts_nstack_push(&nc_stack, body);
 
     while (nc_stack.count > 0) {
         TSNode cur = ts_nstack_pop(&nc_stack);
@@ -5788,7 +5831,7 @@ static void push_nested_class_nodes(TSNode body, const CBMLangSpec *spec, wd_sta
                 const char *ck = ts_node_type(child);
                 if (strcmp(ck, "field_declaration") == 0 ||
                     strcmp(ck, "template_declaration") == 0 || strcmp(ck, "declaration") == 0) {
-                    ts_nstack_push(&nc_stack, arena, child);
+                    ts_nstack_push(&nc_stack, child);
                 }
             }
         }
@@ -5853,14 +5896,14 @@ static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const char 
 
 // Push nested class children from a class body container onto the walk stack.
 static void push_class_body_children(TSNode node, const CBMLangSpec *spec, wd_stack_t *s,
-                                     const char *new_enclosing, CBMArena *arena) {
+                                     const char *new_enclosing, const CBMExtractCtx *ctx) {
     /* Java interface and enum bodies are member containers too. Without this
      * the walk descended into them and re-extracted their methods as free
      * Functions next to the Methods extract_class_methods emits (#1234). */
     if (spec->language == CBM_LANG_JAVA) {
         TSNode body = find_class_member_body(node, spec->language);
         if (!ts_node_is_null(body)) {
-            push_nested_class_nodes(body, spec, s, new_enclosing, arena);
+            push_nested_class_nodes(body, spec, s, new_enclosing, ctx);
             return;
         }
     }
@@ -5876,7 +5919,7 @@ static void push_class_body_children(TSNode node, const CBMLangSpec *spec, wd_st
             // double-extracted) as top-level functions. Gated to Groovy so other
             // grammars that also name a node "closure" are unaffected.
             (strcmp(ck, "closure") == 0 && spec->language == CBM_LANG_GROOVY)) {
-            push_nested_class_nodes(child, spec, s, new_enclosing, arena);
+            push_nested_class_nodes(child, spec, s, new_enclosing, ctx);
             return;
         }
     }
@@ -6390,7 +6433,7 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
         if (cbm_kind_in_set(node, spec->class_node_types)) {
             extract_class_def(ctx, node, spec);
             const char *new_enclosing = compute_class_qn(ctx, node, frame.enclosing_class_qn);
-            push_class_body_children(node, spec, &s, new_enclosing, ctx->arena);
+            push_class_body_children(node, spec, &s, new_enclosing, ctx);
             continue;
         }
 

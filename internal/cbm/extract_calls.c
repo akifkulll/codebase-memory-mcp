@@ -43,7 +43,8 @@ static const char *lookup_string_constant(const CBMExtractCtx *ctx, const char *
 static int is_string_like(const char *kind) {
     return (strcmp(kind, "string") == 0 || strcmp(kind, "string_literal") == 0 ||
             strcmp(kind, "interpreted_string_literal") == 0 ||
-            strcmp(kind, "raw_string_literal") == 0 || strcmp(kind, "string_content") == 0);
+            strcmp(kind, "raw_string_literal") == 0 || strcmp(kind, "string_content") == 0 ||
+            strcmp(kind, "line_string_literal") == 0);
 }
 
 /* Strip surrounding quotes from a string, return arena-allocated copy */
@@ -481,6 +482,17 @@ static char *extract_objc_callee(CBMArena *a, TSNode node, const char *source, c
     }
     TSNode selector = ts_node_child_by_field_name(node, TS_FIELD("selector"));
     return ts_node_is_null(selector) ? NULL : cbm_node_text(a, selector, source);
+}
+
+/* tree-sitter-elixir gives a call's arguments node no field name, so it is
+ * found positionally. Mirrors elixir_call_args() in extract_defs.c, which the
+ * definition side has always used for the same reason. */
+static TSNode elixir_call_arguments_fallback(TSNode node) {
+    TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
+    if (ts_node_is_null(args) && ts_node_child_count(node) > 1) {
+        args = ts_node_child(node, 1);
+    }
+    return args;
 }
 
 // Erlang: extract callee from call node's first child.
@@ -1565,6 +1577,18 @@ static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args) {
         if (strcmp(ts_node_type(arg), "argument") == 0 && ts_node_named_child_count(arg) > 0) {
             arg = ts_node_named_child(arg, 0);
         }
+        /* Swift wraps each argument in a value_argument that may lead with its
+         * label, so `data(from: url)` would otherwise yield the label `from`
+         * rather than the value. Step past a leading value_argument_label. */
+        if (strcmp(ts_node_type(arg), "value_argument") == 0 &&
+            ts_node_named_child_count(arg) > 0) {
+            TSNode val = ts_node_named_child(arg, 0);
+            if (strcmp(ts_node_type(val), "value_argument_label") == 0 &&
+                ts_node_named_child_count(arg) > 1) {
+                val = ts_node_named_child(arg, 1);
+            }
+            arg = val;
+        }
         const char *ak = ts_node_type(arg);
 
         if (strcmp(ak, "keyword_argument") == 0 || strcmp(ak, "pair") == 0) {
@@ -1871,6 +1895,110 @@ static void extract_kotlin_desugared_calls(CBMExtractCtx *ctx, TSNode node, cons
     }
 }
 
+/* True when a Python attribute-call receiver is EXEMPT from the weak-member
+ * guard (#1276). Three exemptions, each because the receiver is in fact known:
+ *   - `self.x()` / `cls.x()`  — a direct self/cls receiver keeps class-local
+ *     semantics; the enclosing class is the right namespace for a weak match.
+ *   - `super().x()`           — same, via the base class.
+ *   - `helper.compute()`      — an identifier bound by one of THIS file's
+ *     imports, including the root of an attribute chain (`pkg.sub.fn()`).
+ *     module.function() is Python's canonical cross-file call shape and the
+ *     import map resolves it; flagging it would kill the true edge.
+ * Everything else — a parameter, a local, an attribute of self — has no
+ * statically-known type here, so the call must not bind by short name alone.
+ * Note `self.client.send()` is NOT exempt: the receiver is `self.client`, an
+ * attribute of unknown type, not `self` itself. */
+static bool python_receiver_is_exempt(CBMExtractCtx *ctx, TSNode receiver) {
+    if (ts_node_is_null(receiver)) {
+        return false;
+    }
+
+    /* super().m() — the receiver is a call node whose function is `super`. */
+    if (strcmp(ts_node_type(receiver), "call") == 0) {
+        TSNode fn = ts_node_child_by_field_name(receiver, TS_FIELD("function"));
+        if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "identifier") == 0) {
+            char *name = cbm_node_text(ctx->arena, fn, ctx->source);
+            return name && strcmp(name, "super") == 0;
+        }
+        return false;
+    }
+
+    /* Walk an attribute chain down to its root identifier: for `pkg.sub.fn()`
+     * the receiver is `pkg.sub`, whose root is `pkg` — the name an import binds. */
+    bool direct_identifier = strcmp(ts_node_type(receiver), "identifier") == 0;
+    TSNode root = receiver;
+    while (!ts_node_is_null(root) && strcmp(ts_node_type(root), "attribute") == 0) {
+        root = ts_node_child_by_field_name(root, TS_FIELD("object"));
+    }
+    if (ts_node_is_null(root) || strcmp(ts_node_type(root), "identifier") != 0) {
+        return false;
+    }
+
+    char *name = cbm_node_text(ctx->arena, root, ctx->source);
+    if (!name) {
+        return false;
+    }
+    /* self/cls only as a DIRECT receiver: `self.m()` is class-local, but
+     * `self.client.m()` has receiver `self.client` of unknown type. */
+    if (direct_identifier && (strcmp(name, "self") == 0 || strcmp(name, "cls") == 0)) {
+        return true;
+    }
+    /* Import-bound root, incl. aliases (`import tools as toolkit` binds
+     * local_name "toolkit"). Per-file scan: imports.count is a file-local
+     * number (tens), never the corpus, so this stays O(file), not O(corpus). */
+    for (int i = 0; i < ctx->result->imports.count; i++) {
+        const char *local_name = ctx->result->imports.items[i].local_name;
+        if (local_name && strcmp(local_name, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* True when the callee of a BARE Python call `foo()` is bound as a parameter of
+ * an enclosing function or lambda -- the bare-call counterpart of
+ * python_receiver_is_exempt above.
+ *
+ * A parameter binding shadows any module-level `foo` for the whole body, so
+ * resolving such a call to a project Function/Method by short name alone
+ * fabricates the edge BY CONSTRUCTION: `def _run_with_heavy_slot(run): run()`
+ * must not bind an unrelated `SatoriLive.run`. Unlike a receiver type this is
+ * decidable from the AST outright, with no flow analysis and no list of
+ * "generic-looking" callee names -- Python forbids `global` on a parameter, and
+ * a parameter is in scope for the entire body regardless of position.
+ *
+ * The answer is CARRIED BY THE WALK rather than recomputed here. The unified
+ * walk binds a def's or lambda's parameters when it opens that scope and
+ * unwinds them when it closes it, so this is an O(1) map lookup. Deciding it
+ * by ascending the tree instead -- with ts_node_parent() or with a copied walk
+ * cursor -- costs O(depth) per call, and since every level of f(f(f(...))) is
+ * itself a bare call, that is quadratic across the file: the 30,000-deep
+ * fixture in tests/test_stack_overflow.c turned it into a hang rather than a
+ * slowdown. An O(1) lookup needs no hop cap, so unlike a capped walk this can
+ * no longer fail open on deep-but-ordinary code.
+ *
+ * It still answers false if the walk's own tracking hit an allocation failure,
+ * which costs a suppression and never a true edge. */
+static bool python_callee_is_bound_parameter(CBMExtractCtx *ctx, WalkState *state,
+                                             TSNode callee_ident) {
+    const char *callee_name = cbm_node_text(ctx->arena, callee_ident, ctx->source);
+    return cbm_walk_python_param_is_bound(state, callee_name);
+}
+
+
+/* Swift models a call as a target expression plus a call_suffix, and its grammar
+ * declares no "arguments" field at all, so the generic field lookup finds
+ * nothing for every Swift call. Reach the argument list through the suffix
+ * instead. A trailing closure has a call_suffix with no value_arguments, which
+ * returns a null node and leaves the call without a string argument, as before. */
+static TSNode swift_call_args(TSNode node) {
+    TSNode suffix = cbm_find_child_by_kind(node, "call_suffix");
+    if (ts_node_is_null(suffix)) {
+        return (TSNode){0};
+    }
+    return cbm_find_child_by_kind(suffix, "value_arguments");
+}
+
 void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state) {
     if (!spec->call_node_types || !spec->call_node_types[0]) {
         return;
@@ -1901,6 +2029,27 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
                 strcmp(ts_node_type(node), "method_call_expression") == 0) {
                 call.is_method = true;
             }
+            // Python receiver-aware guard (#1276; same intent as the Perl and
+            // TS/JS flags). Flag an attribute call x.foo() whose receiver is not
+            // self/cls/super() and is not rooted in an imported name, so the
+            // call-resolution pass can suppress weak short-name matches for it
+            // (`accelerator.print()` must not bind MockAccelerator.print).
+            // Imported receivers stay unflagged: module.function() is Python's
+            // canonical cross-file call and the import map resolves it.
+            // A BARE Python call foo() whose callee is bound as a parameter of an
+            // enclosing scope cannot be the module-level foo, so short-name
+            // resolution would fabricate the edge (`def f(run): run()` must not
+            // bind SatoriLive.run). Distinct from is_method: there is no receiver
+            // here, so the weak-member guard cannot see this class at all.
+            if (ctx->language == CBM_LANG_PYTHON && strcmp(ts_node_type(node), "call") == 0) {
+                TSNode fn = ts_node_child_by_field_name(node, TS_FIELD("function"));
+                if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "attribute") == 0) {
+                    TSNode obj = ts_node_child_by_field_name(fn, TS_FIELD("object"));
+                    call.is_method = !python_receiver_is_exempt(ctx, obj);
+                } else if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "identifier") == 0) {
+                    call.callee_is_locally_bound = python_callee_is_bound_parameter(ctx, state, fn);
+                }
+            }
             // TS/JS/TSX receiver-aware guard (#592/#606 direction; same intent
             // as the Perl flag above). Flag a member call x.foo() whose receiver
             // is NOT `this`/`super`. When the TS-LSP cannot resolve the receiver
@@ -1926,6 +2075,25 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             }
 
             TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
+            // Swift has no "arguments" field; its args hang off call_suffix.
+            if (ts_node_is_null(args) && ctx->language == CBM_LANG_SWIFT) {
+                args = swift_call_args(node);
+            }
+            /* tree-sitter-elixir attaches NO field name to a call's arguments
+             * node — its whole field set is key, left, operand, operator,
+             * quoted_start, quoted_end, right, target, value — so the lookup
+             * above is always null for Elixir and first_string_arg was never
+             * populated for ANY Elixir call. That silently disabled every
+             * downstream signal keyed off a call's string argument: Phoenix
+             * route paths, HTTP/async service URLs, and config keys.
+             * cbm_elixir_call_args is the shared second-child fallback the
+             * definition side already uses. Restricted to `call` nodes —
+             * Elixir's other call kinds (`dot`, the `|>` binary_operator) have
+             * no arguments node in that position. */
+            if (ts_node_is_null(args) && ctx->language == CBM_LANG_ELIXIR &&
+                strcmp(ts_node_type(node), "call") == 0) {
+                args = elixir_call_arguments_fallback(node);
+            }
             if (!ts_node_is_null(args)) {
                 call.first_string_arg = extract_url_or_topic_arg(ctx, args);
                 if (call.first_string_arg && call.first_string_arg[0] == '/') {
