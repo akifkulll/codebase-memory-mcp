@@ -188,6 +188,31 @@ int cbm_zova_repository_visit_edges(cbm_zova_repository_t *repo, const char *wor
 int cbm_zova_repository_find_edges_by_type(cbm_zova_repository_t *repo, const char *workspace_id,
                                            const char *edge_type, cbm_edge_t **out,
                                            int *out_count);
+/* Identity rows for graph comparison. Strings are owned by the arrays. */
+typedef struct {
+    int64_t node_key;
+    char *qualified_name;
+    char *label;
+    char *file_path;
+} cbm_zova_identity_node_t;
+
+typedef struct {
+    int64_t source_key;
+    int64_t target_key;
+    char *type;
+    char *local_name; /* IMPORTS local name, "" for other edge types */
+} cbm_zova_identity_edge_t;
+
+/* Every node (ordered by node key) and every cbm edge record of the opened
+ * generation. Fails with CBM_STORE_SCAN_LIMIT, returning nothing, when more
+ * than max_nodes nodes or max_edges edges exist. Free both arrays with
+ * cbm_zova_identities_free. */
+int cbm_zova_repository_graph_identities(cbm_zova_repository_t *repo, const char *workspace_id,
+                                         uint64_t max_nodes, uint64_t max_edges,
+                                         cbm_zova_identity_node_t **out_nodes, int *node_count,
+                                         cbm_zova_identity_edge_t **out_edges, int *edge_count);
+void cbm_zova_identities_free(cbm_zova_identity_node_t *nodes, int node_count,
+                              cbm_zova_identity_edge_t *edges, int edge_count);
 int cbm_zova_repository_search(cbm_zova_repository_t *repo, const char *workspace_id,
                                const cbm_search_params_t *params, cbm_search_output_t *out);
 int cbm_zova_repository_search_fts(cbm_zova_repository_t *repo, const char *workspace_id,

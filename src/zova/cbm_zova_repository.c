@@ -2128,6 +2128,130 @@ int cbm_zova_repository_find_edges_by_type(cbm_zova_repository_t *repo, const ch
     return CBM_STORE_OK;
 }
 
+typedef struct {
+    cbm_zova_identity_edge_t *items;
+    int count;
+    int capacity;
+    uint64_t max_edges;
+    bool over_limit;
+} repo_identity_edges_t;
+
+static int repo_collect_identity_edge(const zova_graph_scan_edge *native,
+                                      const cbm_zova_edge_payload_record_t *record,
+                                      void *context_ptr) {
+    repo_identity_edges_t *edges = context_ptr;
+    if ((uint64_t)edges->count >= edges->max_edges) {
+        edges->over_limit = true;
+        return -1;
+    }
+    if (edges->count == edges->capacity) {
+        int capacity = edges->capacity ? edges->capacity * 2 : 64;
+        cbm_zova_identity_edge_t *grown =
+            realloc(edges->items, (size_t)capacity * sizeof(*grown));
+        if (!grown) return -1;
+        edges->items = grown;
+        edges->capacity = capacity;
+    }
+    cbm_zova_identity_edge_t *edge = &edges->items[edges->count];
+    edge->source_key = native->source_node_key;
+    edge->target_key = native->target_node_key;
+    edge->type = repo_dup((const uint8_t *)native->edge_type, native->edge_type_len);
+    edge->local_name = repo_dup(record->local_name.data, record->local_name.len);
+    if (!edge->type || !edge->local_name) {
+        free(edge->type);
+        free(edge->local_name);
+        return -1;
+    }
+    edges->count++;
+    return 0;
+}
+
+int cbm_zova_repository_graph_identities(cbm_zova_repository_t *repo, const char *workspace_id,
+                                         uint64_t max_nodes, uint64_t max_edges,
+                                         cbm_zova_identity_node_t **out_nodes, int *node_count,
+                                         cbm_zova_identity_edge_t **out_edges, int *edge_count) {
+    if (repo_workspace_required(repo, workspace_id) != CBM_STORE_OK || !out_nodes ||
+        !node_count || !out_edges || !edge_count) return CBM_STORE_ERR;
+    *out_nodes = NULL;
+    *node_count = 0;
+    *out_edges = NULL;
+    *edge_count = 0;
+    cbm_zova_identity_node_t *nodes = NULL;
+    int count = 0;
+    int capacity = 0;
+    int rc = CBM_STORE_OK;
+    zova_statement *stmt = NULL;
+    if (repo_prepare(repo,
+                     "SELECT n.zova_node_key,n.qualified_name,n.label,f.file_path "
+                     "FROM cbm_nodes_v1 n JOIN cbm_files_v1 f ON f.file_key=n.file_key "
+                     "WHERE n.workspace_key=?1 ORDER BY n.zova_node_key",
+                     &stmt) != 0 ||
+        repo_bind_i64(stmt, 1, repo->workspace_key) != 0) {
+        rc = CBM_STORE_ERR;
+    }
+    while (rc == CBM_STORE_OK) {
+        zova_step_result step = ZOVA_STEP_DONE;
+        if (repo_step(stmt, &step) != 0) {
+            rc = CBM_STORE_ERR;
+            break;
+        }
+        if (step != ZOVA_STEP_ROW) break;
+        if ((uint64_t)count >= max_nodes) {
+            rc = CBM_STORE_SCAN_LIMIT;
+            break;
+        }
+        if (count == capacity) {
+            int grown_capacity = capacity ? capacity * 2 : 256;
+            cbm_zova_identity_node_t *grown =
+                realloc(nodes, (size_t)grown_capacity * sizeof(*grown));
+            if (!grown) {
+                rc = CBM_STORE_ERR;
+                break;
+            }
+            nodes = grown;
+            capacity = grown_capacity;
+        }
+        cbm_zova_identity_node_t *node = &nodes[count];
+        node->node_key = repo_column_i64(stmt, 0);
+        node->qualified_name = repo_column_text(stmt, 1);
+        node->label = repo_column_text(stmt, 2);
+        node->file_path = repo_column_text(stmt, 3);
+        count++;
+        if (!node->qualified_name || !node->label || !node->file_path) rc = CBM_STORE_ERR;
+    }
+    if (stmt) (void)zova_statement_finalize(stmt);
+    repo_identity_edges_t edges = {.max_edges = max_edges};
+    if (rc == CBM_STORE_OK) {
+        rc = repo_scan_edges(repo, NULL, repo_collect_identity_edge, &edges);
+        if (edges.over_limit) rc = CBM_STORE_SCAN_LIMIT;
+        else if (rc != CBM_STORE_OK) rc = CBM_STORE_ERR;
+    }
+    if (rc != CBM_STORE_OK) {
+        cbm_zova_identities_free(nodes, count, edges.items, edges.count);
+        return rc;
+    }
+    *out_nodes = nodes;
+    *node_count = count;
+    *out_edges = edges.items;
+    *edge_count = edges.count;
+    return CBM_STORE_OK;
+}
+
+void cbm_zova_identities_free(cbm_zova_identity_node_t *nodes, int node_count,
+                              cbm_zova_identity_edge_t *edges, int edge_count) {
+    for (int i = 0; nodes && i < node_count; i++) {
+        free(nodes[i].qualified_name);
+        free(nodes[i].label);
+        free(nodes[i].file_path);
+    }
+    free(nodes);
+    for (int i = 0; edges && i < edge_count; i++) {
+        free(edges[i].type);
+        free(edges[i].local_name);
+    }
+    free(edges);
+}
+
 int cbm_zova_repository_search_fts(cbm_zova_repository_t *repo, const char *workspace_id,
                                    const char *query,
                                    const char *file_pattern, int limit, int offset,
@@ -3406,6 +3530,8 @@ int cbm_zova_repository_search(cbm_zova_repository_t*r,const char*w,const cbm_se
 int cbm_zova_repository_search_fts(cbm_zova_repository_t*r,const char*w,const char*q,const char*f,int l,int x,cbm_search_output_t*o){(void)r;(void)w;(void)q;(void)f;(void)l;(void)x;(void)o;return CBM_STORE_ERR;}
 int cbm_zova_repository_index_status(cbm_zova_repository_t*r,const char*w,int64_t*g,char**i){(void)r;(void)w;(void)g;(void)i;return CBM_STORE_ERR;}
 int cbm_zova_repository_counts(cbm_zova_repository_t*r,const char*w,int*n,int*e){(void)r;(void)w;(void)n;(void)e;return CBM_STORE_ERR;}
+int cbm_zova_repository_graph_identities(cbm_zova_repository_t*r,const char*w,uint64_t mn,uint64_t me,cbm_zova_identity_node_t**n,int*nc,cbm_zova_identity_edge_t**e,int*ec){(void)r;(void)w;(void)mn;(void)me;if(n)*n=NULL;if(nc)*nc=0;if(e)*e=NULL;if(ec)*ec=0;return CBM_STORE_ERR;}
+void cbm_zova_identities_free(cbm_zova_identity_node_t*n,int nc,cbm_zova_identity_edge_t*e,int ec){(void)nc;(void)ec;free(n);free(e);}
 int cbm_zova_repository_file_coverage(cbm_zova_repository_t*r,const char*w,const char*p,cbm_zova_file_coverage_t**o,int*c,char**rp,int64_t*g,bool*rec){(void)r;(void)w;(void)p;(void)g;if(rec)*rec=false;if(o)*o=NULL;if(c)*c=0;if(rp)*rp=NULL;return CBM_STORE_ERR;}
 void cbm_zova_file_coverage_free(cbm_zova_file_coverage_t*r,int c){(void)r;(void)c;}
 int cbm_zova_repository_project_summary(cbm_zova_repository_t*r,const char*w,cbm_project_summary_export_t*o){(void)r;(void)w;(void)o;return CBM_STORE_ERR;}

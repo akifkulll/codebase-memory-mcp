@@ -298,6 +298,7 @@ TEST(mcp_tools_list) {
     ASSERT_NOT_NULL(strstr(json, "trace_path"));
     ASSERT_NOT_NULL(strstr(json, "get_code_snippet"));
     ASSERT_NOT_NULL(strstr(json, "get_file_outline"));
+    ASSERT_NOT_NULL(strstr(json, "compare_graphs"));
     ASSERT_NOT_NULL(strstr(json, "get_graph_schema"));
     ASSERT_NOT_NULL(strstr(json, "get_architecture"));
     ASSERT_NOT_NULL(strstr(json, "search_code"));
@@ -916,6 +917,284 @@ TEST(tool_get_file_outline_validates_arguments) {
 
     cbm_mcp_server_free(srv);
     PASS();
+}
+
+/* Seed one compare_graphs side: a module, an unchanged function `keep` and the
+ * given extra functions, with keep CALLS the first extra. Every qualified name
+ * carries the project prefix, which the comparison must ignore. */
+static int cmp_seed_project(cbm_store_t *store, const char *project, const char *root,
+                            const char *const *extras, int extra_count) {
+    if (cbm_store_upsert_project(store, project, root) != CBM_STORE_OK) {
+        return -1;
+    }
+    char qn[128];
+    snprintf(qn, sizeof(qn), "%s.pkg", project);
+    cbm_node_t module = {.project = project, .label = "Module", .name = "pkg",
+                         .qualified_name = qn, .file_path = "pkg.py", .start_line = 1,
+                         .end_line = 20};
+    int64_t module_id = cbm_store_upsert_node(store, &module);
+    snprintf(qn, sizeof(qn), "%s.pkg.keep", project);
+    cbm_node_t keep = {.project = project, .label = "Function", .name = "keep",
+                       .qualified_name = qn, .file_path = "pkg.py", .start_line = 2,
+                       .end_line = 3};
+    int64_t keep_id = cbm_store_upsert_node(store, &keep);
+    if (module_id <= 0 || keep_id <= 0) {
+        return -1;
+    }
+    cbm_edge_t defines = {.project = project, .source_id = module_id, .target_id = keep_id,
+                          .type = "DEFINES"};
+    if (cbm_store_insert_edge(store, &defines) <= 0) {
+        return -1;
+    }
+    for (int i = 0; i < extra_count; i++) {
+        snprintf(qn, sizeof(qn), "%s.pkg.%s", project, extras[i]);
+        cbm_node_t extra = {.project = project, .label = "Function", .name = extras[i],
+                            .qualified_name = qn, .file_path = "pkg.py", .start_line = 5 + i,
+                            .end_line = 5 + i};
+        int64_t extra_id = cbm_store_upsert_node(store, &extra);
+        if (extra_id <= 0) {
+            return -1;
+        }
+        if (i == 0) {
+            cbm_edge_t calls = {.project = project, .source_id = keep_id,
+                                .target_id = extra_id, .type = "CALLS"};
+            if (cbm_store_insert_edge(store, &calls) <= 0) {
+                return -1;
+            }
+        }
+    }
+    return th_publish_store_project(store, project);
+}
+
+static yyjson_val *cmp_path(yyjson_val *root, const char *a, const char *b) {
+    return yyjson_obj_get(yyjson_obj_get(root, a), b);
+}
+
+TEST(tool_compare_graphs_reports_bounded_project_independent_diff) {
+    th_remove_zova_user_database();
+    cbm_mcp_server_t *srv = setup_mcp_with_data();
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    static const char *const base_extras[] = {"gone"};
+    static const char *const target_extras[] = {"fresh", "fresh2"};
+    ASSERT_EQ(cmp_seed_project(store, "cmp-base", "/tmp/cmp-base", base_extras, 1), 0);
+    ASSERT_EQ(cmp_seed_project(store, "cmp-target", "/tmp/cmp-target", target_extras, 2), 0);
+
+    char *response = cbm_mcp_handle_tool(
+        srv, "compare_graphs", "{\"base_project\":\"cmp-base\",\"target_project\":\"cmp-target\"}");
+    ASSERT_NOT_NULL(response);
+    ASSERT_NULL(strstr(response, "\"isError\":true"));
+    char *inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    yyjson_doc *doc = yyjson_read(inner, strlen(inner), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    ASSERT_EQ(yyjson_get_int(cmp_path(root, "base", "node_count")), 3);
+    ASSERT_EQ(yyjson_get_int(cmp_path(root, "target", "node_count")), 4);
+
+    /* The unchanged module, keep and DEFINES edge are not reported although
+     * every qualified name differs by its project prefix. */
+    yyjson_val *added =
+        yyjson_obj_get(yyjson_obj_get(yyjson_obj_get(root, "nodes"), "added"), "items");
+    ASSERT_EQ(yyjson_arr_size(added), 2U);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(yyjson_arr_get(added, 0), "qualified_name")),
+                  "cmp-target.pkg.fresh");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(yyjson_arr_get(added, 1), "qualified_name")),
+                  "cmp-target.pkg.fresh2");
+    yyjson_val *removed =
+        yyjson_obj_get(yyjson_obj_get(yyjson_obj_get(root, "nodes"), "removed"), "items");
+    ASSERT_EQ(yyjson_arr_size(removed), 1U);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(yyjson_arr_get(removed, 0), "qualified_name")),
+                  "cmp-base.pkg.gone");
+
+    yyjson_val *edges_added = yyjson_obj_get(yyjson_obj_get(root, "edges"), "added");
+    ASSERT_EQ(yyjson_get_uint(yyjson_obj_get(edges_added, "total")), 1U);
+    yyjson_val *edge = yyjson_arr_get(yyjson_obj_get(edges_added, "items"), 0);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(edge, "type")), "CALLS");
+    ASSERT_STR_EQ(yyjson_get_str(cmp_path(edge, "source", "qualified_name")),
+                  "cmp-target.pkg.keep");
+    ASSERT_STR_EQ(yyjson_get_str(cmp_path(edge, "target", "qualified_name")),
+                  "cmp-target.pkg.fresh");
+    yyjson_val *edges_removed = yyjson_obj_get(yyjson_obj_get(root, "edges"), "removed");
+    ASSERT_EQ(yyjson_get_uint(yyjson_obj_get(edges_removed, "total")), 1U);
+    ASSERT_STR_EQ(yyjson_get_str(cmp_path(yyjson_arr_get(yyjson_obj_get(edges_removed, "items"), 0),
+                                          "target", "qualified_name")),
+                  "cmp-base.pkg.gone");
+    yyjson_doc_free(doc);
+    free(inner);
+    free(response);
+
+    /* limit caps each set but the exact total and the reason stay visible. */
+    response = cbm_mcp_handle_tool(srv, "compare_graphs",
+                                   "{\"base_project\":\"cmp-base\",\"target_project\":"
+                                   "\"cmp-target\",\"limit\":1}");
+    ASSERT_NOT_NULL(response);
+    inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    doc = yyjson_read(inner, strlen(inner), 0);
+    ASSERT_NOT_NULL(doc);
+    root = yyjson_doc_get_root(doc);
+    yyjson_val *set = yyjson_obj_get(yyjson_obj_get(root, "nodes"), "added");
+    ASSERT_EQ(yyjson_get_uint(yyjson_obj_get(set, "returned")), 1U);
+    ASSERT_EQ(yyjson_get_uint(yyjson_obj_get(set, "total")), 2U);
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(set, "truncated")));
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_arr_get(yyjson_obj_get(set, "truncation_reasons"), 0)),
+                  "limit");
+    set = yyjson_obj_get(yyjson_obj_get(root, "nodes"), "removed");
+    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(set, "truncated")));
+    yyjson_doc_free(doc);
+    free(inner);
+    free(response);
+
+    /* The combined row bound fails closed instead of returning a partial diff. */
+    response = cbm_mcp_handle_tool(srv, "compare_graphs",
+                                   "{\"base_project\":\"cmp-base\",\"target_project\":"
+                                   "\"cmp-target\",\"scan_limit\":5}");
+    ASSERT_NOT_NULL(response);
+    ASSERT_NOT_NULL(strstr(response, "\"isError\":true"));
+    ASSERT_NOT_NULL(strstr(response, "scan_limit_exceeded"));
+    free(response);
+
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_compare_graphs_validates_arguments) {
+    th_remove_zova_user_database();
+    cbm_mcp_server_t *srv = setup_mcp_with_data();
+    static const char *const bad_args[][2] = {
+        {"{\"base_project\":\"a\"}", "invalid_arguments"},
+        {"{\"base_project\":\"a\",\"target_project\":\"a\"}", "must be distinct"},
+        {"{\"base_project\":\"a\",\"target_project\":\"b\",\"extra\":1}", "unknown argument"},
+        {"{\"base_project\":\"a\",\"target_project\":\"b\",\"limit\":0}",
+         "limit must be between 1 and 1000"},
+        {"{\"base_project\":\"a\",\"target_project\":\"b\",\"limit\":1001}",
+         "limit must be between 1 and 1000"},
+        {"{\"base_project\":\"a\",\"target_project\":\"b\",\"limit\":\"5\"}",
+         "limit values must be integers"},
+        {"{\"base_project\":\"a\",\"target_project\":\"b\",\"scan_limit\":0}",
+         "scan_limit must be between 1 and 10000000"},
+        {"{\"base_project\":\"a\",\"target_project\":\"b\"}", "project_not_indexed"},
+    };
+    for (size_t i = 0; i < sizeof(bad_args) / sizeof(bad_args[0]); i++) {
+        char *response = cbm_mcp_handle_tool(srv, "compare_graphs", bad_args[i][0]);
+        ASSERT_NOT_NULL(response);
+        ASSERT_NOT_NULL(strstr(response, bad_args[i][1]));
+        ASSERT_NOT_NULL(strstr(response, "\"isError\":true"));
+        free(response);
+    }
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Every reported edge must touch the one function that differs, so unchanged
+ * native edges (including IMPORTS with a local_name) match across projects. */
+static bool cmp_edges_touch(yyjson_val *set, const char *suffix) {
+    yyjson_val *items = yyjson_obj_get(set, "items");
+    size_t idx, max;
+    yyjson_val *edge;
+    yyjson_arr_foreach(items, idx, max, edge) {
+        const char *s = yyjson_get_str(cmp_path(edge, "source", "qualified_name"));
+        const char *t = yyjson_get_str(cmp_path(edge, "target", "qualified_name"));
+        size_t n = strlen(suffix);
+        bool hit = (s && strlen(s) >= n && strcmp(s + strlen(s) - n, suffix) == 0) ||
+                   (t && strlen(t) >= n && strcmp(t + strlen(t) - n, suffix) == 0);
+        if (!hit) {
+            return false;
+        }
+    }
+    return yyjson_arr_size(items) > 0;
+}
+
+TEST(tool_compare_graphs_diffs_two_indexed_repositories) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    th_remove_zova_user_database();
+    char roots[2][512];
+    char sources[2][640];
+    char cache[512];
+    static const char *const bodies[2] = {
+        "import os\n\ndef keep():\n    return os.getcwd()\n\ndef gone():\n    return keep()\n",
+        "import os\n\ndef keep():\n    return os.getcwd()\n\ndef fresh():\n    return keep()\n",
+    };
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-cmp-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    for (int i = 0; i < 2; i++) {
+        snprintf(roots[i], sizeof(roots[i]), "%s/cbm-mcp-cmp-repo-XXXXXX", cbm_tmpdir());
+        ASSERT_NOT_NULL(cbm_mkdtemp(roots[i]));
+        snprintf(sources[i], sizeof(sources[i]), "%s/app.py", roots[i]);
+        FILE *source = fopen(sources[i], "wb");
+        ASSERT_NOT_NULL(source);
+        fputs(bodies[i], source);
+        ASSERT_EQ(fclose(source), 0);
+    }
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+    bool indexed = true;
+    static const char *const names[2] = {"cmp-e2e-base", "cmp-e2e-target"};
+    for (int i = 0; i < 2; i++) {
+        char args[1024];
+        snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"fast\",\"name\":\"%s\"}",
+                 roots[i], names[i]);
+        char *indexed_response = cbm_mcp_handle_tool(srv, "index_repository", args);
+        indexed = indexed && indexed_response &&
+                  response_contains_json_fragment(indexed_response, "\"status\":\"indexed\"");
+        free(indexed_response);
+    }
+    char *response = cbm_mcp_handle_tool(
+        srv, "compare_graphs",
+        "{\"base_project\":\"cmp-e2e-base\",\"target_project\":\"cmp-e2e-target\"}");
+    char *inner = response ? extract_text_content(response) : NULL;
+    yyjson_doc *doc = inner ? yyjson_read(inner, strlen(inner), 0) : NULL;
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *nodes_added = cmp_path(root, "nodes", "added");
+    yyjson_val *nodes_removed = cmp_path(root, "nodes", "removed");
+    const char *added_qn = yyjson_get_str(yyjson_obj_get(
+        yyjson_arr_get(yyjson_obj_get(nodes_added, "items"), 0), "qualified_name"));
+    const char *removed_qn = yyjson_get_str(yyjson_obj_get(
+        yyjson_arr_get(yyjson_obj_get(nodes_removed, "items"), 0), "qualified_name"));
+    bool nodes_ok = yyjson_get_uint(yyjson_obj_get(nodes_added, "total")) == 1 &&
+                    yyjson_get_uint(yyjson_obj_get(nodes_removed, "total")) == 1 &&
+                    added_qn && strncmp(added_qn, "cmp-e2e-target.", 15) == 0 &&
+                    strstr(added_qn, ".fresh") && removed_qn &&
+                    strncmp(removed_qn, "cmp-e2e-base.", 13) == 0 && strstr(removed_qn, ".gone");
+    bool edges_ok = cmp_edges_touch(cmp_path(root, "edges", "added"), ".fresh") &&
+                    cmp_edges_touch(cmp_path(root, "edges", "removed"), ".gone");
+    if (!nodes_ok || !edges_ok) {
+        printf("  compare_graphs: %s\n", inner ? inner : "(null)");
+    }
+    yyjson_doc_free(doc);
+    free(inner);
+    free(response);
+
+    cbm_mcp_server_free(srv);
+    char user_db[640];
+    ASSERT_EQ(cbm_zova_user_database_path(user_db, sizeof(user_db)), 0);
+    if (saved_cache_copy) cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+    else cbm_unsetenv("CBM_CACHE_DIR");
+    free(saved_cache_copy);
+    static const char *const db_suffixes[] = {"", "-wal", "-shm", ".writer.lock"};
+    for (size_t i = 0; i < sizeof(db_suffixes) / sizeof(db_suffixes[0]); i++) {
+        char path[672];
+        snprintf(path, sizeof(path), "%s%s", user_db, db_suffixes[i]);
+        cbm_unlink(path);
+    }
+    for (int i = 0; i < 2; i++) {
+        cbm_unlink(sources[i]);
+        cbm_rmdir(roots[i]);
+    }
+    cbm_rmdir(cache);
+
+    ASSERT_TRUE(indexed);
+    ASSERT_TRUE(nodes_ok);
+    ASSERT_TRUE(edges_ok);
+    PASS();
+#endif
 }
 
 TEST(tool_search_graph_semantic_only_skips_structural_results_issue1295) {
@@ -6043,6 +6322,9 @@ SUITE(mcp) {
     RUN_TEST(tool_unknown_tool);
     RUN_TEST(tool_get_file_outline_returns_bounded_filtered_rows);
     RUN_TEST(tool_get_file_outline_validates_arguments);
+    RUN_TEST(tool_compare_graphs_reports_bounded_project_independent_diff);
+    RUN_TEST(tool_compare_graphs_validates_arguments);
+    RUN_TEST(tool_compare_graphs_diffs_two_indexed_repositories);
     RUN_TEST(tool_search_graph_basic);
     RUN_TEST(tool_search_graph_semantic_only_skips_structural_results_issue1295);
     RUN_TEST(tool_search_graph_empty_structural_search_keeps_envelope);

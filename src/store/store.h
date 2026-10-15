@@ -333,6 +333,60 @@ int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *
                                cbm_file_outline_row_t **out, int *count, int *total);
 void cbm_store_free_file_outline(cbm_file_outline_row_t *rows, int count);
 
+/* ── Graph comparison ──────────────────────────────────────────── */
+
+/* A graph identity excludes the project: nodes compare by qualified name
+ * with the leading "<project>." removed, then label, then file path ('\\'
+ * read as '/'); edges by source, target, type and IMPORTS local name. The
+ * reported qualified_name is the stored one of the side the row came from.
+ * Strings are borrowed for the duration of the callback. */
+typedef struct {
+    const char *qualified_name;
+    const char *label;
+    const char *file_path;
+} cbm_graph_node_identity_t;
+
+typedef struct {
+    cbm_graph_node_identity_t source;
+    cbm_graph_node_identity_t target;
+    const char *type;
+    const char *local_name; /* IMPORTS local name, "" otherwise */
+} cbm_graph_edge_identity_t;
+
+/* Return false to fail the comparison (allocation failure). */
+typedef bool (*cbm_graph_compare_node_fn)(void *context, bool added,
+                                          const cbm_graph_node_identity_t *node);
+typedef bool (*cbm_graph_compare_edge_fn)(void *context, bool added,
+                                          const cbm_graph_edge_identity_t *edge);
+
+typedef struct {
+    int64_t generation;
+    char indexed_at[64];
+    int64_t node_count;
+    int64_t edge_count;
+} cbm_graph_compare_project_t;
+
+typedef struct {
+    cbm_graph_compare_project_t base;
+    cbm_graph_compare_project_t target;
+    uint64_t nodes_added_total;
+    uint64_t nodes_removed_total;
+    uint64_t edges_added_total;
+    uint64_t edges_removed_total;
+} cbm_graph_compare_result_t;
+
+/* Compare two Zova workspace query stores. Rows only in the target are
+ * reported as added and rows only in the base as removed, each in identity
+ * order. scan_limit bounds the combined node rows and, separately, the
+ * combined edge rows of both projects; exceeding either fails with
+ * CBM_STORE_SCAN_LIMIT before any callback runs. Both graphs are held in
+ * memory for the call. */
+int cbm_store_compare_graphs(cbm_store_t *base_store, const char *base_project,
+                             cbm_store_t *target_store, const char *target_project,
+                             uint64_t scan_limit, cbm_graph_compare_node_fn on_node,
+                             cbm_graph_compare_edge_fn on_edge, void *context,
+                             cbm_graph_compare_result_t *out);
+
 /* Batch lookup: map qualified names → node IDs.
  * qns[i] is resolved; out_ids[i] receives the ID or 0 if not found.
  * Returns number of QNs actually found, or CBM_STORE_ERR. */

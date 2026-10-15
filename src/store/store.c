@@ -1713,6 +1713,234 @@ void cbm_store_free_file_outline(cbm_file_outline_row_t *rows, int count) {
     free(rows);
 }
 
+/* ── Graph comparison ──────────────────────────────────────────── */
+
+typedef struct {
+    const char *key_qn; /* qualified_name without the leading "<project>." */
+    const cbm_zova_identity_node_t *row;
+} graph_cmp_node_t;
+
+typedef struct {
+    const graph_cmp_node_t *source;
+    const graph_cmp_node_t *target;
+    const cbm_zova_identity_edge_t *row;
+} graph_cmp_edge_t;
+
+typedef struct {
+    cbm_zova_identity_node_t *rows;
+    int row_count;
+    cbm_zova_identity_edge_t *edge_rows;
+    int edge_row_count;
+    graph_cmp_node_t *nodes; /* identity order */
+    graph_cmp_node_t *by_key; /* node-key order, for edge endpoints */
+    graph_cmp_edge_t *edges;  /* identity order */
+} graph_cmp_side_t;
+
+static const char *graph_cmp_strip_project(const char *qn, const char *project) {
+    size_t n = strlen(project);
+    if (strncmp(qn, project, n) == 0) {
+        if (qn[n] == '.') {
+            return qn + n + 1;
+        }
+        if (qn[n] == '\0') {
+            return qn + n;
+        }
+    }
+    return qn;
+}
+
+static int graph_cmp_node_identity(const graph_cmp_node_t *a, const graph_cmp_node_t *b) {
+    int cmp = strcmp(a->key_qn, b->key_qn);
+    if (cmp == 0) {
+        cmp = strcmp(a->row->label, b->row->label);
+    }
+    if (cmp == 0) {
+        cmp = strcmp(a->row->file_path, b->row->file_path);
+    }
+    return cmp;
+}
+
+static int graph_cmp_node_qsort(const void *a, const void *b) {
+    return graph_cmp_node_identity(a, b);
+}
+
+static int graph_cmp_edge_identity(const graph_cmp_edge_t *a, const graph_cmp_edge_t *b) {
+    int cmp = graph_cmp_node_identity(a->source, b->source);
+    if (cmp == 0) {
+        cmp = graph_cmp_node_identity(a->target, b->target);
+    }
+    if (cmp == 0) {
+        cmp = strcmp(a->row->type, b->row->type);
+    }
+    if (cmp == 0) {
+        cmp = strcmp(a->row->local_name, b->row->local_name);
+    }
+    return cmp;
+}
+
+static int graph_cmp_edge_qsort(const void *a, const void *b) {
+    return graph_cmp_edge_identity(a, b);
+}
+
+static int graph_cmp_key_bsearch(const void *key, const void *elem) {
+    int64_t k = *(const int64_t *)key;
+    int64_t e = ((const graph_cmp_node_t *)elem)->row->node_key;
+    return (k > e) - (k < e);
+}
+
+static void graph_cmp_side_free(graph_cmp_side_t *side) {
+    cbm_zova_identities_free(side->rows, side->row_count, side->edge_rows, side->edge_row_count);
+    free(side->nodes);
+    free(side->by_key);
+    free(side->edges);
+    memset(side, 0, sizeof(*side));
+}
+
+/* Load one side and order its nodes and edges by identity. */
+static int graph_cmp_side_load(cbm_store_t *s, const char *project, uint64_t max_nodes,
+                               uint64_t max_edges, graph_cmp_side_t *side,
+                               cbm_graph_compare_project_t *meta) {
+    if (!s || !s->zova_workspace_query || !s->zova_repository || !project) {
+        return CBM_STORE_ERR;
+    }
+    char *indexed_at = NULL;
+    if (cbm_zova_repository_index_status(s->zova_repository, s->zova_graph_workspace_id,
+                                         &meta->generation, &indexed_at) != CBM_STORE_OK) {
+        free(indexed_at);
+        return CBM_STORE_ERR;
+    }
+    snprintf(meta->indexed_at, sizeof(meta->indexed_at), "%s", indexed_at ? indexed_at : "");
+    free(indexed_at);
+    int rc = cbm_zova_repository_graph_identities(
+        s->zova_repository, s->zova_graph_workspace_id, max_nodes, max_edges, &side->rows,
+        &side->row_count, &side->edge_rows, &side->edge_row_count);
+    if (rc != CBM_STORE_OK) {
+        return rc;
+    }
+    meta->node_count = side->row_count;
+    meta->edge_count = side->edge_row_count;
+    size_t nn = (size_t)side->row_count;
+    size_t ne = (size_t)side->edge_row_count;
+    side->nodes = nn ? malloc(nn * sizeof(*side->nodes)) : NULL;
+    side->by_key = nn ? malloc(nn * sizeof(*side->by_key)) : NULL;
+    side->edges = ne ? malloc(ne * sizeof(*side->edges)) : NULL;
+    if ((nn && (!side->nodes || !side->by_key)) || (ne && !side->edges)) {
+        return CBM_STORE_ERR;
+    }
+    for (size_t i = 0; i < nn; i++) {
+        for (char *p = side->rows[i].file_path; *p; p++) {
+            if (*p == '\\') {
+                *p = '/';
+            }
+        }
+        side->by_key[i] = (graph_cmp_node_t){
+            graph_cmp_strip_project(side->rows[i].qualified_name, project), &side->rows[i]};
+    }
+    /* Rows arrive in node-key order, so by_key is already sorted. */
+    memcpy(side->nodes, side->by_key, nn * sizeof(*side->nodes));
+    qsort(side->nodes, nn, sizeof(*side->nodes), graph_cmp_node_qsort);
+    for (size_t i = 0; i < ne; i++) {
+        const cbm_zova_identity_edge_t *row = &side->edge_rows[i];
+        const graph_cmp_node_t *source =
+            bsearch(&row->source_key, side->by_key, nn, sizeof(*side->by_key),
+                    graph_cmp_key_bsearch);
+        const graph_cmp_node_t *target =
+            bsearch(&row->target_key, side->by_key, nn, sizeof(*side->by_key),
+                    graph_cmp_key_bsearch);
+        if (!source || !target) {
+            return CBM_STORE_ERR; /* an edge endpoint outside the generation */
+        }
+        side->edges[i] = (graph_cmp_edge_t){source, target, row};
+    }
+    qsort(side->edges, ne, sizeof(*side->edges), graph_cmp_edge_qsort);
+    return CBM_STORE_OK;
+}
+
+static cbm_graph_node_identity_t graph_cmp_node_out(const graph_cmp_node_t *node) {
+    return (cbm_graph_node_identity_t){node->row->qualified_name, node->row->label,
+                                       node->row->file_path};
+}
+
+static bool graph_cmp_emit_node(cbm_graph_compare_node_fn fn, void *context, bool added,
+                                const graph_cmp_node_t *node, uint64_t *total) {
+    (*total)++;
+    cbm_graph_node_identity_t id = graph_cmp_node_out(node);
+    return !fn || fn(context, added, &id);
+}
+
+static bool graph_cmp_emit_edge(cbm_graph_compare_edge_fn fn, void *context, bool added,
+                                const graph_cmp_edge_t *edge, uint64_t *total) {
+    (*total)++;
+    cbm_graph_edge_identity_t id = {graph_cmp_node_out(edge->source),
+                                    graph_cmp_node_out(edge->target), edge->row->type,
+                                    edge->row->local_name};
+    return !fn || fn(context, added, &id);
+}
+
+int cbm_store_compare_graphs(cbm_store_t *base_store, const char *base_project,
+                             cbm_store_t *target_store, const char *target_project,
+                             uint64_t scan_limit, cbm_graph_compare_node_fn on_node,
+                             cbm_graph_compare_edge_fn on_edge, void *context,
+                             cbm_graph_compare_result_t *out) {
+    if (!out) {
+        return CBM_STORE_ERR;
+    }
+    memset(out, 0, sizeof(*out));
+    graph_cmp_side_t base = {0};
+    graph_cmp_side_t target = {0};
+    int rc = graph_cmp_side_load(base_store, base_project, scan_limit, scan_limit, &base,
+                                 &out->base);
+    if (rc == CBM_STORE_OK) {
+        rc = graph_cmp_side_load(target_store, target_project,
+                                 scan_limit - (uint64_t)base.row_count,
+                                 scan_limit - (uint64_t)base.edge_row_count, &target,
+                                 &out->target);
+    }
+    bool ok = rc == CBM_STORE_OK;
+    int i = 0;
+    int j = 0;
+    while (ok && (i < base.row_count || j < target.row_count)) {
+        int cmp = i >= base.row_count     ? 1
+                  : j >= target.row_count ? -1
+                                          : graph_cmp_node_identity(&base.nodes[i],
+                                                                    &target.nodes[j]);
+        if (cmp < 0) {
+            ok = graph_cmp_emit_node(on_node, context, false, &base.nodes[i++],
+                                     &out->nodes_removed_total);
+        } else if (cmp > 0) {
+            ok = graph_cmp_emit_node(on_node, context, true, &target.nodes[j++],
+                                     &out->nodes_added_total);
+        } else {
+            i++;
+            j++;
+        }
+    }
+    i = 0;
+    j = 0;
+    while (ok && (i < base.edge_row_count || j < target.edge_row_count)) {
+        int cmp = i >= base.edge_row_count     ? 1
+                  : j >= target.edge_row_count ? -1
+                                               : graph_cmp_edge_identity(&base.edges[i],
+                                                                         &target.edges[j]);
+        if (cmp < 0) {
+            ok = graph_cmp_emit_edge(on_edge, context, false, &base.edges[i++],
+                                     &out->edges_removed_total);
+        } else if (cmp > 0) {
+            ok = graph_cmp_emit_edge(on_edge, context, true, &target.edges[j++],
+                                     &out->edges_added_total);
+        } else {
+            i++;
+            j++;
+        }
+    }
+    if (rc == CBM_STORE_OK && !ok) {
+        rc = CBM_STORE_ERR;
+    }
+    graph_cmp_side_free(&base);
+    graph_cmp_side_free(&target);
+    return rc;
+}
+
 /* A Zova workspace store has no legacy nodes and edges tables. The schema,
  * count and architecture queries below read nodes through a temp view over the
  * workspace's rows, whose ids are Zova node keys; edges come from the graph
