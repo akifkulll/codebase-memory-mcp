@@ -4364,7 +4364,9 @@ static int store_zova_edge_property_keys(cbm_store_t *s, cbm_schema_info_t *sche
         int found = context.key_counts ? context.key_counts[t] : 0;
         char **keys = context.keys ? context.keys[t] : NULL;
         if (rc == CBM_STORE_OK) {
-            qsort(keys, (size_t)found, sizeof(*keys), store_name_ptr_compare);
+            if (found > 1) {
+                qsort(keys, (size_t)found, sizeof(*keys), store_name_ptr_compare);
+            }
             int take = found < SCHEMA_MAX_JSON_KEYS ? found : SCHEMA_MAX_JSON_KEYS;
             char **props = malloc((size_t)(base_col_count + take + SKIP_ONE) * sizeof(*props));
             if (props) {
