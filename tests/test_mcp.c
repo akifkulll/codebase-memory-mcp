@@ -5922,13 +5922,17 @@ TEST(index_recovery_parallel_quarantines_crasher) {
 #ifdef _WIN32
     SKIP_PLATFORM("parallel-recovery guard needs fork isolation (POSIX-only)");
 #else
+    const char *tmp_base = getenv("TMPDIR");
+    if (!tmp_base || !tmp_base[0]) {
+        tmp_base = "/tmp";
+    }
     char tmp_dir[CBM_SZ_256];
-    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-idxpar-XXXXXX");
+    snprintf(tmp_dir, sizeof(tmp_dir), "%s/cbm-idxpar-XXXXXX", tmp_base);
     if (!cbm_mkdtemp(tmp_dir)) {
         FAIL("mkdtemp failed");
     }
     char cache[CBM_SZ_256];
-    snprintf(cache, sizeof(cache), "/tmp/cbm-idxpar-cache-XXXXXX");
+    snprintf(cache, sizeof(cache), "%s/cbm-idxpar-cache-XXXXXX", tmp_base);
     if (!cbm_mkdtemp(cache)) {
         FAIL("mkdtemp cache failed");
     }

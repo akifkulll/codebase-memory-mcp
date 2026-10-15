@@ -15,6 +15,7 @@ int tf_skip_count = 0;
 #include "mcp/index_supervisor.h" /* cbm_index_set_worker_role */
 #include "mcp/mcp.h"              /* cbm_mcp_handle_tool — act as a real worker */
 #include "foundation/subprocess.h" /* cbm_resolve_binary_path — deleted-self probe */
+#include "test_helpers.h"          /* th_rmtree — isolated cache cleanup */
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -302,6 +303,40 @@ extern void suite_zova_plugin(void);
  * caches at thread teardown (pass_parallel.c). */
 extern void cbm_kind_in_set_free_cache(void);
 
+/* Isolated HOME and cache for a direct run. scripts/zova-run-tests.sh sets
+ * HOME and CBM_CACHE_DIR to a temp dir, but the raw runner and the
+ * `zig build test*` steps inherit the user's own, and suites that reset the
+ * catalog (th_remove_zova_user_database) or upsert fixture projects would then
+ * act on the live ~/.cache/codebase-memory-mcp. Mirror the script's layout
+ * when CBM_CACHE_DIR is unset. Returns the temp root to remove, else "". */
+static char g_isolated_root[1024];
+
+static const char *tf_isolate_user_cache(void) {
+    if (getenv("CBM_CACHE_DIR")) {
+        return "";
+    }
+    const char *base = getenv("TMPDIR");
+    if (!base || !base[0]) {
+        base = cbm_tmpdir();
+    }
+    snprintf(g_isolated_root, sizeof(g_isolated_root), "%s/cbm-test-env-XXXXXX", base);
+    if (!cbm_mkdtemp(g_isolated_root)) {
+        fprintf(stderr, "test runner: cannot create an isolated cache under %s\n", base);
+        exit(2);
+    }
+    char home[1100];
+    char cache[1200];
+    snprintf(home, sizeof(home), "%s/home", g_isolated_root);
+    snprintf(cache, sizeof(cache), "%s/.cache/codebase-memory-mcp", home);
+    if (!cbm_mkdir_p(cache, 0755)) {
+        fprintf(stderr, "test runner: cannot create %s\n", cache);
+        exit(2);
+    }
+    cbm_setenv("HOME", home, 1);
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    return g_isolated_root;
+}
+
 int main(int argc, char **argv) {
     /* #798 follow-up: if spawned as the socket-isolation probe, report whether an
      * inheritable socket handle crossed into this child and exit before any suite. */
@@ -327,6 +362,7 @@ int main(int argc, char **argv) {
      * binary as `<self> cli --index-worker …` and recursively re-run suites.
      * A test that exercises the supervisor must explicitly re-enable it. */
     cbm_setenv("CBM_INDEX_SUPERVISOR", "0", 1);
+    const char *isolated_root = tf_isolate_user_cache();
     g_suite_argc = argc;
     g_suite_argv = argv;
     printf("\n  codebase-memory-mcp  C test suite\n");
@@ -513,5 +549,8 @@ int main(int argc, char **argv) {
     /* Release process-lifetime caches so LeakSanitizer reports no leaks. */
     cbm_kind_in_set_free_cache();
     sqlite3_shutdown();
+    if (isolated_root[0]) {
+        th_rmtree(isolated_root);
+    }
     TEST_SUMMARY();
 }
