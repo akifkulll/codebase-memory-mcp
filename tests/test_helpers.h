@@ -144,7 +144,12 @@ static inline char *th_mktempdir(const char *prefix) {
     if (!tmp) tmp = "C:\\Temp";
     snprintf(buf, sizeof(buf), "%s\\%s_XXXXXX", tmp, prefix);
 #else
-    snprintf(buf, sizeof(buf), "/tmp/%s_XXXXXX", prefix);
+    /* Honour TMPDIR so a runner pointed at another volume keeps its temp dirs there. */
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !tmp[0]) tmp = "/tmp";
+    size_t tmp_len = strlen(tmp);
+    while (tmp_len > 1 && tmp[tmp_len - 1] == '/') tmp_len--;
+    snprintf(buf, sizeof(buf), "%.*s/%s_XXXXXX", (int)tmp_len, tmp, prefix);
 #endif
     if (!cbm_mkdtemp(buf)) {
         return NULL;
