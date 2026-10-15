@@ -89,8 +89,10 @@ static int tf_maybe_run_index_worker(int argc, char **argv) {
      * Linux-only IDX832 red: LSan is active in Linux gcc ASan builds,
      * absent on macOS/Windows). _Exit skips atexit/LSan by design,
      * exactly like the production worker in run_cli. */
+    /* run_cli exits nonzero for an isError result too (cli_print_mcp_result). */
+    int exit_code = result && !strstr(result, "\"isError\":true") ? 0 : 1;
     fflush(NULL);
-    _Exit(result ? 0 : 1);
+    _Exit(exit_code);
 }
 
 /* #798 follow-up: socket-isolation probe. The parent test

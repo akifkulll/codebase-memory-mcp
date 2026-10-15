@@ -247,7 +247,9 @@ int cbm_index_spawn_worker(const char *args_json, bool single_thread, const char
     result->outcome = r.outcome;
     result->exit_code = r.exit_code;
     result->term_signal = r.term_signal;
-    if (r.outcome == CBM_PROC_CLEAN) {
+    /* A graceful nonzero exit (an isError result, e.g. over the memory budget)
+     * also leaves its response behind; the supervisor passes it through. */
+    if (r.outcome == CBM_PROC_CLEAN || r.outcome == CBM_PROC_EXIT_NONZERO) {
         result->response = slurp_file(resp_path);
     }
     (void)remove(resp_path);

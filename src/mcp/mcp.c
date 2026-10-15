@@ -5123,6 +5123,15 @@ static char *index_run_supervised_impl(cbm_mcp_server_t *srv, const char *args) 
         supervisor_invalidate_store(srv);
         return NULL; /* degrade to in-process */
     }
+    if (wr.outcome == CBM_PROC_EXIT_NONZERO && wr.response) {
+        /* The worker failed gracefully and said why (e.g. over the memory
+         * budget). That is not a crash: report it rather than re-running. */
+        char *resp = wr.response;
+        wr.response = NULL;
+        cbm_index_worker_result_free(&wr);
+        supervisor_invalidate_store(srv);
+        return resp;
+    }
     if (wr.outcome == CBM_PROC_CLEAN) {
         /* Clean exit → transfer the worker's response (the common path). If the
          * worker exited clean but wrote no response (a degenerate case, e.g. a
@@ -5181,7 +5190,8 @@ static char *index_run_supervised_impl(cbm_mcp_server_t *srv, const char *args) 
             cbm_index_worker_result_free(&wr2);
             break; /* spawn failed mid-recovery — give up */
         }
-        if (wr2.outcome == CBM_PROC_CLEAN && wr2.response) {
+        if ((wr2.outcome == CBM_PROC_CLEAN || wr2.outcome == CBM_PROC_EXIT_NONZERO) &&
+            wr2.response) {
             resp = wr2.response; /* transfer ownership to caller */
             wr2.response = NULL;
             cbm_index_worker_result_free(&wr2);

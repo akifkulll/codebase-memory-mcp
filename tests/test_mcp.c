@@ -5907,6 +5907,92 @@ TEST(index_bg_paths_route_through_supervisor_issue832) {
 #endif
 }
 
+/* A supervised worker that stops over the memory budget exits nonzero after
+ * writing its over_memory_budget response. The supervisor must hand that
+ * response back as-is: before, it read the response only on a clean exit,
+ * re-ran the whole index as crash recovery, and then reported the abort as
+ * "Indexing worker crashed on a file". */
+enum {
+    OVB_OK = 0,
+    OVB_NULL_RESP = 61,  /* supervised entry degraded to NULL */
+    OVB_NOT_NAMED = 62,  /* response lacks the over_memory_budget reason */
+    OVB_RE_RAN = 63,     /* a graceful error was treated as a crash and re-run */
+};
+
+#ifndef _WIN32
+static int ovb_supervised_over_budget_check(const char *repo_dir) {
+    cbm_index_supervisor_mark_host();
+    cbm_unsetenv("CBM_INDEX_SUPERVISOR");
+    cbm_setenv("CBM_INDEX_MAX_RESTARTS", "1", 1);
+    cbm_setenv("CBM_INDEX_WORKER_TIMEOUT_S", "30", 1);
+    cbm_setenv("CBM_MEM_BUDGET_MB", "1", 1); /* inherited: the worker child runs at 1 MiB */
+    cbm_setenv("CBM_WORKERS", "4", 1);
+
+    int spawns_before = cbm_index_supervisor_spawn_count();
+    char *resp = cbm_mcp_index_run_supervised_path(repo_dir);
+    int spawns = cbm_index_supervisor_spawn_count() - spawns_before;
+    if (!resp) {
+        return OVB_NULL_RESP;
+    }
+    bool named = response_contains_json_fragment(resp, "\"reason\":\"over_memory_budget\"");
+    if (!named) {
+        printf("    supervised over-budget response: %.400s\n", resp);
+    }
+    free(resp);
+    if (!named) {
+        return OVB_NOT_NAMED;
+    }
+    return spawns == 1 ? OVB_OK : OVB_RE_RAN;
+}
+#endif /* !_WIN32 */
+
+TEST(index_supervised_over_budget_passes_worker_response) {
+#if defined(_WIN32) || !CBM_WITH_ZOVA
+    PASS();
+#else
+    char repo[512];
+    char cache[512];
+    snprintf(repo, sizeof(repo), "%s/cbm-ovb-repo-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-ovb-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1); /* inherited by the worker child */
+    ASSERT_TRUE(budget_fixture_write(repo, 1));
+
+    int code = -1;
+    bool signalled = false;
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        alarm(120); /* a stuck worker dies here instead of hanging the runner */
+        _exit(ovb_supervised_over_budget_check(repo));
+    }
+    ASSERT_TRUE(pid > 0);
+    int status = 0;
+    (void)waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        code = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        signalled = true;
+    }
+
+    th_remove_zova_user_database();
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+    th_rmtree(repo);
+    th_rmtree(cache);
+
+    if (code != OVB_OK) {
+        printf("    child exit code %d (61=null resp, 62=reason not named, 63=re-ran)\n", code);
+    }
+    ASSERT_FALSE(signalled);
+    ASSERT_EQ(code, OVB_OK);
+    PASS();
+#endif
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  Parallel-only crash recovery (ms-typescript cascade fix)
  * ══════════════════════════════════════════════════════════════════ */
@@ -6720,6 +6806,7 @@ SUITE(mcp) {
     RUN_TEST(search_code_scoped_file_pattern_is_busybox_portable);
     RUN_TEST(store_list_files_prefers_canonical_file_nodes);
     RUN_TEST(index_repository_over_budget_reports_named_reason);
+    RUN_TEST(index_supervised_over_budget_passes_worker_response);
     RUN_TEST(search_code_path_filter_prefilter_keeps_matches);
     RUN_TEST(search_code_path_filter_matches_nothing);
     RUN_TEST(search_code_invalid_regex_errors_issue283);
