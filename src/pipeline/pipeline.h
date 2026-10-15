@@ -248,8 +248,12 @@ void cbm_pipeline_get_file_errors(const cbm_pipeline_t *p, cbm_file_error_t **ou
  * change alters the QN scheme or node identity of an already-written graph:
  * an older (or unstamped) generation then takes the full route once instead
  * of being mixed with new-format nodes by the incremental route.
- * 1 = File QNs keep the file extension (upstream #769/#1108). */
-#define CBM_INDEX_FORMAT_VERSION_STR "1"
+ * 1 = File QNs keep the file extension (upstream #769/#1108).
+ * 2 = C-family node identities (upstream #2543): a preprocessor macro's QN
+ *     ends in "#macro"; unscoped C/C++/Objective-C enumerators are
+ *     `<scope>.<NAME>`; typedef names, anonymous-enum constants and
+ *     macro-prefixed functions are nodes; a bodyless `struct X` is no node. */
+#define CBM_INDEX_FORMAT_VERSION_STR "2"
 
 /* Runs share no process-global state, so several may run in one process.
  * Same-workspace exclusion is the workspace lease
