@@ -34,6 +34,12 @@ CBMLanguage cbm_language_for_extension(const char *ext);
  * Returns "Unknown" for CBM_LANG_COUNT or out-of-range values. */
 const char *cbm_language_name(CBMLanguage lang);
 
+/* Support tier of a language: 1 = the languages CBM shares with
+ * octacity-org/badbox, 2 = other mainstream languages and build/config
+ * formats, 3 = the long tail. A label only: every tier indexes the same way.
+ * Returns 0 for CBM_LANG_COUNT or out-of-range values. */
+int cbm_language_tier(CBMLanguage lang);
+
 /* Disambiguate .m files by reading first 4KB of content.
  * Returns CBM_LANG_OBJC, CBM_LANG_MAGMA, or CBM_LANG_MATLAB.
  * On read failure, defaults to CBM_LANG_MATLAB. */

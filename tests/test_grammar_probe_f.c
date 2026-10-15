@@ -1546,15 +1546,15 @@ SUITE(grammar_probe_f) {
     RUN_TEST(probe_hcl_no_spurious_imports);
 
     /* Kubernetes manifests */
-    RUN_TEST(probe_k8s_pod_resource_node);
-    RUN_TEST(probe_k8s_deployment_resource_node);
-    RUN_TEST(probe_k8s_two_manifests);
-    RUN_TEST(probe_k8s_infra_maps_edge);
+    RUN_TEST_LANG(CBM_LANG_K8S, probe_k8s_pod_resource_node);
+    RUN_TEST_LANG(CBM_LANG_K8S, probe_k8s_deployment_resource_node);
+    RUN_TEST_LANG(CBM_LANG_K8S, probe_k8s_two_manifests);
+    RUN_TEST_LANG(CBM_LANG_K8S, probe_k8s_infra_maps_edge);
 
     /* Kustomize */
-    RUN_TEST(probe_kustomize_module_node);
-    RUN_TEST(probe_kustomize_imports_edges);
-    RUN_TEST(probe_kustomize_with_patches);
+    RUN_TEST_LANG(CBM_LANG_KUSTOMIZE, probe_kustomize_module_node);
+    RUN_TEST_LANG(CBM_LANG_KUSTOMIZE, probe_kustomize_imports_edges);
+    RUN_TEST_LANG(CBM_LANG_KUSTOMIZE, probe_kustomize_with_patches);
 
     /* Nix */
     RUN_TEST(probe_nix_attrset_node);
@@ -1562,79 +1562,79 @@ SUITE(grammar_probe_f) {
     RUN_TEST(probe_nix_import_edge);
 
     /* Nickel */
-    RUN_TEST(probe_nickel_record_node);
-    RUN_TEST(probe_nickel_let_fn);
-    RUN_TEST(probe_nickel_import_edge);
+    RUN_TEST_LANG(CBM_LANG_NICKEL, probe_nickel_record_node);
+    RUN_TEST_LANG(CBM_LANG_NICKEL, probe_nickel_let_fn);
+    RUN_TEST_LANG(CBM_LANG_NICKEL, probe_nickel_import_edge);
 
     /* Pkl */
-    RUN_TEST(probe_pkl_properties_node);
-    RUN_TEST(probe_pkl_object_block);
-    RUN_TEST(probe_pkl_import_edge);
+    RUN_TEST_LANG(CBM_LANG_PKL, probe_pkl_properties_node);
+    RUN_TEST_LANG(CBM_LANG_PKL, probe_pkl_object_block);
+    RUN_TEST_LANG(CBM_LANG_PKL, probe_pkl_import_edge);
 
     /* RON */
-    RUN_TEST(probe_ron_record_node);
-    RUN_TEST(probe_ron_named_struct);
-    RUN_TEST(probe_ron_no_imports);
+    RUN_TEST_LANG(CBM_LANG_RON, probe_ron_record_node);
+    RUN_TEST_LANG(CBM_LANG_RON, probe_ron_named_struct);
+    RUN_TEST_LANG(CBM_LANG_RON, probe_ron_no_imports);
 
     /* Jsonnet */
-    RUN_TEST(probe_jsonnet_object_node);
-    RUN_TEST(probe_jsonnet_function_in_object);
-    RUN_TEST(probe_jsonnet_import_edge);
+    RUN_TEST_LANG(CBM_LANG_JSONNET, probe_jsonnet_object_node);
+    RUN_TEST_LANG(CBM_LANG_JSONNET, probe_jsonnet_function_in_object);
+    RUN_TEST_LANG(CBM_LANG_JSONNET, probe_jsonnet_import_edge);
 
     /* KDL */
-    RUN_TEST(probe_kdl_node_block);
-    RUN_TEST(probe_kdl_flat_nodes);
-    RUN_TEST(probe_kdl_no_imports);
+    RUN_TEST_LANG(CBM_LANG_KDL, probe_kdl_node_block);
+    RUN_TEST_LANG(CBM_LANG_KDL, probe_kdl_flat_nodes);
+    RUN_TEST_LANG(CBM_LANG_KDL, probe_kdl_no_imports);
 
     /* Hyprlang */
-    RUN_TEST(probe_hyprlang_section_node);
-    RUN_TEST(probe_hyprlang_directives);
-    RUN_TEST(probe_hyprlang_source_import_edge);
+    RUN_TEST_LANG(CBM_LANG_HYPRLANG, probe_hyprlang_section_node);
+    RUN_TEST_LANG(CBM_LANG_HYPRLANG, probe_hyprlang_directives);
+    RUN_TEST_LANG(CBM_LANG_HYPRLANG, probe_hyprlang_source_import_edge);
 
     /* DeviceTree */
-    RUN_TEST(probe_devicetree_root_node);
-    RUN_TEST(probe_devicetree_child_nodes);
-    RUN_TEST(probe_devicetree_include_edge);
+    RUN_TEST_LANG(CBM_LANG_DEVICETREE, probe_devicetree_root_node);
+    RUN_TEST_LANG(CBM_LANG_DEVICETREE, probe_devicetree_child_nodes);
+    RUN_TEST_LANG(CBM_LANG_DEVICETREE, probe_devicetree_include_edge);
 
     /* CMake */
-    RUN_TEST(probe_cmake_function_node);
-    RUN_TEST(probe_cmake_macro_node);
-    RUN_TEST(probe_cmake_include_edge);
-    RUN_TEST(probe_cmake_subdirectory_edge);
+    RUN_TEST_LANG(CBM_LANG_CMAKE, probe_cmake_function_node);
+    RUN_TEST_LANG(CBM_LANG_CMAKE, probe_cmake_macro_node);
+    RUN_TEST_LANG(CBM_LANG_CMAKE, probe_cmake_include_edge);
+    RUN_TEST_LANG(CBM_LANG_CMAKE, probe_cmake_subdirectory_edge);
 
     /* Makefile */
-    RUN_TEST(probe_makefile_target_nodes);
-    RUN_TEST(probe_makefile_pattern_rule);
-    RUN_TEST(probe_makefile_include_edge);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, probe_makefile_target_nodes);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, probe_makefile_pattern_rule);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, probe_makefile_include_edge);
 
     /* Meson */
-    RUN_TEST(probe_meson_project_node);
-    RUN_TEST(probe_meson_options_node);
-    RUN_TEST(probe_meson_subdir_edge);
+    RUN_TEST_LANG(CBM_LANG_MESON, probe_meson_project_node);
+    RUN_TEST_LANG(CBM_LANG_MESON, probe_meson_options_node);
+    RUN_TEST_LANG(CBM_LANG_MESON, probe_meson_subdir_edge);
 
     /* GN */
-    RUN_TEST(probe_gn_executable_node);
-    RUN_TEST(probe_gn_library_targets);
-    RUN_TEST(probe_gn_import_edge);
+    RUN_TEST_LANG(CBM_LANG_GN, probe_gn_executable_node);
+    RUN_TEST_LANG(CBM_LANG_GN, probe_gn_library_targets);
+    RUN_TEST_LANG(CBM_LANG_GN, probe_gn_import_edge);
 
     /* Just */
-    RUN_TEST(probe_just_recipe_nodes);
-    RUN_TEST(probe_just_recipe_function_nodes);
-    RUN_TEST(probe_just_import_edge);
+    RUN_TEST_LANG(CBM_LANG_JUST, probe_just_recipe_nodes);
+    RUN_TEST_LANG(CBM_LANG_JUST, probe_just_recipe_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_JUST, probe_just_import_edge);
 
     /* BitBake */
-    RUN_TEST(probe_bitbake_recipe_node);
-    RUN_TEST(probe_bitbake_bbclass_node);
-    RUN_TEST(probe_bitbake_require_edge);
+    RUN_TEST_LANG(CBM_LANG_BITBAKE, probe_bitbake_recipe_node);
+    RUN_TEST_LANG(CBM_LANG_BITBAKE, probe_bitbake_bbclass_node);
+    RUN_TEST_LANG(CBM_LANG_BITBAKE, probe_bitbake_require_edge);
 
     /* Kconfig */
-    RUN_TEST(probe_kconfig_config_entries);
-    RUN_TEST(probe_kconfig_menu_block);
-    RUN_TEST(probe_kconfig_source_edge);
+    RUN_TEST_LANG(CBM_LANG_KCONFIG, probe_kconfig_config_entries);
+    RUN_TEST_LANG(CBM_LANG_KCONFIG, probe_kconfig_menu_block);
+    RUN_TEST_LANG(CBM_LANG_KCONFIG, probe_kconfig_source_edge);
 
     /* Go Mod */
-    RUN_TEST(probe_gomod_module_node);
-    RUN_TEST(probe_gomod_simple);
-    RUN_TEST(probe_gomod_depends_on_edges);
+    RUN_TEST_LANG(CBM_LANG_GOMOD, probe_gomod_module_node);
+    RUN_TEST_LANG(CBM_LANG_GOMOD, probe_gomod_simple);
+    RUN_TEST_LANG(CBM_LANG_GOMOD, probe_gomod_depends_on_edges);
     RUN_TEST(probe_gomod_enables_go_imports);
 }

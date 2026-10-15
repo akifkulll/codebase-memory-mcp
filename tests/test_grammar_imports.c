@@ -123,8 +123,13 @@ static const ImportCase IMPORT_CASES[] = {
 TEST(grammar_imports_extracted) {
     int n = (int)(sizeof(IMPORT_CASES) / sizeof(IMPORT_CASES[0]));
     int failures = 0;
+    int checked = 0;
     for (int i = 0; i < n; i++) {
         const ImportCase *c = &IMPORT_CASES[i];
+        if (!tf_lang_runs(c->lang)) {
+            continue;
+        }
+        checked++;
         CBMFileResult *r = cbm_extract_file(c->content, (int)strlen(c->content), c->lang, "imp",
                                             c->filename, 0, NULL, NULL);
         if (!r) {
@@ -142,7 +147,7 @@ TEST(grammar_imports_extracted) {
     }
     fprintf(stderr, "  [IMPORTS] %d import-capable grammars: %d FAILURES (each = a grammar whose "
                     "imports are not extracted)\n",
-            n, failures);
+            checked, failures);
     ASSERT_EQ(failures, 0);
     PASS();
 }

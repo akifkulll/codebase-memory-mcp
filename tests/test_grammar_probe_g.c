@@ -1027,17 +1027,17 @@ SUITE(grammar_probe_g) {
     RUN_TEST(probe_html_no_structural_nodes);
 
     /* XML */
-    RUN_TEST(probe_xml_element_nodes);
-    RUN_TEST(probe_xml_multiple_elements);
-    RUN_TEST(probe_xml_no_crash);
+    RUN_TEST_LANG(CBM_LANG_XML, probe_xml_element_nodes);
+    RUN_TEST_LANG(CBM_LANG_XML, probe_xml_multiple_elements);
+    RUN_TEST_LANG(CBM_LANG_XML, probe_xml_no_crash);
 
     /* CSS */
     RUN_TEST(probe_css_module_only);
     RUN_TEST(probe_css_at_import);
 
     /* SCSS */
-    RUN_TEST(probe_scss_variable_node);
-    RUN_TEST(probe_scss_at_use_imports);
+    RUN_TEST_LANG(CBM_LANG_SCSS, probe_scss_variable_node);
+    RUN_TEST_LANG(CBM_LANG_SCSS, probe_scss_at_use_imports);
 
     /* Markdown */
     RUN_TEST(probe_markdown_section_node);
@@ -1045,78 +1045,78 @@ SUITE(grammar_probe_g) {
     RUN_TEST(probe_markdown_no_class_variable);
 
     /* RST */
-    RUN_TEST(probe_rst_module_only);
-    RUN_TEST(probe_rst_no_crash);
+    RUN_TEST_LANG(CBM_LANG_RST, probe_rst_module_only);
+    RUN_TEST_LANG(CBM_LANG_RST, probe_rst_no_crash);
 
     /* JSON */
     RUN_TEST(probe_json_variable_nodes);
     RUN_TEST(probe_json_more_variables);
 
     /* JSON5 */
-    RUN_TEST(probe_json5_module_only);
+    RUN_TEST_LANG(CBM_LANG_JSON5, probe_json5_module_only);
 
     /* YAML */
     RUN_TEST(probe_yaml_variable_nodes);
     RUN_TEST(probe_yaml_three_keys);
 
     /* TOML */
-    RUN_TEST(probe_toml_table_and_key);
-    RUN_TEST(probe_toml_multiple_tables);
+    RUN_TEST_LANG(CBM_LANG_TOML, probe_toml_table_and_key);
+    RUN_TEST_LANG(CBM_LANG_TOML, probe_toml_multiple_tables);
 
     /* INI */
-    RUN_TEST(probe_ini_section_and_key);
-    RUN_TEST(probe_ini_conf_extension);
+    RUN_TEST_LANG(CBM_LANG_INI, probe_ini_section_and_key);
+    RUN_TEST_LANG(CBM_LANG_INI, probe_ini_conf_extension);
 
     /* CSV */
-    RUN_TEST(probe_csv_module_only);
+    RUN_TEST_LANG(CBM_LANG_CSV, probe_csv_module_only);
 
     /* SQL */
-    RUN_TEST(probe_sql_variable_node);
-    RUN_TEST(probe_sql_insert_select);
+    RUN_TEST_LANG(CBM_LANG_SQL, probe_sql_variable_node);
+    RUN_TEST_LANG(CBM_LANG_SQL, probe_sql_insert_select);
 
     /* SOQL */
-    RUN_TEST(probe_soql_module_only);
+    RUN_TEST_LANG(CBM_LANG_SOQL, probe_soql_module_only);
 
     /* SOSL */
-    RUN_TEST(probe_sosl_module_only);
+    RUN_TEST_LANG(CBM_LANG_SOSL, probe_sosl_module_only);
 
     /* DotEnv */
-    RUN_TEST(probe_dotenv_module_only);
-    RUN_TEST(probe_dotenv_local_suffix);
+    RUN_TEST_LANG(CBM_LANG_DOTENV, probe_dotenv_module_only);
+    RUN_TEST_LANG(CBM_LANG_DOTENV, probe_dotenv_local_suffix);
 
     /* gitignore */
-    RUN_TEST(probe_gitignore_module_only);
+    RUN_TEST_LANG(CBM_LANG_GITIGNORE, probe_gitignore_module_only);
 
     /* gitattributes */
-    RUN_TEST(probe_gitattributes_module_only);
+    RUN_TEST_LANG(CBM_LANG_GITATTRIBUTES, probe_gitattributes_module_only);
 
     /* Properties */
-    RUN_TEST(probe_properties_module_only);
+    RUN_TEST_LANG(CBM_LANG_PROPERTIES, probe_properties_module_only);
 
     /* Requirements */
-    RUN_TEST(probe_requirements_module_only);
-    RUN_TEST(probe_requirements_depends_on_edge);
+    RUN_TEST_LANG(CBM_LANG_REQUIREMENTS, probe_requirements_module_only);
+    RUN_TEST_LANG(CBM_LANG_REQUIREMENTS, probe_requirements_depends_on_edge);
 
     /* Diff */
-    RUN_TEST(probe_diff_module_only);
+    RUN_TEST_LANG(CBM_LANG_DIFF, probe_diff_module_only);
 
     /* PO */
-    RUN_TEST(probe_po_module_only);
+    RUN_TEST_LANG(CBM_LANG_PO, probe_po_module_only);
 
     /* Regex */
-    RUN_TEST(probe_regex_module_only);
+    RUN_TEST_LANG(CBM_LANG_REGEX, probe_regex_module_only);
 
     /* SSH Config */
-    RUN_TEST(probe_sshconfig_module_only);
+    RUN_TEST_LANG(CBM_LANG_SSHCONFIG, probe_sshconfig_module_only);
 
     /* BibTeX */
-    RUN_TEST(probe_bibtex_module_only);
+    RUN_TEST_LANG(CBM_LANG_BIBTEX, probe_bibtex_module_only);
 
     /* FORM */
-    RUN_TEST(probe_form_variable_node);
-    RUN_TEST(probe_form_procedure);
+    RUN_TEST_LANG(CBM_LANG_FORM, probe_form_variable_node);
+    RUN_TEST_LANG(CBM_LANG_FORM, probe_form_procedure);
 
     /* Linker Script */
-    RUN_TEST(probe_linkerscript_module_only);
-    RUN_TEST(probe_linkerscript_memory_sections);
+    RUN_TEST_LANG(CBM_LANG_LINKERSCRIPT, probe_linkerscript_module_only);
+    RUN_TEST_LANG(CBM_LANG_LINKERSCRIPT, probe_linkerscript_memory_sections);
 }

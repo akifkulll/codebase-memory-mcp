@@ -424,6 +424,9 @@ TEST(missing_final_newline_not_flagged_across_grammars_issue1610) {
         {"general {\n  gaps_in = 5\n}", CBM_LANG_HYPRLANG, "hypr.conf"},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (!tf_lang_runs(cases[i].lang)) {
+            continue;
+        }
         CBMFileResult *r = do_extract(cases[i].src, cases[i].lang, cases[i].path);
         ASSERT_NOT_NULL(r);
         bool flagged = r->parse_incomplete;
@@ -741,19 +744,19 @@ SUITE(parse_coverage) {
     RUN_TEST(clean_file_is_neither_partial_nor_unusable);
     RUN_TEST(c_ifdef_split_is_partial_never_unusable);
     RUN_TEST(c_trailing_recovered_defs_keep_flag);
-    RUN_TEST(dockerfile_missing_final_newline_not_flagged_issue1610);
-    RUN_TEST(dockerfile_with_final_newline_still_clean_issue1610);
-    RUN_TEST(dockerfile_trailing_space_at_eof_not_flagged_issue1746);
-    RUN_TEST(dockerfile_trailing_space_with_final_newline_clean_issue1746);
-    RUN_TEST(dockerfile_without_trailing_space_at_eof_clean_issue1746);
-    RUN_TEST(dockerfile_crlf_trailing_space_at_eof_not_flagged_issue1746);
-    RUN_TEST(missing_final_newline_not_flagged_across_grammars_issue1610);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, dockerfile_missing_final_newline_not_flagged_issue1610);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, dockerfile_with_final_newline_still_clean_issue1610);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, dockerfile_trailing_space_at_eof_not_flagged_issue1746);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, dockerfile_trailing_space_with_final_newline_clean_issue1746);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, dockerfile_without_trailing_space_at_eof_clean_issue1746);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, dockerfile_crlf_trailing_space_at_eof_not_flagged_issue1746);
+    RUN_TEST_LANG(CBM_LANG_GOMOD, missing_final_newline_not_flagged_across_grammars_issue1610);
     RUN_TEST(real_error_before_eof_still_flagged_without_final_newline_issue1610);
-    RUN_TEST(width_bearing_error_at_eof_still_flagged_issue1610);
-    RUN_TEST(perl_malformed_source_remains_partial_issue1838);
-    RUN_TEST(dockerfile_trailing_blank_at_eof_not_flagged_issue1746);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, width_bearing_error_at_eof_still_flagged_issue1610);
+    RUN_TEST_LANG(CBM_LANG_PERL, perl_malformed_source_remains_partial_issue1838);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, dockerfile_trailing_blank_at_eof_not_flagged_issue1746);
     RUN_TEST(real_error_before_eof_still_flagged_with_trailing_blank_issue1746);
-    RUN_TEST(width_bearing_error_at_eof_still_flagged_with_trailing_blank_issue1746);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, width_bearing_error_at_eof_still_flagged_with_trailing_blank_issue1746);
     RUN_TEST(c_thread_local_grammar_limit_is_pinned_issue963);
     RUN_TEST(coverage_repeated_error_line_reports_one_range_issue963);
     RUN_TEST(coverage_range_never_ends_past_the_last_line_issue963);

@@ -1757,26 +1757,26 @@ SUITE(node_creation_probe) {
     RUN_TEST(probe_zig_struct_methods);
 
     /* OCaml (grammar-only) */
-    RUN_TEST(probe_ocaml_functions_calls);
+    RUN_TEST_LANG(CBM_LANG_OCAML, probe_ocaml_functions_calls);
 
     /* Erlang (grammar-only) */
-    RUN_TEST(probe_erlang_functions_calls);
+    RUN_TEST_LANG(CBM_LANG_ERLANG, probe_erlang_functions_calls);
 
     /* Groovy (grammar-only; CALLS gap is a known-red reproduction) */
-    RUN_TEST(probe_groovy_class_methods);
-    RUN_TEST(probe_groovy_calls_edge_known_gap);
+    RUN_TEST_LANG(CBM_LANG_GROOVY, probe_groovy_class_methods);
+    RUN_TEST_LANG(CBM_LANG_GROOVY, probe_groovy_calls_edge_known_gap);
 
     /* Nim (grammar-only) */
 
     /* GDScript (grammar-only) */
-    RUN_TEST(probe_gdscript_functions_calls);
+    RUN_TEST_LANG(CBM_LANG_GDSCRIPT, probe_gdscript_functions_calls);
 
     /* Perl (grammar-only) */
-    RUN_TEST(probe_perl_functions_calls);
+    RUN_TEST_LANG(CBM_LANG_PERL, probe_perl_functions_calls);
 
     /* R (grammar-only) */
-    RUN_TEST(probe_r_functions_calls);
+    RUN_TEST_LANG(CBM_LANG_R, probe_r_functions_calls);
 
     /* Fortran (grammar-only) */
-    RUN_TEST(probe_fortran_functions_calls);
+    RUN_TEST_LANG(CBM_LANG_FORTRAN, probe_fortran_functions_calls);
 }

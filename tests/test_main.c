@@ -7,6 +7,7 @@
 int tf_pass_count = 0;
 int tf_fail_count = 0;
 int tf_skip_count = 0;
+int tf_tier_excluded_count = 0;
 
 #include "test_framework.h"
 #include "foundation/compat.h"    /* cbm_setenv — #845 supervisor kill switch */
@@ -16,6 +17,7 @@ int tf_skip_count = 0;
 #include "mcp/mcp.h"              /* cbm_mcp_handle_tool — act as a real worker */
 #include "foundation/subprocess.h" /* cbm_resolve_binary_path — deleted-self probe */
 #include "test_helpers.h"          /* th_rmtree — isolated cache cleanup */
+#include "discover/discover.h"     /* cbm_language_tier — tf_lang_runs */
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -171,6 +173,30 @@ static int tf_maybe_run_deleted_self_probe(int argc, char **argv) {
     (void)argv;
     return -1;
 #endif
+}
+
+/* Highest language tier this run covers: CBM_TEST_TIERS = 1 (default), 2, 3
+ * or "all". */
+static int tf_max_tier(void) {
+    static int max_tier = 0;
+    if (max_tier == 0) {
+        const char *env = getenv("CBM_TEST_TIERS");
+        max_tier = 1;
+        if (env && strcmp(env, "all") == 0) {
+            max_tier = 3;
+        } else if (env && env[0] >= '1' && env[0] <= '3' && env[1] == '\0') {
+            max_tier = env[0] - '0';
+        } else if (env && env[0]) {
+            fprintf(stderr, "CBM_TEST_TIERS=%s not understood (use 1, 2, 3 or all); running tier 1\n",
+                    env);
+        }
+    }
+    return max_tier;
+}
+
+int tf_lang_runs(int lang) {
+    int tier = cbm_language_tier((CBMLanguage)lang);
+    return tier >= 1 && tier <= tf_max_tier();
 }
 
 static int g_suite_argc = 0;

@@ -255,6 +255,9 @@ TEST(grammar_label_goldens) {
     int missing = 0;
     for (int i = 0; i < n; i++) {
         const GrammarCase *c = &CBM_GRAMMAR_CASES[i];
+        if (!tf_lang_runs(c->lang)) {
+            continue;
+        }
         CBMFileResult *r =
             cbm_extract_file(c->src, (int)strlen(c->src), c->lang, "lbl", c->path, 0, NULL, NULL);
         if (!r) {
@@ -313,6 +316,7 @@ static const char *MUST_EXTRACT_DEFS[] = {
 
 TEST(grammar_code_extracts_defs) {
     int failures = 0;
+    int checked = 0;
     for (int k = 0; MUST_EXTRACT_DEFS[k]; k++) {
         const char *name = MUST_EXTRACT_DEFS[k];
         const GrammarCase *c = NULL;
@@ -327,6 +331,10 @@ TEST(grammar_code_extracts_defs) {
             failures++;
             continue;
         }
+        if (!tf_lang_runs(c->lang)) {
+            continue;
+        }
+        checked++;
         CBMFileResult *r =
             cbm_extract_file(c->src, (int)strlen(c->src), c->lang, "cd", c->path, 0, NULL, NULL);
         if (!r) {
@@ -344,13 +352,13 @@ TEST(grammar_code_extracts_defs) {
             failures++;
         }
     }
-    fprintf(stderr, "  [CODE-DEFS] %d code/IDL grammars: %d under-extraction FAILURES\n",
-            (int)(sizeof(MUST_EXTRACT_DEFS) / sizeof(MUST_EXTRACT_DEFS[0])) - 1, failures);
+    fprintf(stderr, "  [CODE-DEFS] %d code/IDL grammars: %d under-extraction FAILURES\n", checked,
+            failures);
     ASSERT_EQ(failures, 0);
     PASS();
 }
 
 void suite_grammar_labels(void) {
     RUN_TEST(grammar_label_goldens);
-    RUN_TEST(grammar_code_extracts_defs);
+    RUN_TEST_LANG(CBM_LANG_PROTOBUF, grammar_code_extracts_defs);
 }

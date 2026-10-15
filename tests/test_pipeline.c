@@ -9578,7 +9578,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_lua_anonymous_functions);
     RUN_TEST(pipeline_csharp_modern);
     RUN_TEST(pipeline_bom_stripping);
-    RUN_TEST(pipeline_form_call_resolution);
+    RUN_TEST_LANG(CBM_LANG_FORM, pipeline_form_call_resolution);
     RUN_TEST(pipeline_python_type_inference);
     /* Docstring integration (port of TestDocstringIntegration) */
     RUN_TEST(pipeline_docstring_go_function);
@@ -9629,10 +9629,10 @@ SUITE(pipeline) {
     RUN_TEST(infra_is_compose_file);
     RUN_TEST(infra_is_cloudbuild_file);
     RUN_TEST(infra_is_shell_script);
-    RUN_TEST(infra_is_dockerfile);
-    RUN_TEST(infra_is_kustomize_file);
-    RUN_TEST(infra_is_k8s_manifest);
-    RUN_TEST(infra_is_env_file);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, infra_is_dockerfile);
+    RUN_TEST_LANG(CBM_LANG_KUSTOMIZE, infra_is_kustomize_file);
+    RUN_TEST_LANG(CBM_LANG_K8S, infra_is_k8s_manifest);
+    RUN_TEST_LANG(CBM_LANG_DOTENV, infra_is_env_file);
     RUN_TEST(infra_clean_json_brackets);
     RUN_TEST(infra_secret_detection);
     /* Infrascan: Dockerfile parser */
@@ -9663,18 +9663,18 @@ SUITE(pipeline) {
     RUN_TEST(infra_pipeline_integration);
     RUN_TEST(infra_pipeline_idempotent);
     /* K8s / Kustomize extraction */
-    RUN_TEST(k8s_extract_kustomize);
-    RUN_TEST(k8s_extract_manifest);
-    RUN_TEST(k8s_extract_manifest_no_name);
-    RUN_TEST(k8s_extract_manifest_multidoc);
+    RUN_TEST_LANG(CBM_LANG_KUSTOMIZE, k8s_extract_kustomize);
+    RUN_TEST_LANG(CBM_LANG_K8S, k8s_extract_manifest);
+    RUN_TEST_LANG(CBM_LANG_K8S, k8s_extract_manifest_no_name);
+    RUN_TEST_LANG(CBM_LANG_K8S, k8s_extract_manifest_multidoc);
     /* Env URL scanning */
-    RUN_TEST(envscan_dockerfile_env_urls);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, envscan_dockerfile_env_urls);
     RUN_TEST(envscan_shell_env_urls);
     RUN_TEST(envscan_env_file_urls);
-    RUN_TEST(envscan_toml_urls);
+    RUN_TEST_LANG(CBM_LANG_TOML, envscan_toml_urls);
     RUN_TEST(envscan_yaml_urls);
     RUN_TEST(envscan_terraform_urls);
-    RUN_TEST(envscan_properties_urls);
+    RUN_TEST_LANG(CBM_LANG_PROPERTIES, envscan_properties_urls);
     RUN_TEST(envscan_secret_key_exclusion);
     RUN_TEST(envscan_secret_value_exclusion);
     RUN_TEST(envscan_secret_file_exclusion);
@@ -9737,7 +9737,7 @@ SUITE(pipeline) {
     RUN_TEST(incremental_new_file_added);
     RUN_TEST(incremental_fast_preserves_mode_skipped_tools_dir);
     RUN_TEST(incremental_k8s_manifest_indexed);
-    RUN_TEST(incremental_kustomize_module_indexed);
+    RUN_TEST_LANG(CBM_LANG_KUSTOMIZE, incremental_kustomize_module_indexed);
     /* Resource management & internal helper tests */
     RUN_TEST(pipeline_empty_path);
     RUN_TEST(pipeline_project_name_content);

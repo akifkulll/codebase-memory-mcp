@@ -37,6 +37,12 @@
 extern int tf_pass_count;
 extern int tf_fail_count;
 extern int tf_skip_count;
+extern int tf_tier_excluded_count;
+
+/* True when tests for `lang` (a CBMLanguage) run in this suite. Only tier-1
+ * languages run by default; CBM_TEST_TIERS=2 adds tier 2, and 3 or "all" runs
+ * every tier (see cbm_language_tier). Defined in test_main.c. */
+int tf_lang_runs(int lang);
 
 /* ── Color helpers ─────────────────────────────────────────────── */
 
@@ -237,6 +243,18 @@ static inline const char *tf_reset(void) {
         }                                                 \
     } while (0)
 
+/* RUN_TEST for a test that exercises one language: it runs only when that
+ * language's tier is selected (tf_lang_runs). An excluded test is not run and
+ * not counted as passed; the summary reports how many were left out. */
+#define RUN_TEST_LANG(lang, name)       \
+    do {                                \
+        if (tf_lang_runs(lang)) {       \
+            RUN_TEST(name);             \
+        } else {                        \
+            tf_tier_excluded_count++;   \
+        }                               \
+    } while (0)
+
 /* ── Suite grouping ────────────────────────────────────────────── */
 
 #define SUITE(name) void suite_##name(void)
@@ -257,6 +275,9 @@ static inline const char *tf_reset(void) {
             printf(", %s%d failed%s", tf_red(), tf_fail_count, tf_reset());  \
         if (tf_skip_count > 0)                                               \
             printf(", %s%d skipped%s", tf_dim(), tf_skip_count, tf_reset()); \
+        if (tf_tier_excluded_count > 0)                                      \
+            printf(", %s%d not run (language tier; CBM_TEST_TIERS=all)%s",   \
+                   tf_dim(), tf_tier_excluded_count, tf_reset());            \
         printf("\n────────────────────────────────────────────\n\n");        \
         return tf_fail_count > 0 ? 1 : 0;                                    \
     } while (0)

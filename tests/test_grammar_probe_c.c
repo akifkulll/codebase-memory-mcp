@@ -951,16 +951,16 @@ TEST(zsh_source_not_extracted) {
 
 void suite_grammar_probe_c(void) {
     /* scheme */
-    RUN_TEST(scheme_function_nodes);
-    RUN_TEST(scheme_import_not_extracted);
-    RUN_TEST(scheme_require_not_extracted);
-    RUN_TEST(scheme_module_node);
+    RUN_TEST_LANG(CBM_LANG_SCHEME, scheme_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_SCHEME, scheme_import_not_extracted);
+    RUN_TEST_LANG(CBM_LANG_SCHEME, scheme_require_not_extracted);
+    RUN_TEST_LANG(CBM_LANG_SCHEME, scheme_module_node);
 
     /* slang */
-    RUN_TEST(slang_function_nodes);
-    RUN_TEST(slang_struct_node);
-    RUN_TEST(slang_shader_entry_point);
-    RUN_TEST(slang_include_import);
+    RUN_TEST_LANG(CBM_LANG_SLANG, slang_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_SLANG, slang_struct_node);
+    RUN_TEST_LANG(CBM_LANG_SLANG, slang_shader_entry_point);
+    RUN_TEST_LANG(CBM_LANG_SLANG, slang_include_import);
 
     /* solidity */
     RUN_TEST(solidity_contract_node);
@@ -970,47 +970,47 @@ void suite_grammar_probe_c(void) {
     RUN_TEST(solidity_contract_inheritance);
 
     /* squirrel */
-    RUN_TEST(squirrel_function_nodes);
-    RUN_TEST(squirrel_class_node);
-    RUN_TEST(squirrel_class_methods);
-    RUN_TEST(squirrel_class_inheritance);
+    RUN_TEST_LANG(CBM_LANG_SQUIRREL, squirrel_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_SQUIRREL, squirrel_class_node);
+    RUN_TEST_LANG(CBM_LANG_SQUIRREL, squirrel_class_methods);
+    RUN_TEST_LANG(CBM_LANG_SQUIRREL, squirrel_class_inheritance);
 
     /* starlark */
-    RUN_TEST(starlark_function_nodes);
-    RUN_TEST(starlark_load_not_extracted);
-    RUN_TEST(starlark_star_extension_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_STARLARK, starlark_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_STARLARK, starlark_load_not_extracted);
+    RUN_TEST_LANG(CBM_LANG_STARLARK, starlark_star_extension_function_nodes);
 
     /* sway */
-    RUN_TEST(sway_function_nodes);
-    RUN_TEST(sway_struct_node);
-    RUN_TEST(sway_use_import_extracted);
-    RUN_TEST(sway_abi_node);
-    RUN_TEST(sway_impl_node);
+    RUN_TEST_LANG(CBM_LANG_SWAY, sway_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_SWAY, sway_struct_node);
+    RUN_TEST_LANG(CBM_LANG_SWAY, sway_use_import_extracted);
+    RUN_TEST_LANG(CBM_LANG_SWAY, sway_abi_node);
+    RUN_TEST_LANG(CBM_LANG_SWAY, sway_impl_node);
 
     /* tcl */
-    RUN_TEST(tcl_proc_nodes);
-    RUN_TEST(tcl_namespace_node);
-    RUN_TEST(tcl_source_not_extracted);
+    RUN_TEST_LANG(CBM_LANG_TCL, tcl_proc_nodes);
+    RUN_TEST_LANG(CBM_LANG_TCL, tcl_namespace_node);
+    RUN_TEST_LANG(CBM_LANG_TCL, tcl_source_not_extracted);
 
     /* teal */
-    RUN_TEST(teal_function_nodes);
-    RUN_TEST(teal_record_node);
-    RUN_TEST(teal_require_not_extracted);
-    RUN_TEST(teal_interface_node);
+    RUN_TEST_LANG(CBM_LANG_TEAL, teal_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_TEAL, teal_record_node);
+    RUN_TEST_LANG(CBM_LANG_TEAL, teal_require_not_extracted);
+    RUN_TEST_LANG(CBM_LANG_TEAL, teal_interface_node);
 
     /* vimscript */
-    RUN_TEST(vimscript_function_bang_nodes);
-    RUN_TEST(vimscript_function_no_bang);
-    RUN_TEST(vimscript_autoload_function);
+    RUN_TEST_LANG(CBM_LANG_VIMSCRIPT, vimscript_function_bang_nodes);
+    RUN_TEST_LANG(CBM_LANG_VIMSCRIPT, vimscript_function_no_bang);
+    RUN_TEST_LANG(CBM_LANG_VIMSCRIPT, vimscript_autoload_function);
 
     /* wgsl */
-    RUN_TEST(wgsl_function_nodes);
-    RUN_TEST(wgsl_entry_point_functions);
-    RUN_TEST(wgsl_struct_node);
-    RUN_TEST(wgsl_enable_directive_extracted);
+    RUN_TEST_LANG(CBM_LANG_WGSL, wgsl_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_WGSL, wgsl_entry_point_functions);
+    RUN_TEST_LANG(CBM_LANG_WGSL, wgsl_struct_node);
+    RUN_TEST_LANG(CBM_LANG_WGSL, wgsl_enable_directive_extracted);
 
     /* zsh */
-    RUN_TEST(zsh_function_nodes);
-    RUN_TEST(zsh_function_shorthand);
-    RUN_TEST(zsh_source_not_extracted);
+    RUN_TEST_LANG(CBM_LANG_ZSH, zsh_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_ZSH, zsh_function_shorthand);
+    RUN_TEST_LANG(CBM_LANG_ZSH, zsh_source_not_extracted);
 }

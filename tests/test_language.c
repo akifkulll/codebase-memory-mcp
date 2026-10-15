@@ -1107,6 +1107,35 @@ TEST(lang_all_have_names) {
     PASS();
 }
 
+/* Tier 1 is exactly the languages CBM shares with octacity-org/badbox. */
+TEST(lang_tier1_matches_badbox) {
+    static const CBMLanguage TIER1[] = {
+        CBM_LANG_BASH,       CBM_LANG_C,      CBM_LANG_CPP,        CBM_LANG_CSHARP,
+        CBM_LANG_CSS,        CBM_LANG_DART,   CBM_LANG_ELIXIR,     CBM_LANG_GO,
+        CBM_LANG_HASKELL,    CBM_LANG_HCL,    CBM_LANG_HTML,       CBM_LANG_JAVA,
+        CBM_LANG_JAVASCRIPT, CBM_LANG_JSON,   CBM_LANG_KOTLIN,     CBM_LANG_LUA,
+        CBM_LANG_MARKDOWN,   CBM_LANG_NIX,    CBM_LANG_PHP,        CBM_LANG_PYTHON,
+        CBM_LANG_RUBY,       CBM_LANG_RUST,   CBM_LANG_SCALA,      CBM_LANG_SOLIDITY,
+        CBM_LANG_SWIFT,      CBM_LANG_TSX,    CBM_LANG_TYPESCRIPT, CBM_LANG_YAML,
+        CBM_LANG_POWERSHELL, CBM_LANG_ZIG,
+    };
+    int expected = (int)(sizeof(TIER1) / sizeof(TIER1[0]));
+    for (int i = 0; i < expected; i++) {
+        ASSERT_EQ(cbm_language_tier(TIER1[i]), 1);
+    }
+    int tier1 = 0;
+    for (int i = 0; i < CBM_LANG_COUNT; i++) {
+        int tier = cbm_language_tier((CBMLanguage)i);
+        ASSERT_TRUE(tier >= 1 && tier <= 3);
+        tier1 += tier == 1;
+    }
+    ASSERT_EQ(tier1, expected);
+    ASSERT_EQ(cbm_language_tier(CBM_LANG_OCAML), 2);
+    ASSERT_EQ(cbm_language_tier(CBM_LANG_COBOL), 3);
+    ASSERT_EQ(cbm_language_tier(CBM_LANG_COUNT), 0);
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(language) {
@@ -1146,104 +1175,104 @@ SUITE(language) {
     RUN_TEST(lang_ext_elixir);
     RUN_TEST(lang_ext_exs);
     RUN_TEST(lang_ext_haskell);
-    RUN_TEST(lang_ext_ocaml);
-    RUN_TEST(lang_ext_mli);
+    RUN_TEST_LANG(CBM_LANG_OCAML, lang_ext_ocaml);
+    RUN_TEST_LANG(CBM_LANG_OCAML, lang_ext_mli);
     RUN_TEST(lang_ext_swift);
     RUN_TEST(lang_ext_dart);
-    RUN_TEST(lang_ext_perl);
-    RUN_TEST(lang_ext_pm);
-    RUN_TEST(lang_ext_groovy);
-    RUN_TEST(lang_ext_gradle);
-    RUN_TEST(lang_ext_erlang);
-    RUN_TEST(lang_ext_r);
-    RUN_TEST(lang_ext_R);
+    RUN_TEST_LANG(CBM_LANG_PERL, lang_ext_perl);
+    RUN_TEST_LANG(CBM_LANG_PERL, lang_ext_pm);
+    RUN_TEST_LANG(CBM_LANG_GROOVY, lang_ext_groovy);
+    RUN_TEST_LANG(CBM_LANG_GROOVY, lang_ext_gradle);
+    RUN_TEST_LANG(CBM_LANG_ERLANG, lang_ext_erlang);
+    RUN_TEST_LANG(CBM_LANG_R, lang_ext_r);
+    RUN_TEST_LANG(CBM_LANG_R, lang_ext_R);
 
     /* Extension: Tier 2 programming */
-    RUN_TEST(lang_ext_clojure);
-    RUN_TEST(lang_ext_cljs);
-    RUN_TEST(lang_ext_cljc);
-    RUN_TEST(lang_ext_fsharp);
-    RUN_TEST(lang_ext_fsi);
-    RUN_TEST(lang_ext_fsx);
-    RUN_TEST(lang_ext_julia);
-    RUN_TEST(lang_ext_vim);
+    RUN_TEST_LANG(CBM_LANG_CLOJURE, lang_ext_clojure);
+    RUN_TEST_LANG(CBM_LANG_CLOJURE, lang_ext_cljs);
+    RUN_TEST_LANG(CBM_LANG_CLOJURE, lang_ext_cljc);
+    RUN_TEST_LANG(CBM_LANG_FSHARP, lang_ext_fsharp);
+    RUN_TEST_LANG(CBM_LANG_FSHARP, lang_ext_fsi);
+    RUN_TEST_LANG(CBM_LANG_FSHARP, lang_ext_fsx);
+    RUN_TEST_LANG(CBM_LANG_JULIA, lang_ext_julia);
+    RUN_TEST_LANG(CBM_LANG_VIMSCRIPT, lang_ext_vim);
     RUN_TEST(lang_ext_nix);
-    RUN_TEST(lang_ext_commonlisp);
-    RUN_TEST(lang_ext_lsp);
-    RUN_TEST(lang_ext_cl);
-    RUN_TEST(lang_ext_elm);
-    RUN_TEST(lang_ext_fortran);
-    RUN_TEST(lang_ext_f95);
-    RUN_TEST(lang_ext_f03);
-    RUN_TEST(lang_ext_f08);
-    RUN_TEST(lang_ext_cuda);
-    RUN_TEST(lang_ext_cuh);
-    RUN_TEST(lang_ext_cobol);
-    RUN_TEST(lang_ext_cbl);
-    RUN_TEST(lang_ext_verilog);
-    RUN_TEST(lang_ext_sv);
-    RUN_TEST(lang_ext_emacslisp);
+    RUN_TEST_LANG(CBM_LANG_COMMONLISP, lang_ext_commonlisp);
+    RUN_TEST_LANG(CBM_LANG_COMMONLISP, lang_ext_lsp);
+    RUN_TEST_LANG(CBM_LANG_COMMONLISP, lang_ext_cl);
+    RUN_TEST_LANG(CBM_LANG_ELM, lang_ext_elm);
+    RUN_TEST_LANG(CBM_LANG_FORTRAN, lang_ext_fortran);
+    RUN_TEST_LANG(CBM_LANG_FORTRAN, lang_ext_f95);
+    RUN_TEST_LANG(CBM_LANG_FORTRAN, lang_ext_f03);
+    RUN_TEST_LANG(CBM_LANG_FORTRAN, lang_ext_f08);
+    RUN_TEST_LANG(CBM_LANG_CUDA, lang_ext_cuda);
+    RUN_TEST_LANG(CBM_LANG_CUDA, lang_ext_cuh);
+    RUN_TEST_LANG(CBM_LANG_COBOL, lang_ext_cobol);
+    RUN_TEST_LANG(CBM_LANG_COBOL, lang_ext_cbl);
+    RUN_TEST_LANG(CBM_LANG_VERILOG, lang_ext_verilog);
+    RUN_TEST_LANG(CBM_LANG_VERILOG, lang_ext_sv);
+    RUN_TEST_LANG(CBM_LANG_EMACSLISP, lang_ext_emacslisp);
 
     /* Extension: Scientific/math */
-    RUN_TEST(lang_ext_matlab);
-    RUN_TEST(lang_ext_mlx);
-    RUN_TEST(lang_ext_lean);
-    RUN_TEST(lang_ext_form);
-    RUN_TEST(lang_ext_prc);
-    RUN_TEST(lang_ext_magma);
-    RUN_TEST(lang_ext_magma2);
-    RUN_TEST(lang_ext_wolfram);
-    RUN_TEST(lang_ext_wls);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, lang_ext_matlab);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, lang_ext_mlx);
+    RUN_TEST_LANG(CBM_LANG_LEAN, lang_ext_lean);
+    RUN_TEST_LANG(CBM_LANG_FORM, lang_ext_form);
+    RUN_TEST_LANG(CBM_LANG_FORM, lang_ext_prc);
+    RUN_TEST_LANG(CBM_LANG_MAGMA, lang_ext_magma);
+    RUN_TEST_LANG(CBM_LANG_MAGMA, lang_ext_magma2);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, lang_ext_wolfram);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, lang_ext_wls);
 
     /* Extension: Helper languages */
     RUN_TEST(lang_ext_html);
     RUN_TEST(lang_ext_htm);
     RUN_TEST(lang_ext_css);
-    RUN_TEST(lang_ext_scss);
+    RUN_TEST_LANG(CBM_LANG_SCSS, lang_ext_scss);
     RUN_TEST(lang_ext_yaml);
     RUN_TEST(lang_ext_yaml2);
-    RUN_TEST(lang_ext_toml);
+    RUN_TEST_LANG(CBM_LANG_TOML, lang_ext_toml);
     RUN_TEST(lang_ext_hcl);
     RUN_TEST(lang_ext_hcl2);
-    RUN_TEST(lang_ext_sql);
-    RUN_TEST(lang_ext_dockerfile);
+    RUN_TEST_LANG(CBM_LANG_SQL, lang_ext_sql);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, lang_ext_dockerfile);
     RUN_TEST(lang_ext_json);
-    RUN_TEST(lang_ext_xml);
-    RUN_TEST(lang_ext_xsl);
-    RUN_TEST(lang_ext_xsd);
-    RUN_TEST(lang_ext_svg);
+    RUN_TEST_LANG(CBM_LANG_XML, lang_ext_xml);
+    RUN_TEST_LANG(CBM_LANG_XML, lang_ext_xsl);
+    RUN_TEST_LANG(CBM_LANG_XML, lang_ext_xsd);
+    RUN_TEST_LANG(CBM_LANG_XML, lang_ext_svg);
     RUN_TEST(lang_ext_markdown);
     RUN_TEST(lang_ext_mdx);
-    RUN_TEST(lang_ext_makefile);
-    RUN_TEST(lang_ext_cmake);
-    RUN_TEST(lang_ext_protobuf);
-    RUN_TEST(lang_ext_graphql);
-    RUN_TEST(lang_ext_gql);
-    RUN_TEST(lang_ext_vue);
-    RUN_TEST(lang_ext_svelte);
-    RUN_TEST(lang_ext_meson);
-    RUN_TEST(lang_ext_glsl);
-    RUN_TEST(lang_ext_vert);
-    RUN_TEST(lang_ext_frag);
-    RUN_TEST(lang_ext_ini);
-    RUN_TEST(lang_ext_cfg);
-    RUN_TEST(lang_ext_conf);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, lang_ext_makefile);
+    RUN_TEST_LANG(CBM_LANG_CMAKE, lang_ext_cmake);
+    RUN_TEST_LANG(CBM_LANG_PROTOBUF, lang_ext_protobuf);
+    RUN_TEST_LANG(CBM_LANG_GRAPHQL, lang_ext_graphql);
+    RUN_TEST_LANG(CBM_LANG_GRAPHQL, lang_ext_gql);
+    RUN_TEST_LANG(CBM_LANG_VUE, lang_ext_vue);
+    RUN_TEST_LANG(CBM_LANG_SVELTE, lang_ext_svelte);
+    RUN_TEST_LANG(CBM_LANG_MESON, lang_ext_meson);
+    RUN_TEST_LANG(CBM_LANG_GLSL, lang_ext_glsl);
+    RUN_TEST_LANG(CBM_LANG_GLSL, lang_ext_vert);
+    RUN_TEST_LANG(CBM_LANG_GLSL, lang_ext_frag);
+    RUN_TEST_LANG(CBM_LANG_INI, lang_ext_ini);
+    RUN_TEST_LANG(CBM_LANG_INI, lang_ext_cfg);
+    RUN_TEST_LANG(CBM_LANG_INI, lang_ext_conf);
 
     /* Unknown/edge cases */
     RUN_TEST(lang_ext_unknown);
     RUN_TEST(lang_ext_null);
 
     /* Filename-based */
-    RUN_TEST(lang_fn_makefile);
-    RUN_TEST(lang_fn_gnumakefile);
-    RUN_TEST(lang_fn_makefile_lower);
-    RUN_TEST(lang_fn_cmake);
-    RUN_TEST(lang_fn_dockerfile);
-    RUN_TEST(lang_fn_meson_build);
-    RUN_TEST(lang_fn_meson_opts);
-    RUN_TEST(lang_fn_meson_opts_txt);
-    RUN_TEST(lang_fn_vimrc);
-    RUN_TEST(lang_fn_blade_php_compound_issue258);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, lang_fn_makefile);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, lang_fn_gnumakefile);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, lang_fn_makefile_lower);
+    RUN_TEST_LANG(CBM_LANG_CMAKE, lang_fn_cmake);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, lang_fn_dockerfile);
+    RUN_TEST_LANG(CBM_LANG_MESON, lang_fn_meson_build);
+    RUN_TEST_LANG(CBM_LANG_MESON, lang_fn_meson_opts);
+    RUN_TEST_LANG(CBM_LANG_MESON, lang_fn_meson_opts_txt);
+    RUN_TEST_LANG(CBM_LANG_VIMSCRIPT, lang_fn_vimrc);
+    RUN_TEST_LANG(CBM_LANG_BLADE, lang_fn_blade_php_compound_issue258);
     RUN_TEST(lang_fn_main_go);
     RUN_TEST(lang_fn_test_py);
     RUN_TEST(lang_fn_unknown);
@@ -1256,97 +1285,98 @@ SUITE(language) {
     RUN_TEST(lang_name_unknown);
 
     /* .m disambiguation */
-    RUN_TEST(lang_m_objc);
-    RUN_TEST(lang_m_magma);
-    RUN_TEST(lang_m_matlab);
-    RUN_TEST(lang_m_default_on_read_fail);
-    RUN_TEST(lang_cls_vb6_class_module_unsupported);
-    RUN_TEST(lang_cls_apex_stays_apex);
-    RUN_TEST(lang_frm_vb6_form_unsupported);
-    RUN_TEST(lang_frm_form_stays_form);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, lang_m_objc);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, lang_m_magma);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, lang_m_matlab);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, lang_m_default_on_read_fail);
+    RUN_TEST_LANG(CBM_LANG_APEX, lang_cls_vb6_class_module_unsupported);
+    RUN_TEST_LANG(CBM_LANG_APEX, lang_cls_apex_stays_apex);
+    RUN_TEST_LANG(CBM_LANG_FORM, lang_frm_vb6_form_unsupported);
+    RUN_TEST_LANG(CBM_LANG_FORM, lang_frm_form_stays_form);
 
     /* Go test ports */
     /* New languages */
     RUN_TEST(lang_ext_solidity);
-    RUN_TEST(lang_ext_typst);
-    RUN_TEST(lang_ext_gdscript);
-    RUN_TEST(lang_ext_gleam);
+    RUN_TEST_LANG(CBM_LANG_TYPST, lang_ext_typst);
+    RUN_TEST_LANG(CBM_LANG_GDSCRIPT, lang_ext_gdscript);
+    RUN_TEST_LANG(CBM_LANG_GLEAM, lang_ext_gleam);
     RUN_TEST(lang_ext_powershell);
-    RUN_TEST(lang_ext_pascal);
-    RUN_TEST(lang_ext_d);
-    RUN_TEST(lang_ext_nim);
-    RUN_TEST(lang_ext_scheme);
-    RUN_TEST(lang_ext_fennel);
-    RUN_TEST(lang_ext_fish);
-    RUN_TEST(lang_ext_awk);
-    RUN_TEST(lang_ext_zsh);
-    RUN_TEST(lang_ext_tcl);
-    RUN_TEST(lang_ext_ada);
-    RUN_TEST(lang_ext_agda);
-    RUN_TEST(lang_ext_racket);
-    RUN_TEST(lang_ext_odin);
-    RUN_TEST(lang_ext_rescript);
-    RUN_TEST(lang_ext_purescript);
-    RUN_TEST(lang_ext_nickel);
-    RUN_TEST(lang_ext_crystal);
-    RUN_TEST(lang_ext_teal);
-    RUN_TEST(lang_ext_hare);
-    RUN_TEST(lang_ext_pony);
-    RUN_TEST(lang_ext_luau);
-    RUN_TEST(lang_ext_qml);
-    RUN_TEST(lang_ext_cfml);
-    RUN_TEST(lang_ext_helm_tpl);
-    RUN_TEST(lang_ext_janet);
-    RUN_TEST(lang_ext_sway);
-    RUN_TEST(lang_ext_nasm);
-    RUN_TEST(lang_ext_assembly);
-    RUN_TEST(lang_ext_astro);
-    RUN_TEST(lang_ext_gotemplate);
-    RUN_TEST(lang_ext_templ);
-    RUN_TEST(lang_ext_liquid);
-    RUN_TEST(lang_ext_jinja2);
-    RUN_TEST(lang_ext_prisma);
-    RUN_TEST(lang_ext_hyprlang);
-    RUN_TEST(lang_ext_diff);
-    RUN_TEST(lang_ext_wgsl);
-    RUN_TEST(lang_ext_kdl);
-    RUN_TEST(lang_ext_json5);
-    RUN_TEST(lang_ext_jsonnet);
-    RUN_TEST(lang_ext_ron);
-    RUN_TEST(lang_ext_thrift);
-    RUN_TEST(lang_ext_capnp);
-    RUN_TEST(lang_ext_properties);
-    RUN_TEST(lang_ext_bibtex);
-    RUN_TEST(lang_ext_starlark);
-    RUN_TEST(lang_ext_bicep);
-    RUN_TEST(lang_ext_csv);
-    RUN_TEST(lang_ext_hlsl);
-    RUN_TEST(lang_ext_vhdl);
-    RUN_TEST(lang_ext_devicetree);
-    RUN_TEST(lang_ext_linkerscript);
-    RUN_TEST(lang_ext_gn);
-    RUN_TEST(lang_ext_bitbake);
-    RUN_TEST(lang_ext_smali);
-    RUN_TEST(lang_ext_tablegen);
-    RUN_TEST(lang_ext_ispc);
-    RUN_TEST(lang_ext_cairo);
-    RUN_TEST(lang_ext_move);
-    RUN_TEST(lang_ext_squirrel);
-    RUN_TEST(lang_ext_func);
-    RUN_TEST(lang_ext_rst);
-    RUN_TEST(lang_ext_beancount);
-    RUN_TEST(lang_ext_mermaid);
-    RUN_TEST(lang_ext_puppet);
-    RUN_TEST(lang_ext_po);
-    RUN_TEST(lang_ext_slang);
-    RUN_TEST(lang_ext_llvm);
-    RUN_TEST(lang_ext_smithy);
-    RUN_TEST(lang_ext_wit);
-    RUN_TEST(lang_ext_tlaplus);
-    RUN_TEST(lang_ext_pkl);
-    RUN_TEST(lang_ext_apex);
-    RUN_TEST(lang_ext_soql);
-    RUN_TEST(lang_ext_sosl);
+    RUN_TEST_LANG(CBM_LANG_PASCAL, lang_ext_pascal);
+    RUN_TEST_LANG(CBM_LANG_DLANG, lang_ext_d);
+    RUN_TEST_LANG(CBM_LANG_NIM, lang_ext_nim);
+    RUN_TEST_LANG(CBM_LANG_SCHEME, lang_ext_scheme);
+    RUN_TEST_LANG(CBM_LANG_FENNEL, lang_ext_fennel);
+    RUN_TEST_LANG(CBM_LANG_FISH, lang_ext_fish);
+    RUN_TEST_LANG(CBM_LANG_AWK, lang_ext_awk);
+    RUN_TEST_LANG(CBM_LANG_ZSH, lang_ext_zsh);
+    RUN_TEST_LANG(CBM_LANG_TCL, lang_ext_tcl);
+    RUN_TEST_LANG(CBM_LANG_ADA, lang_ext_ada);
+    RUN_TEST_LANG(CBM_LANG_AGDA, lang_ext_agda);
+    RUN_TEST_LANG(CBM_LANG_RACKET, lang_ext_racket);
+    RUN_TEST_LANG(CBM_LANG_ODIN, lang_ext_odin);
+    RUN_TEST_LANG(CBM_LANG_RESCRIPT, lang_ext_rescript);
+    RUN_TEST_LANG(CBM_LANG_PURESCRIPT, lang_ext_purescript);
+    RUN_TEST_LANG(CBM_LANG_NICKEL, lang_ext_nickel);
+    RUN_TEST_LANG(CBM_LANG_CRYSTAL, lang_ext_crystal);
+    RUN_TEST_LANG(CBM_LANG_TEAL, lang_ext_teal);
+    RUN_TEST_LANG(CBM_LANG_HARE, lang_ext_hare);
+    RUN_TEST_LANG(CBM_LANG_PONY, lang_ext_pony);
+    RUN_TEST_LANG(CBM_LANG_LUAU, lang_ext_luau);
+    RUN_TEST_LANG(CBM_LANG_QML, lang_ext_qml);
+    RUN_TEST_LANG(CBM_LANG_CFML, lang_ext_cfml);
+    RUN_TEST_LANG(CBM_LANG_GOTEMPLATE, lang_ext_helm_tpl);
+    RUN_TEST_LANG(CBM_LANG_JANET, lang_ext_janet);
+    RUN_TEST_LANG(CBM_LANG_SWAY, lang_ext_sway);
+    RUN_TEST_LANG(CBM_LANG_NASM, lang_ext_nasm);
+    RUN_TEST_LANG(CBM_LANG_ASSEMBLY, lang_ext_assembly);
+    RUN_TEST_LANG(CBM_LANG_ASTRO, lang_ext_astro);
+    RUN_TEST_LANG(CBM_LANG_GOTEMPLATE, lang_ext_gotemplate);
+    RUN_TEST_LANG(CBM_LANG_TEMPL, lang_ext_templ);
+    RUN_TEST_LANG(CBM_LANG_LIQUID, lang_ext_liquid);
+    RUN_TEST_LANG(CBM_LANG_JINJA2, lang_ext_jinja2);
+    RUN_TEST_LANG(CBM_LANG_PRISMA, lang_ext_prisma);
+    RUN_TEST_LANG(CBM_LANG_HYPRLANG, lang_ext_hyprlang);
+    RUN_TEST_LANG(CBM_LANG_DIFF, lang_ext_diff);
+    RUN_TEST_LANG(CBM_LANG_WGSL, lang_ext_wgsl);
+    RUN_TEST_LANG(CBM_LANG_KDL, lang_ext_kdl);
+    RUN_TEST_LANG(CBM_LANG_JSON5, lang_ext_json5);
+    RUN_TEST_LANG(CBM_LANG_JSONNET, lang_ext_jsonnet);
+    RUN_TEST_LANG(CBM_LANG_RON, lang_ext_ron);
+    RUN_TEST_LANG(CBM_LANG_THRIFT, lang_ext_thrift);
+    RUN_TEST_LANG(CBM_LANG_CAPNP, lang_ext_capnp);
+    RUN_TEST_LANG(CBM_LANG_PROPERTIES, lang_ext_properties);
+    RUN_TEST_LANG(CBM_LANG_BIBTEX, lang_ext_bibtex);
+    RUN_TEST_LANG(CBM_LANG_STARLARK, lang_ext_starlark);
+    RUN_TEST_LANG(CBM_LANG_BICEP, lang_ext_bicep);
+    RUN_TEST_LANG(CBM_LANG_CSV, lang_ext_csv);
+    RUN_TEST_LANG(CBM_LANG_HLSL, lang_ext_hlsl);
+    RUN_TEST_LANG(CBM_LANG_VHDL, lang_ext_vhdl);
+    RUN_TEST_LANG(CBM_LANG_DEVICETREE, lang_ext_devicetree);
+    RUN_TEST_LANG(CBM_LANG_LINKERSCRIPT, lang_ext_linkerscript);
+    RUN_TEST_LANG(CBM_LANG_GN, lang_ext_gn);
+    RUN_TEST_LANG(CBM_LANG_BITBAKE, lang_ext_bitbake);
+    RUN_TEST_LANG(CBM_LANG_SMALI, lang_ext_smali);
+    RUN_TEST_LANG(CBM_LANG_TABLEGEN, lang_ext_tablegen);
+    RUN_TEST_LANG(CBM_LANG_ISPC, lang_ext_ispc);
+    RUN_TEST_LANG(CBM_LANG_CAIRO, lang_ext_cairo);
+    RUN_TEST_LANG(CBM_LANG_MOVE, lang_ext_move);
+    RUN_TEST_LANG(CBM_LANG_SQUIRREL, lang_ext_squirrel);
+    RUN_TEST_LANG(CBM_LANG_FUNC, lang_ext_func);
+    RUN_TEST_LANG(CBM_LANG_RST, lang_ext_rst);
+    RUN_TEST_LANG(CBM_LANG_BEANCOUNT, lang_ext_beancount);
+    RUN_TEST_LANG(CBM_LANG_MERMAID, lang_ext_mermaid);
+    RUN_TEST_LANG(CBM_LANG_PUPPET, lang_ext_puppet);
+    RUN_TEST_LANG(CBM_LANG_PO, lang_ext_po);
+    RUN_TEST_LANG(CBM_LANG_SLANG, lang_ext_slang);
+    RUN_TEST_LANG(CBM_LANG_LLVM_IR, lang_ext_llvm);
+    RUN_TEST_LANG(CBM_LANG_SMITHY, lang_ext_smithy);
+    RUN_TEST_LANG(CBM_LANG_WIT, lang_ext_wit);
+    RUN_TEST_LANG(CBM_LANG_TLAPLUS, lang_ext_tlaplus);
+    RUN_TEST_LANG(CBM_LANG_PKL, lang_ext_pkl);
+    RUN_TEST_LANG(CBM_LANG_APEX, lang_ext_apex);
+    RUN_TEST_LANG(CBM_LANG_SOQL, lang_ext_soql);
+    RUN_TEST_LANG(CBM_LANG_SOSL, lang_ext_sosl);
 
     RUN_TEST(lang_all_have_names);
+    RUN_TEST(lang_tier1_matches_badbox);
 }

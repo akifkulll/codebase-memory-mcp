@@ -1063,72 +1063,72 @@ TEST(probe_gleam_imports_edge) {
 
 SUITE(grammar_probe_a) {
     /* Ada */
-    RUN_TEST(probe_ada_functions);
-    RUN_TEST(probe_ada_package_spec_nodes);
-    RUN_TEST(probe_ada_no_crash);
-    RUN_TEST(probe_ada_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_ADA, probe_ada_functions);
+    RUN_TEST_LANG(CBM_LANG_ADA, probe_ada_package_spec_nodes);
+    RUN_TEST_LANG(CBM_LANG_ADA, probe_ada_no_crash);
+    RUN_TEST_LANG(CBM_LANG_ADA, probe_ada_imports_edge);
 
     /* Awk */
-    RUN_TEST(probe_awk_functions);
-    RUN_TEST(probe_awk_three_functions);
-    RUN_TEST(probe_awk_no_type_nodes);
+    RUN_TEST_LANG(CBM_LANG_AWK, probe_awk_functions);
+    RUN_TEST_LANG(CBM_LANG_AWK, probe_awk_three_functions);
+    RUN_TEST_LANG(CBM_LANG_AWK, probe_awk_no_type_nodes);
 
     /* Cairo */
-    RUN_TEST(probe_cairo_functions);
-    RUN_TEST(probe_cairo_trait_or_type);
-    RUN_TEST(probe_cairo_three_functions);
+    RUN_TEST_LANG(CBM_LANG_CAIRO, probe_cairo_functions);
+    RUN_TEST_LANG(CBM_LANG_CAIRO, probe_cairo_trait_or_type);
+    RUN_TEST_LANG(CBM_LANG_CAIRO, probe_cairo_three_functions);
 
     /* Clojure */
-    RUN_TEST(probe_clojure_functions);
-    RUN_TEST(probe_clojure_defmulti);
-    RUN_TEST(probe_clojure_defrecord);
-    RUN_TEST(probe_clojure_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_CLOJURE, probe_clojure_functions);
+    RUN_TEST_LANG(CBM_LANG_CLOJURE, probe_clojure_defmulti);
+    RUN_TEST_LANG(CBM_LANG_CLOJURE, probe_clojure_defrecord);
+    RUN_TEST_LANG(CBM_LANG_CLOJURE, probe_clojure_imports_edge);
 
     /* Common Lisp */
-    RUN_TEST(probe_commonlisp_functions);
-    RUN_TEST(probe_commonlisp_defmacro);
-    RUN_TEST(probe_commonlisp_defstruct);
-    RUN_TEST(probe_commonlisp_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_COMMONLISP, probe_commonlisp_functions);
+    RUN_TEST_LANG(CBM_LANG_COMMONLISP, probe_commonlisp_defmacro);
+    RUN_TEST_LANG(CBM_LANG_COMMONLISP, probe_commonlisp_defstruct);
+    RUN_TEST_LANG(CBM_LANG_COMMONLISP, probe_commonlisp_imports_edge);
 
     /* Crystal */
-    RUN_TEST(probe_crystal_class_node);
-    RUN_TEST(probe_crystal_subclass_node);
-    RUN_TEST(probe_crystal_inherits_edge);
-    RUN_TEST(probe_crystal_module_node);
-    RUN_TEST(probe_crystal_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_CRYSTAL, probe_crystal_class_node);
+    RUN_TEST_LANG(CBM_LANG_CRYSTAL, probe_crystal_subclass_node);
+    RUN_TEST_LANG(CBM_LANG_CRYSTAL, probe_crystal_inherits_edge);
+    RUN_TEST_LANG(CBM_LANG_CRYSTAL, probe_crystal_module_node);
+    RUN_TEST_LANG(CBM_LANG_CRYSTAL, probe_crystal_imports_edge);
 
     /* D */
-    RUN_TEST(probe_d_functions);
-    RUN_TEST(probe_d_struct_node);
-    RUN_TEST(probe_d_class_inherits);
-    RUN_TEST(probe_d_interface_node);
-    RUN_TEST(probe_d_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_DLANG, probe_d_functions);
+    RUN_TEST_LANG(CBM_LANG_DLANG, probe_d_struct_node);
+    RUN_TEST_LANG(CBM_LANG_DLANG, probe_d_class_inherits);
+    RUN_TEST_LANG(CBM_LANG_DLANG, probe_d_interface_node);
+    RUN_TEST_LANG(CBM_LANG_DLANG, probe_d_imports_edge);
 
     /* Emacs Lisp */
-    RUN_TEST(probe_emacslisp_functions);
-    RUN_TEST(probe_emacslisp_defvar);
-    RUN_TEST(probe_emacslisp_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_EMACSLISP, probe_emacslisp_functions);
+    RUN_TEST_LANG(CBM_LANG_EMACSLISP, probe_emacslisp_defvar);
+    RUN_TEST_LANG(CBM_LANG_EMACSLISP, probe_emacslisp_imports_edge);
 
     /* Fennel */
-    RUN_TEST(probe_fennel_functions);
-    RUN_TEST(probe_fennel_lambda);
-    RUN_TEST(probe_fennel_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_FENNEL, probe_fennel_functions);
+    RUN_TEST_LANG(CBM_LANG_FENNEL, probe_fennel_lambda);
+    RUN_TEST_LANG(CBM_LANG_FENNEL, probe_fennel_imports_edge);
 
     /* Fish */
-    RUN_TEST(probe_fish_function_node);
-    RUN_TEST(probe_fish_two_functions);
-    RUN_TEST(probe_fish_no_type_nodes);
+    RUN_TEST_LANG(CBM_LANG_FISH, probe_fish_function_node);
+    RUN_TEST_LANG(CBM_LANG_FISH, probe_fish_two_functions);
+    RUN_TEST_LANG(CBM_LANG_FISH, probe_fish_no_type_nodes);
 
     /* F# */
-    RUN_TEST(probe_fsharp_functions);
-    RUN_TEST(probe_fsharp_record_type);
-    RUN_TEST(probe_fsharp_discriminated_union);
-    RUN_TEST(probe_fsharp_class_inherits);
-    RUN_TEST(probe_fsharp_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_FSHARP, probe_fsharp_functions);
+    RUN_TEST_LANG(CBM_LANG_FSHARP, probe_fsharp_record_type);
+    RUN_TEST_LANG(CBM_LANG_FSHARP, probe_fsharp_discriminated_union);
+    RUN_TEST_LANG(CBM_LANG_FSHARP, probe_fsharp_class_inherits);
+    RUN_TEST_LANG(CBM_LANG_FSHARP, probe_fsharp_imports_edge);
 
     /* Gleam */
-    RUN_TEST(probe_gleam_functions);
-    RUN_TEST(probe_gleam_private_function);
-    RUN_TEST(probe_gleam_custom_type);
-    RUN_TEST(probe_gleam_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_GLEAM, probe_gleam_functions);
+    RUN_TEST_LANG(CBM_LANG_GLEAM, probe_gleam_private_function);
+    RUN_TEST_LANG(CBM_LANG_GLEAM, probe_gleam_custom_type);
+    RUN_TEST_LANG(CBM_LANG_GLEAM, probe_gleam_imports_edge);
 }

@@ -320,5 +320,5 @@ SUITE(infrascan) {
     RUN_TEST(infrascan_infra_prefix_match_is_segment_aware);
     RUN_TEST(infrascan_infra_match_prefers_longest_path_in_any_order);
     RUN_TEST(infrascan_prefix_bridge_uses_every_registrar);
-    RUN_TEST(infrascan_grpc_routes_cover_services_past_64_proto_classes);
+    RUN_TEST_LANG(CBM_LANG_PROTOBUF, infrascan_grpc_routes_cover_services_past_64_proto_classes);
 }

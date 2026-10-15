@@ -1125,52 +1125,52 @@ TEST(rescript_imports_edge) {
 
 SUITE(grammar_probe_b) {
     /* ── GLSL (3 cases) ── */
-    RUN_TEST(glsl_function_nodes);
-    RUN_TEST(glsl_struct_node);
-    RUN_TEST(glsl_vertex_shader_functions);
+    RUN_TEST_LANG(CBM_LANG_GLSL, glsl_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_GLSL, glsl_struct_node);
+    RUN_TEST_LANG(CBM_LANG_GLSL, glsl_vertex_shader_functions);
 
     /* ── Hare (3 cases) ── */
-    RUN_TEST(hare_function_nodes);
-    RUN_TEST(hare_struct_node);
-    RUN_TEST(hare_use_import_extracted);
+    RUN_TEST_LANG(CBM_LANG_HARE, hare_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_HARE, hare_struct_node);
+    RUN_TEST_LANG(CBM_LANG_HARE, hare_use_import_extracted);
 
     /* ── HLSL (3 cases) ── */
-    RUN_TEST(hlsl_function_nodes);
-    RUN_TEST(hlsl_struct_node);
-    RUN_TEST(hlsl_compute_shader_function);
+    RUN_TEST_LANG(CBM_LANG_HLSL, hlsl_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_HLSL, hlsl_struct_node);
+    RUN_TEST_LANG(CBM_LANG_HLSL, hlsl_compute_shader_function);
 
     /* ── ISPC (3 cases) ── */
-    RUN_TEST(ispc_function_nodes);
-    RUN_TEST(ispc_struct_node);
-    RUN_TEST(ispc_task_function);
+    RUN_TEST_LANG(CBM_LANG_ISPC, ispc_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_ISPC, ispc_struct_node);
+    RUN_TEST_LANG(CBM_LANG_ISPC, ispc_task_function);
 
     /* ── Julia (5 cases) ── */
-    RUN_TEST(julia_function_and_struct_nodes);
-    RUN_TEST(julia_using_import_extracted);
-    RUN_TEST(julia_import_extracted);
-    RUN_TEST(julia_abstract_subtype_extracted);
-    RUN_TEST(julia_inherits_edge);
+    RUN_TEST_LANG(CBM_LANG_JULIA, julia_function_and_struct_nodes);
+    RUN_TEST_LANG(CBM_LANG_JULIA, julia_using_import_extracted);
+    RUN_TEST_LANG(CBM_LANG_JULIA, julia_import_extracted);
+    RUN_TEST_LANG(CBM_LANG_JULIA, julia_abstract_subtype_extracted);
+    RUN_TEST_LANG(CBM_LANG_JULIA, julia_inherits_edge);
 
     /* ── Luau (3 cases) ── */
-    RUN_TEST(luau_function_nodes);
-    RUN_TEST(luau_type_nodes);
-    RUN_TEST(luau_class_style_functions);
+    RUN_TEST_LANG(CBM_LANG_LUAU, luau_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_LUAU, luau_type_nodes);
+    RUN_TEST_LANG(CBM_LANG_LUAU, luau_class_style_functions);
 
     /* ── MATLAB (2 cases) ── */
-    RUN_TEST(matlab_function_nodes);
-    RUN_TEST(matlab_multiple_functions);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, matlab_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, matlab_multiple_functions);
 
     /* ── Odin (3 cases) ── */
-    RUN_TEST(odin_proc_nodes);
-    RUN_TEST(odin_struct_node);
-    RUN_TEST(odin_import_extracted);
+    RUN_TEST_LANG(CBM_LANG_ODIN, odin_proc_nodes);
+    RUN_TEST_LANG(CBM_LANG_ODIN, odin_struct_node);
+    RUN_TEST_LANG(CBM_LANG_ODIN, odin_import_extracted);
 
     /* ── Pascal (5 cases) ── */
-    RUN_TEST(pascal_function_nodes);
-    RUN_TEST(pascal_record_node);
-    RUN_TEST(pascal_uses_import_extracted);
-    RUN_TEST(pascal_class_inheritance_extracted);
-    RUN_TEST(pascal_inherits_edge);
+    RUN_TEST_LANG(CBM_LANG_PASCAL, pascal_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_PASCAL, pascal_record_node);
+    RUN_TEST_LANG(CBM_LANG_PASCAL, pascal_uses_import_extracted);
+    RUN_TEST_LANG(CBM_LANG_PASCAL, pascal_class_inheritance_extracted);
+    RUN_TEST_LANG(CBM_LANG_PASCAL, pascal_inherits_edge);
 
     /* ── PowerShell (5 cases) ── */
     RUN_TEST(powershell_function_nodes);
@@ -1180,14 +1180,14 @@ SUITE(grammar_probe_b) {
     RUN_TEST(powershell_inherits_edge);
 
     /* ── Racket (4 cases) ── */
-    RUN_TEST(racket_function_nodes);
-    RUN_TEST(racket_struct_node);
-    RUN_TEST(racket_require_import_extracted);
-    RUN_TEST(racket_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_RACKET, racket_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_RACKET, racket_struct_node);
+    RUN_TEST_LANG(CBM_LANG_RACKET, racket_require_import_extracted);
+    RUN_TEST_LANG(CBM_LANG_RACKET, racket_imports_edge);
 
     /* ── ReScript (4 cases) ── */
-    RUN_TEST(rescript_function_nodes);
-    RUN_TEST(rescript_type_node);
-    RUN_TEST(rescript_open_import_extracted);
-    RUN_TEST(rescript_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_RESCRIPT, rescript_function_nodes);
+    RUN_TEST_LANG(CBM_LANG_RESCRIPT, rescript_type_node);
+    RUN_TEST_LANG(CBM_LANG_RESCRIPT, rescript_open_import_extracted);
+    RUN_TEST_LANG(CBM_LANG_RESCRIPT, rescript_imports_edge);
 }

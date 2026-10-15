@@ -648,9 +648,23 @@ The result is a knowledge graph accurate enough to drive `trace_path` across pac
 
 ## Language Support
 
-158 languages, all parsed via vendored tree-sitter grammars compiled into the binary. Benchmarked against 64 real open-source repositories (78 to 49K nodes):
+158 languages, all parsed via vendored tree-sitter grammars compiled into the binary.
 
-| Tier | Score | Languages |
+### Support tiers
+
+Every language is grouped into a support tier. Tiers are labels: all languages index the same way.
+
+| Tier | Meaning | Languages |
+|------|---------|-----------|
+| **Tier 1** | Shared with [Badbox](https://github.com/octacity-org/badbox). The default test suite covers these. | Bash, C, C++, C#, CSS, Dart, Elixir, Go, Haskell, HCL, HTML, Java, JavaScript, JSON, Kotlin, Lua, Markdown, Nix, PHP, PowerShell, Python, Ruby, Rust, Scala, Solidity, Swift, TSX, TypeScript, YAML, Zig |
+| **Tier 2** | Other mainstream languages and build/config formats. Tests run with `CBM_TEST_TIERS=2`. | OCaml, Objective-C, Perl, Groovy, Erlang, R, SCSS, TOML, SQL, Dockerfile, Clojure, F#, Julia, CUDA, Fortran, MATLAB, XML, Makefile, CMake, Protobuf, GraphQL, Vue, Svelte, Go module, Kustomize, Kubernetes manifests |
+| **Tier 3** | Every other language. Tests run with `CBM_TEST_TIERS=all`. | The rest of the languages listed below |
+
+### Benchmark results
+
+Benchmarked against 64 real open-source repositories (78 to 49K nodes):
+
+| Band | Score | Languages |
 |------|-------|-----------|
 | **Excellent** (>= 90%) | | Lua, Kotlin, C++, Perl, Objective-C, Groovy, C, Bash, Zig, Swift, CSS, YAML, TOML, HTML, SCSS, HCL, Dockerfile |
 | **Good** (75-89%) | | Python, TypeScript, TSX, Go, Rust, Java, R, Dart, JavaScript, Erlang, Elixir, Scala, Ruby, PHP, C#, SQL |

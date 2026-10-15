@@ -1782,127 +1782,127 @@ TEST(probe_wolfram_no_type_nodes) {
 
 SUITE(grammar_probe_d) {
     /* Agda (.agda) */
-    RUN_TEST(probe_agda_function);
-    RUN_TEST(probe_agda_data_type);
-    RUN_TEST(probe_agda_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_AGDA, probe_agda_function);
+    RUN_TEST_LANG(CBM_LANG_AGDA, probe_agda_data_type);
+    RUN_TEST_LANG(CBM_LANG_AGDA, probe_agda_imports_edge);
 
     /* Assembly (.s) */
-    RUN_TEST(probe_assembly_label_function);
-    RUN_TEST(probe_assembly_multiple_labels);
-    RUN_TEST(probe_assembly_no_type_nodes);
+    RUN_TEST_LANG(CBM_LANG_ASSEMBLY, probe_assembly_label_function);
+    RUN_TEST_LANG(CBM_LANG_ASSEMBLY, probe_assembly_multiple_labels);
+    RUN_TEST_LANG(CBM_LANG_ASSEMBLY, probe_assembly_no_type_nodes);
 
     /* Bicep (.bicep) */
-    RUN_TEST(probe_bicep_function);
-    RUN_TEST(probe_bicep_resource_node);
-    RUN_TEST(probe_bicep_module_import);
+    RUN_TEST_LANG(CBM_LANG_BICEP, probe_bicep_function);
+    RUN_TEST_LANG(CBM_LANG_BICEP, probe_bicep_resource_node);
+    RUN_TEST_LANG(CBM_LANG_BICEP, probe_bicep_module_import);
 
     /* CFML (.cfm) */
-    RUN_TEST(probe_cfml_function_tag);
-    RUN_TEST(probe_cfml_two_functions);
-    RUN_TEST(probe_cfml_no_type_nodes);
+    RUN_TEST_LANG(CBM_LANG_CFML, probe_cfml_function_tag);
+    RUN_TEST_LANG(CBM_LANG_CFML, probe_cfml_two_functions);
+    RUN_TEST_LANG(CBM_LANG_CFML, probe_cfml_no_type_nodes);
 
     /* CFScript (.cfc) */
-    RUN_TEST(probe_cfscript_functions);
-    RUN_TEST(probe_cfscript_no_import_edges);
+    RUN_TEST_LANG(CBM_LANG_CFSCRIPT, probe_cfscript_functions);
+    RUN_TEST_LANG(CBM_LANG_CFSCRIPT, probe_cfscript_no_import_edges);
 
     /* COBOL (.cob) */
-    RUN_TEST(probe_cobol_program_node);
-    RUN_TEST(probe_cobol_no_crash);
+    RUN_TEST_LANG(CBM_LANG_COBOL, probe_cobol_program_node);
+    RUN_TEST_LANG(CBM_LANG_COBOL, probe_cobol_no_crash);
 
     /* Elm (.elm) */
-    RUN_TEST(probe_elm_function);
-    RUN_TEST(probe_elm_type_alias);
-    RUN_TEST(probe_elm_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_ELM, probe_elm_function);
+    RUN_TEST_LANG(CBM_LANG_ELM, probe_elm_type_alias);
+    RUN_TEST_LANG(CBM_LANG_ELM, probe_elm_imports_edge);
 
     /* FunC (.fc) */
-    RUN_TEST(probe_func_function);
-    RUN_TEST(probe_func_imports_edge);
-    RUN_TEST(probe_func_no_type_nodes);
+    RUN_TEST_LANG(CBM_LANG_FUNC, probe_func_function);
+    RUN_TEST_LANG(CBM_LANG_FUNC, probe_func_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_FUNC, probe_func_no_type_nodes);
 
     /* Janet (.janet) */
-    RUN_TEST(probe_janet_no_crash);
-    RUN_TEST(probe_janet_function_extraction_gap);
+    RUN_TEST_LANG(CBM_LANG_JANET, probe_janet_no_crash);
+    RUN_TEST_LANG(CBM_LANG_JANET, probe_janet_function_extraction_gap);
 
     /* Lean (.lean) */
-    RUN_TEST(probe_lean_def_functions);
-    RUN_TEST(probe_lean_theorem);
-    RUN_TEST(probe_lean_structure_type);
-    RUN_TEST(probe_lean_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_LEAN, probe_lean_def_functions);
+    RUN_TEST_LANG(CBM_LANG_LEAN, probe_lean_theorem);
+    RUN_TEST_LANG(CBM_LANG_LEAN, probe_lean_structure_type);
+    RUN_TEST_LANG(CBM_LANG_LEAN, probe_lean_imports_edge);
 
     /* LLVM IR (.ll) */
-    RUN_TEST(probe_llvmir_function);
-    RUN_TEST(probe_llvmir_two_functions);
-    RUN_TEST(probe_llvmir_no_type_nodes);
+    RUN_TEST_LANG(CBM_LANG_LLVM_IR, probe_llvmir_function);
+    RUN_TEST_LANG(CBM_LANG_LLVM_IR, probe_llvmir_two_functions);
+    RUN_TEST_LANG(CBM_LANG_LLVM_IR, probe_llvmir_no_type_nodes);
 
     /* Magma (.mag) */
-    RUN_TEST(probe_magma_function);
-    RUN_TEST(probe_magma_procedure);
-    RUN_TEST(probe_magma_no_type_nodes);
+    RUN_TEST_LANG(CBM_LANG_MAGMA, probe_magma_function);
+    RUN_TEST_LANG(CBM_LANG_MAGMA, probe_magma_procedure);
+    RUN_TEST_LANG(CBM_LANG_MAGMA, probe_magma_no_type_nodes);
 
     /* Move (.move) */
-    RUN_TEST(probe_move_function);
-    RUN_TEST(probe_move_imports_edge);
-    RUN_TEST(probe_move_struct_not_extracted);
+    RUN_TEST_LANG(CBM_LANG_MOVE, probe_move_function);
+    RUN_TEST_LANG(CBM_LANG_MOVE, probe_move_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_MOVE, probe_move_struct_not_extracted);
 
     /* NASM (.nasm) */
-    RUN_TEST(probe_nasm_label_function);
-    RUN_TEST(probe_nasm_struc_node);
-    RUN_TEST(probe_nasm_include_edge);
+    RUN_TEST_LANG(CBM_LANG_NASM, probe_nasm_label_function);
+    RUN_TEST_LANG(CBM_LANG_NASM, probe_nasm_struc_node);
+    RUN_TEST_LANG(CBM_LANG_NASM, probe_nasm_include_edge);
 
     /* Objective-C (.m with ObjC markers) */
-    RUN_TEST(probe_objc_class_node);
-    RUN_TEST(probe_objc_method_nodes);
-    RUN_TEST(probe_objc_inherits_edge);
-    RUN_TEST(probe_objc_import_edge);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, probe_objc_class_node);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, probe_objc_method_nodes);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, probe_objc_inherits_edge);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, probe_objc_import_edge);
 
     /* Pony (.pony) */
-    RUN_TEST(probe_pony_class_node);
-    RUN_TEST(probe_pony_actor_node);
-    RUN_TEST(probe_pony_method_nodes);
-    RUN_TEST(probe_pony_trait_node);
-    RUN_TEST(probe_pony_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_PONY, probe_pony_class_node);
+    RUN_TEST_LANG(CBM_LANG_PONY, probe_pony_actor_node);
+    RUN_TEST_LANG(CBM_LANG_PONY, probe_pony_method_nodes);
+    RUN_TEST_LANG(CBM_LANG_PONY, probe_pony_trait_node);
+    RUN_TEST_LANG(CBM_LANG_PONY, probe_pony_imports_edge);
 
     /* PureScript (.purs) */
-    RUN_TEST(probe_purescript_function);
-    RUN_TEST(probe_purescript_data_type);
-    RUN_TEST(probe_purescript_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_PURESCRIPT, probe_purescript_function);
+    RUN_TEST_LANG(CBM_LANG_PURESCRIPT, probe_purescript_data_type);
+    RUN_TEST_LANG(CBM_LANG_PURESCRIPT, probe_purescript_imports_edge);
 
     /* Pine Script (.pine) */
-    RUN_TEST(probe_pine_function);
-    RUN_TEST(probe_pine_type_node);
+    RUN_TEST_LANG(CBM_LANG_PINE, probe_pine_function);
+    RUN_TEST_LANG(CBM_LANG_PINE, probe_pine_type_node);
 
     /* QML (.qml) */
-    RUN_TEST(probe_qml_function);
-    RUN_TEST(probe_qml_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_QML, probe_qml_function);
+    RUN_TEST_LANG(CBM_LANG_QML, probe_qml_imports_edge);
 
     /* Smali (.smali) */
-    RUN_TEST(probe_smali_class_node);
-    RUN_TEST(probe_smali_method_node);
-    RUN_TEST(probe_smali_super_import);
+    RUN_TEST_LANG(CBM_LANG_SMALI, probe_smali_class_node);
+    RUN_TEST_LANG(CBM_LANG_SMALI, probe_smali_method_node);
+    RUN_TEST_LANG(CBM_LANG_SMALI, probe_smali_super_import);
 
     /* TableGen (.td) */
-    RUN_TEST(probe_tablegen_def_node);
-    RUN_TEST(probe_tablegen_class_node);
-    RUN_TEST(probe_tablegen_include_edge);
+    RUN_TEST_LANG(CBM_LANG_TABLEGEN, probe_tablegen_def_node);
+    RUN_TEST_LANG(CBM_LANG_TABLEGEN, probe_tablegen_class_node);
+    RUN_TEST_LANG(CBM_LANG_TABLEGEN, probe_tablegen_include_edge);
 
     /* TLA+ (.tla) */
-    RUN_TEST(probe_tlaplus_operator);
-    RUN_TEST(probe_tlaplus_extends_edge);
-    RUN_TEST(probe_tlaplus_no_type_nodes);
+    RUN_TEST_LANG(CBM_LANG_TLAPLUS, probe_tlaplus_operator);
+    RUN_TEST_LANG(CBM_LANG_TLAPLUS, probe_tlaplus_extends_edge);
+    RUN_TEST_LANG(CBM_LANG_TLAPLUS, probe_tlaplus_no_type_nodes);
 
     /* Verilog (.v — also covers .sv routed as CBM_LANG_VERILOG) */
-    RUN_TEST(probe_verilog_module_node);
-    RUN_TEST(probe_verilog_function);
-    RUN_TEST(probe_verilog_sv_extension);
+    RUN_TEST_LANG(CBM_LANG_VERILOG, probe_verilog_module_node);
+    RUN_TEST_LANG(CBM_LANG_VERILOG, probe_verilog_function);
+    RUN_TEST_LANG(CBM_LANG_VERILOG, probe_verilog_sv_extension);
 
     /* VHDL (.vhd) */
-    RUN_TEST(probe_vhdl_entity_node);
-    RUN_TEST(probe_vhdl_subprogram);
-    RUN_TEST(probe_vhdl_use_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_VHDL, probe_vhdl_entity_node);
+    RUN_TEST_LANG(CBM_LANG_VHDL, probe_vhdl_subprogram);
+    RUN_TEST_LANG(CBM_LANG_VHDL, probe_vhdl_use_imports_edge);
 
     /* Wolfram (.wl) */
-    RUN_TEST(probe_wolfram_function);
-    RUN_TEST(probe_wolfram_set_definition);
-    RUN_TEST(probe_wolfram_get_import);
-    RUN_TEST(probe_wolfram_no_type_nodes);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, probe_wolfram_function);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, probe_wolfram_set_definition);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, probe_wolfram_get_import);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, probe_wolfram_no_type_nodes);
 }

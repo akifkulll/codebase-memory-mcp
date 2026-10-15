@@ -1419,90 +1419,90 @@ TEST(probe_jsdoc_no_function_or_type_nodes) {
 
 SUITE(grammar_probe_e) {
     /* Protobuf (4 cases) */
-    RUN_TEST(probe_proto_message_node);
-    RUN_TEST(probe_proto_service_node);
-    RUN_TEST(probe_proto_enum_node);
-    RUN_TEST(probe_proto_import_edge);
+    RUN_TEST_LANG(CBM_LANG_PROTOBUF, probe_proto_message_node);
+    RUN_TEST_LANG(CBM_LANG_PROTOBUF, probe_proto_service_node);
+    RUN_TEST_LANG(CBM_LANG_PROTOBUF, probe_proto_enum_node);
+    RUN_TEST_LANG(CBM_LANG_PROTOBUF, probe_proto_import_edge);
 
     /* Thrift (4 cases) */
-    RUN_TEST(probe_thrift_service_function);
-    RUN_TEST(probe_thrift_struct_node);
-    RUN_TEST(probe_thrift_exception_node);
-    RUN_TEST(probe_thrift_include_edge);
+    RUN_TEST_LANG(CBM_LANG_THRIFT, probe_thrift_service_function);
+    RUN_TEST_LANG(CBM_LANG_THRIFT, probe_thrift_struct_node);
+    RUN_TEST_LANG(CBM_LANG_THRIFT, probe_thrift_exception_node);
+    RUN_TEST_LANG(CBM_LANG_THRIFT, probe_thrift_include_edge);
 
     /* Cap'n Proto (4 cases) */
-    RUN_TEST(probe_capnp_struct_node);
-    RUN_TEST(probe_capnp_interface_node);
-    RUN_TEST(probe_capnp_enum_node);
-    RUN_TEST(probe_capnp_import_edge);
+    RUN_TEST_LANG(CBM_LANG_CAPNP, probe_capnp_struct_node);
+    RUN_TEST_LANG(CBM_LANG_CAPNP, probe_capnp_interface_node);
+    RUN_TEST_LANG(CBM_LANG_CAPNP, probe_capnp_enum_node);
+    RUN_TEST_LANG(CBM_LANG_CAPNP, probe_capnp_import_edge);
 
     /* WIT (5 cases) */
-    RUN_TEST(probe_wit_record_enum_function);
-    RUN_TEST(probe_wit_world_node);
-    RUN_TEST(probe_wit_type_alias);
-    RUN_TEST(probe_wit_variant_node);
-    RUN_TEST(probe_wit_use_edge);
+    RUN_TEST_LANG(CBM_LANG_WIT, probe_wit_record_enum_function);
+    RUN_TEST_LANG(CBM_LANG_WIT, probe_wit_world_node);
+    RUN_TEST_LANG(CBM_LANG_WIT, probe_wit_type_alias);
+    RUN_TEST_LANG(CBM_LANG_WIT, probe_wit_variant_node);
+    RUN_TEST_LANG(CBM_LANG_WIT, probe_wit_use_edge);
 
     /* Smithy (4 cases) */
-    RUN_TEST(probe_smithy_structure_node);
-    RUN_TEST(probe_smithy_service_node);
-    RUN_TEST(probe_smithy_enum_node);
-    RUN_TEST(probe_smithy_use_edge);
+    RUN_TEST_LANG(CBM_LANG_SMITHY, probe_smithy_structure_node);
+    RUN_TEST_LANG(CBM_LANG_SMITHY, probe_smithy_service_node);
+    RUN_TEST_LANG(CBM_LANG_SMITHY, probe_smithy_enum_node);
+    RUN_TEST_LANG(CBM_LANG_SMITHY, probe_smithy_use_edge);
 
     /* Prisma (4 cases) */
-    RUN_TEST(probe_prisma_model_node);
-    RUN_TEST(probe_prisma_multiple_models);
-    RUN_TEST(probe_prisma_enum_node);
-    RUN_TEST(probe_prisma_datasource_only);
+    RUN_TEST_LANG(CBM_LANG_PRISMA, probe_prisma_model_node);
+    RUN_TEST_LANG(CBM_LANG_PRISMA, probe_prisma_multiple_models);
+    RUN_TEST_LANG(CBM_LANG_PRISMA, probe_prisma_enum_node);
+    RUN_TEST_LANG(CBM_LANG_PRISMA, probe_prisma_datasource_only);
 
     /* GraphQL (4 cases) */
-    RUN_TEST(probe_graphql_type_node);
-    RUN_TEST(probe_graphql_multiple_types);
-    RUN_TEST(probe_graphql_interface_node);
-    RUN_TEST(probe_graphql_input_type);
+    RUN_TEST_LANG(CBM_LANG_GRAPHQL, probe_graphql_type_node);
+    RUN_TEST_LANG(CBM_LANG_GRAPHQL, probe_graphql_multiple_types);
+    RUN_TEST_LANG(CBM_LANG_GRAPHQL, probe_graphql_interface_node);
+    RUN_TEST_LANG(CBM_LANG_GRAPHQL, probe_graphql_input_type);
 
     /* Vue (3 cases) */
-    RUN_TEST(probe_vue_no_crash);
-    RUN_TEST(probe_vue_script_imports);
-    RUN_TEST(probe_vue_cross_component_import);
+    RUN_TEST_LANG(CBM_LANG_VUE, probe_vue_no_crash);
+    RUN_TEST_LANG(CBM_LANG_VUE, probe_vue_script_imports);
+    RUN_TEST_LANG(CBM_LANG_VUE, probe_vue_cross_component_import);
 
     /* Svelte (3 cases) */
-    RUN_TEST(probe_svelte_no_crash);
-    RUN_TEST(probe_svelte_script_imports);
-    RUN_TEST(probe_svelte_cross_component_import);
+    RUN_TEST_LANG(CBM_LANG_SVELTE, probe_svelte_no_crash);
+    RUN_TEST_LANG(CBM_LANG_SVELTE, probe_svelte_script_imports);
+    RUN_TEST_LANG(CBM_LANG_SVELTE, probe_svelte_cross_component_import);
 
     /* Astro (3 cases) */
-    RUN_TEST(probe_astro_no_crash);
-    RUN_TEST(probe_astro_frontmatter_imports);
-    RUN_TEST(probe_astro_cross_component_import);
+    RUN_TEST_LANG(CBM_LANG_ASTRO, probe_astro_no_crash);
+    RUN_TEST_LANG(CBM_LANG_ASTRO, probe_astro_frontmatter_imports);
+    RUN_TEST_LANG(CBM_LANG_ASTRO, probe_astro_cross_component_import);
 
     /* Blade (3 cases) */
-    RUN_TEST(probe_blade_no_crash);
-    RUN_TEST(probe_blade_include_no_imports_edge);
-    RUN_TEST(probe_blade_directives_no_crash);
+    RUN_TEST_LANG(CBM_LANG_BLADE, probe_blade_no_crash);
+    RUN_TEST_LANG(CBM_LANG_BLADE, probe_blade_include_no_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_BLADE, probe_blade_directives_no_crash);
 
     /* Liquid (3 cases) */
-    RUN_TEST(probe_liquid_no_crash);
-    RUN_TEST(probe_liquid_loop_and_filters);
-    RUN_TEST(probe_liquid_render_no_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_LIQUID, probe_liquid_no_crash);
+    RUN_TEST_LANG(CBM_LANG_LIQUID, probe_liquid_loop_and_filters);
+    RUN_TEST_LANG(CBM_LANG_LIQUID, probe_liquid_render_no_imports_edge);
 
     /* Jinja2 (3 cases) */
-    RUN_TEST(probe_jinja2_no_crash_j2);
-    RUN_TEST(probe_jinja2_extends_no_imports_edge);
-    RUN_TEST(probe_jinja2_macro_no_crash);
+    RUN_TEST_LANG(CBM_LANG_JINJA2, probe_jinja2_no_crash_j2);
+    RUN_TEST_LANG(CBM_LANG_JINJA2, probe_jinja2_extends_no_imports_edge);
+    RUN_TEST_LANG(CBM_LANG_JINJA2, probe_jinja2_macro_no_crash);
 
     /* Go Template (3 cases) */
-    RUN_TEST(probe_gotemplate_no_crash_gotmpl);
-    RUN_TEST(probe_gotemplate_helm_tpl);
-    RUN_TEST(probe_gotemplate_template_call_no_imports);
+    RUN_TEST_LANG(CBM_LANG_GOTEMPLATE, probe_gotemplate_no_crash_gotmpl);
+    RUN_TEST_LANG(CBM_LANG_GOTEMPLATE, probe_gotemplate_helm_tpl);
+    RUN_TEST_LANG(CBM_LANG_GOTEMPLATE, probe_gotemplate_template_call_no_imports);
 
     /* Mermaid (3 cases) */
-    RUN_TEST(probe_mermaid_flowchart_no_crash);
-    RUN_TEST(probe_mermaid_sequence_no_crash);
-    RUN_TEST(probe_mermaid_er_diagram_no_crash);
+    RUN_TEST_LANG(CBM_LANG_MERMAID, probe_mermaid_flowchart_no_crash);
+    RUN_TEST_LANG(CBM_LANG_MERMAID, probe_mermaid_sequence_no_crash);
+    RUN_TEST_LANG(CBM_LANG_MERMAID, probe_mermaid_er_diagram_no_crash);
 
     /* JSDoc (3 cases) */
-    RUN_TEST(probe_jsdoc_params_no_crash);
-    RUN_TEST(probe_jsdoc_module_typedef_no_crash);
-    RUN_TEST(probe_jsdoc_no_function_or_type_nodes);
+    RUN_TEST_LANG(CBM_LANG_JSDOC, probe_jsdoc_params_no_crash);
+    RUN_TEST_LANG(CBM_LANG_JSDOC, probe_jsdoc_module_typedef_no_crash);
+    RUN_TEST_LANG(CBM_LANG_JSDOC, probe_jsdoc_no_function_or_type_nodes);
 }

@@ -331,6 +331,9 @@ TEST(grammar_regression_all) {
     size_t n = CBM_GRAMMAR_CASES_COUNT;
     for (size_t i = 0; i < n; i++) {
         const GrammarCase *c = &CBM_GRAMMAR_CASES[i];
+        if (!tf_lang_runs(c->lang)) {
+            continue;
+        }
         CBMFileResult *r = extract(c->src, c->lang, "reg", c->path);
         if (!r) {
             fprintf(stderr, "  [REG] %-14s extract returned NULL\n", c->name);

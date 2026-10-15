@@ -930,6 +930,76 @@ const char *cbm_language_name(CBMLanguage lang) {
     return LANG_NAMES[lang] ? LANG_NAMES[lang] : "Unknown";
 }
 
+int cbm_language_tier(CBMLanguage lang) {
+    if (lang < 0 || lang >= CBM_LANG_COUNT) {
+        return 0;
+    }
+    switch (lang) {
+    /* Tier 1: shared with octacity-org/badbox. */
+    case CBM_LANG_BASH:
+    case CBM_LANG_C:
+    case CBM_LANG_CPP:
+    case CBM_LANG_CSHARP:
+    case CBM_LANG_CSS:
+    case CBM_LANG_DART:
+    case CBM_LANG_ELIXIR:
+    case CBM_LANG_GO:
+    case CBM_LANG_HASKELL:
+    case CBM_LANG_HCL:
+    case CBM_LANG_HTML:
+    case CBM_LANG_JAVA:
+    case CBM_LANG_JAVASCRIPT:
+    case CBM_LANG_JSON:
+    case CBM_LANG_KOTLIN:
+    case CBM_LANG_LUA:
+    case CBM_LANG_MARKDOWN:
+    case CBM_LANG_NIX:
+    case CBM_LANG_PHP:
+    case CBM_LANG_POWERSHELL:
+    case CBM_LANG_PYTHON:
+    case CBM_LANG_RUBY:
+    case CBM_LANG_RUST:
+    case CBM_LANG_SCALA:
+    case CBM_LANG_SOLIDITY:
+    case CBM_LANG_SWIFT:
+    case CBM_LANG_TSX:
+    case CBM_LANG_TYPESCRIPT:
+    case CBM_LANG_YAML:
+    case CBM_LANG_ZIG:
+        return 1;
+    /* Tier 2: other mainstream languages and build/config formats. */
+    case CBM_LANG_OCAML:
+    case CBM_LANG_OBJC:
+    case CBM_LANG_PERL:
+    case CBM_LANG_GROOVY:
+    case CBM_LANG_ERLANG:
+    case CBM_LANG_R:
+    case CBM_LANG_SCSS:
+    case CBM_LANG_TOML:
+    case CBM_LANG_SQL:
+    case CBM_LANG_DOCKERFILE:
+    case CBM_LANG_CLOJURE:
+    case CBM_LANG_FSHARP:
+    case CBM_LANG_JULIA:
+    case CBM_LANG_CUDA:
+    case CBM_LANG_FORTRAN:
+    case CBM_LANG_MATLAB:
+    case CBM_LANG_XML:
+    case CBM_LANG_MAKEFILE:
+    case CBM_LANG_CMAKE:
+    case CBM_LANG_PROTOBUF:
+    case CBM_LANG_GRAPHQL:
+    case CBM_LANG_VUE:
+    case CBM_LANG_SVELTE:
+    case CBM_LANG_GOMOD:
+    case CBM_LANG_KUSTOMIZE:
+    case CBM_LANG_K8S:
+        return 2;
+    default:
+        return 3;
+    }
+}
+
 /* ── Shebang interpreter detection (extensionless scripts) ────────── */
 
 /* Basename of an interpreter path: the segment after the last '/'.  Shebangs

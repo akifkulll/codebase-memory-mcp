@@ -26,7 +26,11 @@ The binary is output to `build/c/codebase-memory-mcp`.
 scripts/test.sh
 ```
 
-This builds with ASan + UBSan and runs all tests (~2040 cases). Key test files:
+This builds with ASan + UBSan and runs the test suite. By default the suite runs only tests for
+tier-1 languages (see "Support tiers" in the README). Set `CBM_TEST_TIERS=2` to add tier 2, or
+`CBM_TEST_TIERS=all` to run every tier; the summary line reports how many tests were left out.
+
+Key test files:
 - `tests/test_pipeline.c` — pipeline integration tests
 - `tests/test_httplink.c` — HTTP route extraction and linking
 - `tests/test_mcp.c` — MCP protocol and tool handler tests
@@ -82,6 +86,10 @@ Language support is split between two layers:
 3. Check parity tests: `internal/cbm/regression_test.go` (legacy, being migrated)
 4. Add a test case in `tests/test_pipeline.c` for integration-level fixes
 5. Verify with a real open-source repo
+
+A language's tier comes from `cbm_language_tier()` in `src/discover/language.c`. Register a test
+that exercises one tier-2 or tier-3 language with `RUN_TEST_LANG(CBM_LANG_<LANG>, name)` instead of
+`RUN_TEST(name)`, and skip such rows in table-driven tests with `if (!tf_lang_runs(lang)) continue;`.
 
 ### Infrastructure Languages (Infra-Pass Pattern)
 

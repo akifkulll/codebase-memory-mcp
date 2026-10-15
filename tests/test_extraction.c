@@ -5274,9 +5274,9 @@ SUITE(extraction) {
     RUN_TEST(extract_wide_flat_file_is_linear);
 
     /* Perl call-graph noise (#459 follow-up) */
-    RUN_TEST(extract_perl_config_string_not_a_callee);
-    RUN_TEST(extract_perl_builtin_call_is_function_not_method);
-    RUN_TEST(extract_perl_method_call_flags_is_method);
+    RUN_TEST_LANG(CBM_LANG_PERL, extract_perl_config_string_not_a_callee);
+    RUN_TEST_LANG(CBM_LANG_PERL, extract_perl_builtin_call_is_function_not_method);
+    RUN_TEST_LANG(CBM_LANG_PERL, extract_perl_method_call_flags_is_method);
     RUN_TEST(extract_flag_exempt_method_call_not_flagged_is_method);
     RUN_TEST(extract_python_member_call_flags_is_method);
     RUN_TEST(extract_python_bare_call_flags_locally_bound_callee);
@@ -5289,20 +5289,20 @@ SUITE(extraction) {
     RUN_TEST(extract_parse_incomplete_reports_error_ranges);
     RUN_TEST(extract_parse_budget_survives_wall_stall);
     RUN_TEST(extract_parse_budget_still_trips_on_cpu);
-    RUN_TEST(extract_r_box_use_imports_issue218);
-    RUN_TEST(extract_r_dollar_call_issue219);
+    RUN_TEST_LANG(CBM_LANG_R, extract_r_box_use_imports_issue218);
+    RUN_TEST_LANG(CBM_LANG_R, extract_r_dollar_call_issue219);
     RUN_TEST(extract_ts_factory_object_methods_issue341);
     RUN_TEST(traversal_stack_not_in_result_arena_issue2010);
     RUN_TEST(extract_c_macro_hidden_call_survives_preprocessed_pass_issue2010);
     RUN_TEST(extract_c_macros_issue375);
     RUN_TEST(extract_cpp_macros_issue375);
-    RUN_TEST(extract_gdscript_issue186);
+    RUN_TEST_LANG(CBM_LANG_GDSCRIPT, extract_gdscript_issue186);
     RUN_TEST(extract_powershell_issue35);
-    RUN_TEST(extract_luau_issue39);
-    RUN_TEST(extract_qml_issue42);
-    RUN_TEST(extract_cfscript_issue38);
-    RUN_TEST(extract_cfml_tag_issue38);
-    RUN_TEST(extract_helm_templates_issue338);
+    RUN_TEST_LANG(CBM_LANG_LUAU, extract_luau_issue39);
+    RUN_TEST_LANG(CBM_LANG_QML, extract_qml_issue42);
+    RUN_TEST_LANG(CBM_LANG_CFSCRIPT, extract_cfscript_issue38);
+    RUN_TEST_LANG(CBM_LANG_CFML, extract_cfml_tag_issue38);
+    RUN_TEST_LANG(CBM_LANG_GOTEMPLATE, extract_helm_templates_issue338);
     RUN_TEST(extract_helm_values_toplevel_issue338);
 
     /* OOP */
@@ -5327,7 +5327,7 @@ SUITE(extraction) {
     RUN_TEST(scala_function);
     RUN_TEST(scala_class);
     RUN_TEST(dart_class);
-    RUN_TEST(groovy_class);
+    RUN_TEST_LANG(CBM_LANG_GROOVY, groovy_class);
 
     /* Systems */
     RUN_TEST(rust_function);
@@ -5350,35 +5350,35 @@ SUITE(extraction) {
     RUN_TEST(ts_class);
     RUN_TEST(lua_function);
     RUN_TEST(bash_function);
-    RUN_TEST(perl_function);
-    RUN_TEST(r_function);
+    RUN_TEST_LANG(CBM_LANG_PERL, perl_function);
+    RUN_TEST_LANG(CBM_LANG_R, r_function);
 
     /* Functional */
     RUN_TEST(elixir_function);
     RUN_TEST(elixir_call_string_argument);
     RUN_TEST(haskell_function);
-    RUN_TEST(ocaml_function);
-    RUN_TEST(erlang_function);
+    RUN_TEST_LANG(CBM_LANG_OCAML, ocaml_function);
+    RUN_TEST_LANG(CBM_LANG_ERLANG, erlang_function);
 
     /* Markup/Config */
     RUN_TEST(yaml_variables);
     RUN_TEST(hcl_blocks);
-    RUN_TEST(sql_create_table);
-    RUN_TEST(dockerfile_stages);
+    RUN_TEST_LANG(CBM_LANG_SQL, sql_create_table);
+    RUN_TEST_LANG(CBM_LANG_DOCKERFILE, dockerfile_stages);
 
     /* Scientific */
-    RUN_TEST(matlab_function);
-    RUN_TEST(lean_function);
-    RUN_TEST(form_procedure);
-    RUN_TEST(wolfram_function);
-    RUN_TEST(magma_function);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, matlab_function);
+    RUN_TEST_LANG(CBM_LANG_LEAN, lean_function);
+    RUN_TEST_LANG(CBM_LANG_FORM, form_procedure);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, wolfram_function);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, magma_function);
 
     /* v0.5 expansion */
-    RUN_TEST(fsharp_function);
-    RUN_TEST(julia_function);
-    RUN_TEST(elm_function);
+    RUN_TEST_LANG(CBM_LANG_FSHARP, fsharp_function);
+    RUN_TEST_LANG(CBM_LANG_JULIA, julia_function);
+    RUN_TEST_LANG(CBM_LANG_ELM, elm_function);
     RUN_TEST(nix_function);
-    RUN_TEST(fortran_function);
+    RUN_TEST_LANG(CBM_LANG_FORTRAN, fortran_function);
 
     /* OOP/Systems variants */
     RUN_TEST(swift_struct);
@@ -5390,63 +5390,63 @@ SUITE(extraction) {
     RUN_TEST(swift_call_string_arg_issue1892);
     RUN_TEST(swift_labeled_call_string_arg_issue1892);
     RUN_TEST(swift_try_bang);
-    RUN_TEST(objc_interface);
-    RUN_TEST(objc_implementation);
+    RUN_TEST_LANG(CBM_LANG_OBJC, objc_interface);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, objc_implementation);
     RUN_TEST(dart_top_level_function);
     RUN_TEST(rust_enum);
     RUN_TEST(zig_struct);
     RUN_TEST(cpp_function);
     RUN_TEST(cpp_out_of_line_method_issue428);
-    RUN_TEST(cobol_paragraph);
-    RUN_TEST(verilog_module);
-    RUN_TEST(cuda_kernel);
+    RUN_TEST_LANG(CBM_LANG_COBOL, cobol_paragraph);
+    RUN_TEST_LANG(CBM_LANG_VERILOG, verilog_module);
+    RUN_TEST_LANG(CBM_LANG_CUDA, cuda_kernel);
     RUN_TEST(python_decorator);
     RUN_TEST(ts_interface);
     RUN_TEST(tsx_component);
     RUN_TEST(lua_table_method);
-    RUN_TEST(emacs_lisp_defun);
-    RUN_TEST(emacs_lisp_defvar);
+    RUN_TEST_LANG(CBM_LANG_EMACSLISP, emacs_lisp_defun);
+    RUN_TEST_LANG(CBM_LANG_EMACSLISP, emacs_lisp_defvar);
     RUN_TEST(haskell_data_type);
-    RUN_TEST(clojure_function);
+    RUN_TEST_LANG(CBM_LANG_CLOJURE, clojure_function);
 
     /* Config/Markup */
     RUN_TEST(html_elements);
-    RUN_TEST(sql_function);
-    RUN_TEST(meson_project);
+    RUN_TEST_LANG(CBM_LANG_SQL, sql_function);
+    RUN_TEST_LANG(CBM_LANG_MESON, meson_project);
     RUN_TEST(css_rules);
-    RUN_TEST(scss_rules);
-    RUN_TEST(toml_basic);
-    RUN_TEST(cmake_function);
+    RUN_TEST_LANG(CBM_LANG_SCSS, scss_rules);
+    RUN_TEST_LANG(CBM_LANG_TOML, toml_basic);
+    RUN_TEST_LANG(CBM_LANG_CMAKE, cmake_function);
     RUN_TEST(json_object);
-    RUN_TEST(protobuf_message);
-    RUN_TEST(graphql_type);
-    RUN_TEST(svelte_component);
-    RUN_TEST(vue_component);
-    RUN_TEST(glsl_shader);
-    RUN_TEST(vimscript_function);
+    RUN_TEST_LANG(CBM_LANG_PROTOBUF, protobuf_message);
+    RUN_TEST_LANG(CBM_LANG_GRAPHQL, graphql_type);
+    RUN_TEST_LANG(CBM_LANG_SVELTE, svelte_component);
+    RUN_TEST_LANG(CBM_LANG_VUE, vue_component);
+    RUN_TEST_LANG(CBM_LANG_GLSL, glsl_shader);
+    RUN_TEST_LANG(CBM_LANG_VIMSCRIPT, vimscript_function);
 
     /* Scientific extended */
-    RUN_TEST(matlab_parse);
-    RUN_TEST(matlab_call);
-    RUN_TEST(lean_parse);
-    RUN_TEST(lean_call);
-    RUN_TEST(lean_type_annotation_not_call);
-    RUN_TEST(form_parse);
-    RUN_TEST(form_call);
-    RUN_TEST(magma_procedure);
-    RUN_TEST(magma_parse);
-    RUN_TEST(magma_import);
-    RUN_TEST(magma_call);
-    RUN_TEST(magma_disambiguation);
-    RUN_TEST(wolfram_function_extended);
-    RUN_TEST(wolfram_call);
-    RUN_TEST(wolfram_caller_attribution);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, matlab_parse);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, matlab_call);
+    RUN_TEST_LANG(CBM_LANG_LEAN, lean_parse);
+    RUN_TEST_LANG(CBM_LANG_LEAN, lean_call);
+    RUN_TEST_LANG(CBM_LANG_LEAN, lean_type_annotation_not_call);
+    RUN_TEST_LANG(CBM_LANG_FORM, form_parse);
+    RUN_TEST_LANG(CBM_LANG_FORM, form_call);
+    RUN_TEST_LANG(CBM_LANG_MAGMA, magma_procedure);
+    RUN_TEST_LANG(CBM_LANG_MAGMA, magma_parse);
+    RUN_TEST_LANG(CBM_LANG_MAGMA, magma_import);
+    RUN_TEST_LANG(CBM_LANG_MAGMA, magma_call);
+    RUN_TEST_LANG(CBM_LANG_MATLAB, magma_disambiguation);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, wolfram_function_extended);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, wolfram_call);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, wolfram_caller_attribution);
     RUN_TEST(c_caller_attribution);
     RUN_TEST(cpp_out_of_line_method_caller_attribution);
     RUN_TEST(cpp_out_of_line_ctor_dtor_caller_attribution);
-    RUN_TEST(wolfram_parse);
-    RUN_TEST(wolfram_import);
-    RUN_TEST(wolfram_nested_def);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, wolfram_parse);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, wolfram_import);
+    RUN_TEST_LANG(CBM_LANG_WOLFRAM, wolfram_nested_def);
 
     /* cbm_test.go ports */
     RUN_TEST(python_docstring);
@@ -5455,16 +5455,16 @@ SUITE(extraction) {
     RUN_TEST(js_arrow_function);
 
     /* language_failures_test.go ports */
-    RUN_TEST(commonlisp_defun);
-    RUN_TEST(commonlisp_multiple_functions);
-    RUN_TEST(commonlisp_defmacro);
-    RUN_TEST(makefile_rule_as_function);
-    RUN_TEST(makefile_multiple_targets);
-    RUN_TEST(makefile_variable_extraction);
-    RUN_TEST(vimscript_function_extraction);
-    RUN_TEST(vimscript_function_without_bang);
-    RUN_TEST(julia_function_extraction);
-    RUN_TEST(julia_function_with_args);
+    RUN_TEST_LANG(CBM_LANG_COMMONLISP, commonlisp_defun);
+    RUN_TEST_LANG(CBM_LANG_COMMONLISP, commonlisp_multiple_functions);
+    RUN_TEST_LANG(CBM_LANG_COMMONLISP, commonlisp_defmacro);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, makefile_rule_as_function);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, makefile_multiple_targets);
+    RUN_TEST_LANG(CBM_LANG_MAKEFILE, makefile_variable_extraction);
+    RUN_TEST_LANG(CBM_LANG_VIMSCRIPT, vimscript_function_extraction);
+    RUN_TEST_LANG(CBM_LANG_VIMSCRIPT, vimscript_function_without_bang);
+    RUN_TEST_LANG(CBM_LANG_JULIA, julia_function_extraction);
+    RUN_TEST_LANG(CBM_LANG_JULIA, julia_function_with_args);
 
     /* Cross-cutting */
     RUN_TEST(python_calls);
@@ -5479,33 +5479,33 @@ SUITE(extraction) {
     RUN_TEST(ruby_imports);
     RUN_TEST(lua_imports);
     RUN_TEST(import_stress_go);
-    RUN_TEST(svelte_imports_basic);
-    RUN_TEST(svelte_imports_no_script);
-    RUN_TEST(vue_imports_basic);
+    RUN_TEST_LANG(CBM_LANG_SVELTE, svelte_imports_basic);
+    RUN_TEST_LANG(CBM_LANG_SVELTE, svelte_imports_no_script);
+    RUN_TEST_LANG(CBM_LANG_VUE, vue_imports_basic);
     RUN_TEST(html_imports_basic);
 
     /* config_extraction_test.go ports */
-    RUN_TEST(toml_basic_table_and_pair);
-    RUN_TEST(toml_nested_table);
-    RUN_TEST(toml_table_array_element);
-    RUN_TEST(toml_dotted_key);
-    RUN_TEST(toml_quoted_key);
-    RUN_TEST(toml_empty_table);
-    RUN_TEST(toml_comments_only);
-    RUN_TEST(toml_boolean_and_integer_values);
-    RUN_TEST(ini_basic_section_and_setting);
-    RUN_TEST(ini_multiple_sections);
-    RUN_TEST(ini_global_keys);
-    RUN_TEST(ini_comments);
+    RUN_TEST_LANG(CBM_LANG_TOML, toml_basic_table_and_pair);
+    RUN_TEST_LANG(CBM_LANG_TOML, toml_nested_table);
+    RUN_TEST_LANG(CBM_LANG_TOML, toml_table_array_element);
+    RUN_TEST_LANG(CBM_LANG_TOML, toml_dotted_key);
+    RUN_TEST_LANG(CBM_LANG_TOML, toml_quoted_key);
+    RUN_TEST_LANG(CBM_LANG_TOML, toml_empty_table);
+    RUN_TEST_LANG(CBM_LANG_TOML, toml_comments_only);
+    RUN_TEST_LANG(CBM_LANG_TOML, toml_boolean_and_integer_values);
+    RUN_TEST_LANG(CBM_LANG_INI, ini_basic_section_and_setting);
+    RUN_TEST_LANG(CBM_LANG_INI, ini_multiple_sections);
+    RUN_TEST_LANG(CBM_LANG_INI, ini_global_keys);
+    RUN_TEST_LANG(CBM_LANG_INI, ini_comments);
     RUN_TEST(json_basic_pair);
     RUN_TEST(json_nested_object);
     RUN_TEST(json_empty_object);
     RUN_TEST(json_boolean_null_values);
     RUN_TEST(json_package_json_deps);
-    RUN_TEST(xml_basic_element);
-    RUN_TEST(xml_self_closing_tag);
-    RUN_TEST(xml_empty_document);
-    RUN_TEST(xml_multiple_children);
+    RUN_TEST_LANG(CBM_LANG_XML, xml_basic_element);
+    RUN_TEST_LANG(CBM_LANG_XML, xml_self_closing_tag);
+    RUN_TEST_LANG(CBM_LANG_XML, xml_empty_document);
+    RUN_TEST_LANG(CBM_LANG_XML, xml_multiple_children);
     RUN_TEST(markdown_atx_headings);
     RUN_TEST(markdown_setext_headings);
     RUN_TEST(markdown_heading_content);

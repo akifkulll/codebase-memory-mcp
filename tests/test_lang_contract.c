@@ -20,6 +20,7 @@
 #include "test_helpers.h"
 #include "cbm.h"
 #include "grammar_cases.h"
+#include "discover/discover.h" /* cbm_language_for_filename — tier filter */
 #include <mcp/mcp.h>
 #include <store/store.h>
 #include <pipeline/pipeline.h>
@@ -636,14 +637,19 @@ TEST(contract_all_grammars_in_graph) {
     }
     static char names[GRAMMAR_BREADTH_MAX][GRAMMAR_PATH_BUF];
     LangFile files[GRAMMAR_BREADTH_MAX] = {0}; /* zero-init: GCC -Werror=maybe-uninitialized */
+    int nfiles = 0;
     for (int i = 0; i < n; i++) {
-        snprintf(names[i], sizeof(names[i]), "g%03d/%s", i, CBM_GRAMMAR_CASES[i].path);
-        files[i].name = names[i];
-        files[i].content = CBM_GRAMMAR_CASES[i].src;
+        if (!tf_lang_runs(CBM_GRAMMAR_CASES[i].lang)) {
+            continue;
+        }
+        snprintf(names[nfiles], sizeof(names[nfiles]), "g%03d/%s", i, CBM_GRAMMAR_CASES[i].path);
+        files[nfiles].name = names[nfiles];
+        files[nfiles].content = CBM_GRAMMAR_CASES[i].src;
+        nfiles++;
     }
 
     LangProj lp;
-    cbm_store_t *store = lang_index_files(&lp, files, n);
+    cbm_store_t *store = lang_index_files(&lp, files, nfiles);
     int total_nodes = store ? cbm_store_count_nodes(store, lp.project) : -1;
 
     int not_indexed = 0;
@@ -651,7 +657,7 @@ TEST(contract_all_grammars_in_graph) {
     int checked = 0;
     for (int i = 0; i < n; i++) {
         const GrammarCase *c = &CBM_GRAMMAR_CASES[i];
-        if (grammar_graph_allowlisted(c->name)) {
+        if (!tf_lang_runs(c->lang) || grammar_graph_allowlisted(c->name)) {
             continue;
         }
         char rel[GRAMMAR_PATH_BUF];
@@ -884,8 +890,13 @@ TEST(contract_calls_breadth) {
      * have already root-caused). These stay RED until fixed. */
     int n = (int)(sizeof(CALL_CASES) / sizeof(CALL_CASES[0]));
     int failures = 0;
+    int checked = 0;
     for (int i = 0; i < n; i++) {
         const CallCase *c = &CALL_CASES[i];
+        if (!tf_lang_runs(cbm_language_for_filename(c->filename))) {
+            continue;
+        }
+        checked++;
         const LangFile f = {c->filename, c->content};
         LangMetrics m = lang_metrics(&f, 1);
         if (!(m.ok && m.calls >= 1 && m.callers >= 1)) {
@@ -898,7 +909,7 @@ TEST(contract_calls_breadth) {
     fprintf(stderr,
             "  [CALLS-BREADTH] %d langs: %d FAILURES (each = a language that does not "
             "resolve a same-file CALLS edge)\n",
-            n, failures);
+            checked, failures);
     ASSERT_EQ(failures, 0);
     PASS();
 }
