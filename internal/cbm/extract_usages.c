@@ -167,31 +167,33 @@ static bool is_field_value(TSNode parent, const char *field, uint32_t field_len,
 
 // `node` is passed as one whole argument: f(node), f((node)) in Python,
 // f(cb=node) in Python, F(node) / F(name: node) in C#.
-static bool is_direct_argument_value(TSNode node, CBMLanguage lang) {
-    TSNode parent = ts_node_parent(node);
+static bool is_direct_argument_value(const WalkState *state, TSNode node, CBMLanguage lang) {
+    TSNode current = node;
+    uint32_t up = 1;
+    TSNode parent = cbm_walk_ancestor(state, current, up);
     while (lang == CBM_LANG_PYTHON && is_kind(parent, "parenthesized_expression") &&
            ts_node_named_child_count(parent) == 1) {
         node = parent;
-        parent = ts_node_parent(node);
+        parent = cbm_walk_ancestor(state, current, ++up);
     }
     if (lang == CBM_LANG_PYTHON && is_kind(parent, "keyword_argument")) {
         if (!is_field_value(parent, TS_FIELD("value"), node)) {
             return false;
         }
         node = parent;
-        parent = ts_node_parent(node);
+        parent = cbm_walk_ancestor(state, current, ++up);
     }
     if (lang == CBM_LANG_CSHARP && is_kind(parent, "argument")) {
         node = parent;
-        parent = ts_node_parent(node);
+        parent = cbm_walk_ancestor(state, current, ++up);
     }
     return is_kind(parent, "arguments") || is_kind(parent, "argument_list");
 }
 
 // `node` is the whole right-hand side of a plain value binding:
 // Python `cb = node` / `(cb := node)`, TS/JS `const cb = node` / `cb = node`.
-static bool is_binding_value(TSNode node, CBMLanguage lang) {
-    TSNode parent = ts_node_parent(node);
+static bool is_binding_value(const WalkState *state, TSNode node, CBMLanguage lang) {
+    TSNode parent = cbm_walk_ancestor(state, node, 1);
     if (lang == CBM_LANG_PYTHON) {
         return (is_kind(parent, "assignment") && is_field_value(parent, TS_FIELD("right"), node)) ||
                (is_kind(parent, "named_expression") &&
@@ -221,8 +223,8 @@ static bool is_reference_syntax(TSNode node, CBMLanguage lang) {
            (lang == CBM_LANG_PHP && cbm_php_is_first_class_callable(node));
 }
 
-static bool is_reference_syntax_name(TSNode node, CBMLanguage lang) {
-    TSNode parent = ts_node_parent(node);
+static bool is_reference_syntax_name(const WalkState *state, TSNode node, CBMLanguage lang) {
+    TSNode parent = cbm_walk_ancestor(state, node, 1);
     if (ts_node_is_null(parent) || lang == CBM_LANG_PHP || !is_reference_syntax(parent, lang)) {
         return false;
     }
@@ -292,7 +294,7 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
     }
     // The name half of explicit reference syntax is carried by the reference
     // node itself (above).
-    if (is_reference_syntax_name(node, ctx->language)) {
+    if (is_reference_syntax_name(state, node, ctx->language)) {
         return;
     }
 
@@ -302,7 +304,7 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
     if (state->inside_call) {
         if (!state->inside_import && lang_marks_argument_values(ctx->language) &&
             is_candidate_value_kind(node, ctx->language) &&
-            is_direct_argument_value(node, ctx->language)) {
+            is_direct_argument_value(state, node, ctx->language)) {
             char *arg = cbm_node_text(ctx->arena, node, ctx->source);
             if (arg && arg[0] && !cbm_is_keyword(arg, ctx->language)) {
                 push_reference_usage(ctx, arg, state->enclosing_func_qn, node, CBM_USAGE_VALUE,
@@ -317,7 +319,7 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
     }
 
     // Skip if it's a definition name (left side of assignment, function name)
-    TSNode parent = ts_node_parent(node);
+    TSNode parent = cbm_walk_ancestor(state, node, 1);
     if (!ts_node_is_null(parent)) {
         TSNode name_field = ts_node_child_by_field_name(parent, TS_FIELD("name"));
         if (!ts_node_is_null(name_field) &&
@@ -335,7 +337,7 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
         usage.site_start_byte = ts_node_start_byte(node);
         usage.site_end_byte = ts_node_end_byte(node);
         usage.may_be_call_reference = is_candidate_value_kind(node, ctx->language) &&
-                                      is_binding_value(node, ctx->language);
+                                      is_binding_value(state, node, ctx->language);
         /* The member half of a selector is its own reference node
          * (field_identifier); record that shape — the name alone cannot carry
          * it, and the Go Field guard keys on it (#1962). */

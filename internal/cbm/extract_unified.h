@@ -3,6 +3,7 @@
 
 #include "cbm.h"
 #include "lang_specs.h"
+#include "extract_node_stack.h"
 
 // Scope kinds for the walk state stack.
 #define SCOPE_FUNC 1
@@ -40,11 +41,22 @@ typedef struct {
      * loses names, so a lookup can miss (no suppression) but never invent one. */
     const char *py_params[MAX_PY_PARAMS];
     int py_param_count;
+
+    /* Root-to-current path of the walk (the last item is the node being
+     * handled), so a handler reads an ancestor in O(1). ts_node_parent() walks
+     * down from the root, O(depth) per call, which is quadratic across deeply
+     * nested code. path_complete is false only after an allocation failure. */
+    TSNodeStack path;
+    bool path_complete;
 } WalkState;
 
 // True when `name` is bound as a parameter of a Python def or lambda that
 // encloses the current walk position.
 bool cbm_walk_python_param_is_bound(const WalkState *state, const char *name);
+
+// The ancestor `up` levels above the current walk node `node` (1 = parent), or
+// a null node above the root.
+TSNode cbm_walk_ancestor(const WalkState *state, TSNode node, uint32_t up);
 
 // Per-node handler prototypes. Each is called once per node during the
 // unified cursor walk, replacing the old recursive walk_* functions.

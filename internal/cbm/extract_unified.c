@@ -45,6 +45,17 @@ bool cbm_walk_python_param_is_bound(const WalkState *state, const char *name) {
     return false;
 }
 
+TSNode cbm_walk_ancestor(const WalkState *state, TSNode node, uint32_t up) {
+    if (state->path_complete) {
+        int i = state->path.count - SKIP_ONE - (int)up;
+        return i >= 0 ? state->path.items[i] : (TSNode){0};
+    }
+    for (; up > 0 && !ts_node_is_null(node); up--) {
+        node = ts_node_parent(node);
+    }
+    return node;
+}
+
 /* Name bound by one Python parameter node, or NULL when the shape binds none:
  * a bare `identifier`, the `name` field of default/typed parameters, or the
  * identifier under a `*args` / `**kwargs` splat. The bare `*` separator binds
@@ -1497,6 +1508,7 @@ void cbm_extract_unified(CBMExtractCtx *ctx) {
     TSTreeCursor cursor = ts_tree_cursor_new(ctx->root);
     WalkState state;
     memset(&state, 0, sizeof(state));
+    ts_nstack_init(&state.path, ctx, 256);
 
     uint32_t depth = 0;
 
@@ -1505,6 +1517,11 @@ void cbm_extract_unified(CBMExtractCtx *ctx) {
 
         pop_expired_scopes(&state, depth);
         recompute_state(&state, ctx->module_qn);
+        if (state.path.count > (int)depth) {
+            state.path.count = (int)depth;
+        }
+        ts_nstack_push(&state.path, node);
+        state.path_complete = state.path.count == (int)depth + 1;
 
         handle_string_constants(ctx, node, &state);
         handle_url_builders(ctx, node, &state);
