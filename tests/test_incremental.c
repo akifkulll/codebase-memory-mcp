@@ -1640,6 +1640,36 @@ TEST(tool_sc_no_results) {
     PASS();
 }
 
+/* ── get_file_outline ──────────────────────────────────────────── */
+
+/* Exercises the Zova-backed store path: the injected functions in
+ * fastapi/applications.py appear, container nodes do not, and paging
+ * reports has_more. */
+TEST(tool_file_outline_zova) {
+    double ms;
+    char *r = call_tool_timed("get_file_outline", &ms,
+                              "{\"project\":\"%s\",\"file_path\":\"fastapi/applications.py\","
+                              "\"labels\":[\"Function\"],\"limit\":200}",
+                              g_project);
+    TOOL_OK(r, ms);
+    ASSERT(strstr(r, "incr_test_injected") != NULL);
+    ASSERT(strstr(r, "incr_test_helper") != NULL);
+    ASSERT(strstr(r, "\"label\":\"Module\"") == NULL);
+    ASSERT(strstr(r, "\"label\":\"File\"") == NULL);
+    ASSERT(strstr(r, "\"label\":\"Class\"") == NULL);
+    free(r);
+
+    r = call_tool_timed("get_file_outline", &ms,
+                        "{\"project\":\"%s\",\"file_path\":\"fastapi/applications.py\","
+                        "\"limit\":1}",
+                        g_project);
+    TOOL_OK(r, ms);
+    ASSERT(strstr(r, "\\\"returned\\\":1") != NULL);
+    ASSERT(strstr(r, "\\\"has_more\\\":true") != NULL);
+    free(r);
+    PASS();
+}
+
 /* ── get_code_snippet ──────────────────────────────────────────── */
 
 TEST(tool_snippet_short_name) {
@@ -3058,7 +3088,8 @@ SUITE(incremental) {
     RUN_TEST(tool_sc_context);
     RUN_TEST(tool_sc_no_results);
 
-    /* Phase 12: get_code_snippet */
+    /* Phase 12: get_code_snippet, get_file_outline */
+    RUN_TEST(tool_file_outline_zova);
     RUN_TEST(tool_snippet_short_name);
     RUN_TEST(tool_snippet_nonexistent);
     RUN_TEST(tool_snippet_include_neighbors);

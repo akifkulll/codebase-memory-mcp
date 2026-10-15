@@ -1576,6 +1576,143 @@ int cbm_store_find_nodes_by_file(cbm_store_t *s, const char *project, const char
                               project, file_path, out, count);
 }
 
+static bool file_outline_is_container(const char *label) {
+    static const char *const containers[] = {"Module", "Package", "File", "Folder", "Project"};
+    for (size_t i = 0; i < sizeof(containers) / sizeof(containers[0]); i++) {
+        if (strcmp(label, containers[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int file_outline_str_cmp(const char *a, const char *b) {
+    return strcmp(a ? a : "", b ? b : "");
+}
+
+static int file_outline_node_cmp(const void *pa, const void *pb) {
+    const cbm_node_t *a = *(const cbm_node_t *const *)pa;
+    const cbm_node_t *b = *(const cbm_node_t *const *)pb;
+    if (a->start_line != b->start_line) {
+        return a->start_line < b->start_line ? -1 : 1;
+    }
+    if (a->end_line != b->end_line) {
+        return a->end_line < b->end_line ? -1 : 1;
+    }
+    int c = file_outline_str_cmp(a->label, b->label);
+    if (c == 0) {
+        c = file_outline_str_cmp(a->name, b->name);
+    }
+    if (c == 0) {
+        c = file_outline_str_cmp(a->qualified_name, b->qualified_name);
+    }
+    if (c == 0 && a->id != b->id) {
+        c = a->id < b->id ? -1 : 1;
+    }
+    return c;
+}
+
+int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *file_path,
+                               const char *const *labels, int label_count, int limit, int offset,
+                               cbm_file_outline_row_t **out, int *count, int *total) {
+    if (!out || !count || !total) {
+        return CBM_STORE_ERR;
+    }
+    *out = NULL;
+    *count = 0;
+    *total = 0;
+    if (!s || !project || !file_path || !file_path[0] || limit < 1 ||
+        limit > CBM_STORE_FILE_OUTLINE_MAX_LIMIT || offset < 0 || label_count < 0 ||
+        label_count > CBM_STORE_FILE_OUTLINE_MAX_LABELS || (label_count > 0 && !labels)) {
+        return CBM_STORE_ERR;
+    }
+    for (int i = 0; i < label_count; i++) {
+        if (!labels[i] || !labels[i][0]) {
+            return CBM_STORE_ERR;
+        }
+    }
+
+    cbm_node_t *nodes = NULL;
+    int node_count = 0;
+    int rc = cbm_store_find_nodes_by_file(s, project, file_path, &nodes, &node_count);
+    if (rc != CBM_STORE_OK) {
+        return rc;
+    }
+    const cbm_node_t **kept = node_count ? calloc((size_t)node_count, sizeof(*kept)) : NULL;
+    if (node_count && !kept) {
+        cbm_store_free_nodes(nodes, node_count);
+        return CBM_STORE_ERR;
+    }
+    int kept_count = 0;
+    for (int i = 0; i < node_count; i++) {
+        const char *label = nodes[i].label ? nodes[i].label : "";
+        if (file_outline_is_container(label)) {
+            continue;
+        }
+        bool wanted = label_count == 0;
+        for (int j = 0; j < label_count && !wanted; j++) {
+            wanted = strcmp(label, labels[j]) == 0;
+        }
+        if (wanted) {
+            kept[kept_count++] = &nodes[i];
+        }
+    }
+    if (kept_count > 1) {
+        qsort(kept, (size_t)kept_count, sizeof(*kept), file_outline_node_cmp);
+    }
+
+    int first = offset < kept_count ? offset : kept_count;
+    int page = kept_count - first < limit ? kept_count - first : limit;
+    size_t text_bytes = 0;
+    for (int i = first; i < first + page; i++) {
+        text_bytes += strlen(kept[i]->name ? kept[i]->name : "") +
+                      strlen(kept[i]->label ? kept[i]->label : "") +
+                      strlen(kept[i]->qualified_name ? kept[i]->qualified_name : "");
+    }
+    if (text_bytes > CBM_STORE_FILE_OUTLINE_MAX_TEXT_BYTES) {
+        free(kept);
+        cbm_store_free_nodes(nodes, node_count);
+        return CBM_STORE_SCAN_LIMIT;
+    }
+
+    cbm_file_outline_row_t *rows = page ? calloc((size_t)page, sizeof(*rows)) : NULL;
+    rc = page && !rows ? CBM_STORE_ERR : CBM_STORE_OK;
+    for (int i = 0; rc == CBM_STORE_OK && i < page; i++) {
+        const cbm_node_t *n = kept[first + i];
+        rows[i].name = heap_strdup(n->name ? n->name : "");
+        rows[i].label = heap_strdup(n->label ? n->label : "");
+        rows[i].qualified_name = heap_strdup(n->qualified_name ? n->qualified_name : "");
+        rows[i].start_line = n->start_line;
+        rows[i].end_line = n->end_line;
+        if (!rows[i].name || !rows[i].label || !rows[i].qualified_name) {
+            cbm_store_free_file_outline(rows, i + 1);
+            rows = NULL;
+            rc = CBM_STORE_ERR;
+        }
+    }
+    free(kept);
+    cbm_store_free_nodes(nodes, node_count);
+    if (rc != CBM_STORE_OK) {
+        return rc;
+    }
+    *out = rows;
+    *count = page;
+    *total = kept_count;
+    return CBM_STORE_OK;
+}
+
+void cbm_store_free_file_outline(cbm_file_outline_row_t *rows, int count) {
+    if (!rows) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        free((void *)rows[i].name);
+        free((void *)rows[i].label);
+        free((void *)rows[i].qualified_name);
+    }
+    free(rows);
+}
+
 /* A Zova workspace store has no legacy nodes and edges tables. The schema,
  * count and architecture queries below read nodes through a temp view over the
  * workspace's rows, whose ids are Zova node keys; edges come from the graph

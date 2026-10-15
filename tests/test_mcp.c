@@ -297,6 +297,7 @@ TEST(mcp_tools_list) {
     ASSERT_NOT_NULL(strstr(json, "query_graph"));
     ASSERT_NOT_NULL(strstr(json, "trace_path"));
     ASSERT_NOT_NULL(strstr(json, "get_code_snippet"));
+    ASSERT_NOT_NULL(strstr(json, "get_file_outline"));
     ASSERT_NOT_NULL(strstr(json, "get_graph_schema"));
     ASSERT_NOT_NULL(strstr(json, "get_architecture"));
     ASSERT_NOT_NULL(strstr(json, "search_code"));
@@ -786,6 +787,136 @@ TEST(tool_search_graph_basic) {
  * `limit` unrelated enriched nodes to a purely semantic request. Covers both
  * the compatibility route. (Issue #25 / upstream 108740d8.) */
 static char *extract_text_content(const char *mcp_result);
+
+/* Upstream 0b9df183: get_file_outline lists one file's declarations with
+ * exact label filters and total/offset/limit/has_more pagination metadata. */
+TEST(tool_get_file_outline_returns_bounded_filtered_rows) {
+    th_remove_zova_user_database();
+    cbm_mcp_server_t *srv = setup_mcp_with_data();
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "outline-project", "/tmp/outline-project"),
+              CBM_STORE_OK);
+    cbm_mcp_server_set_project(srv, "outline-project");
+
+    cbm_node_t nodes[] = {
+        {.project = "outline-project", .label = "Module", .name = "main",
+         .qualified_name = "outline-project.main", .file_path = "src/main.c",
+         .start_line = 1, .end_line = 80},
+        {.project = "outline-project", .label = "Function", .name = "alpha",
+         .qualified_name = "outline-project.src.main.alpha", .file_path = "src/main.c",
+         .start_line = 10, .end_line = 14},
+        {.project = "outline-project", .label = "Class", .name = "IgnoredClass",
+         .qualified_name = "outline-project.src.main.IgnoredClass", .file_path = "src/main.c",
+         .start_line = 15, .end_line = 40},
+        {.project = "outline-project", .label = "Method", .name = "omega",
+         .qualified_name = "outline-project.src.main.omega", .file_path = "src/main.c",
+         .start_line = 30, .end_line = 33},
+        {.project = "outline-project", .label = "Function", .name = "other",
+         .qualified_name = "outline-project.src.other.other", .file_path = "src/other.c",
+         .start_line = 1, .end_line = 2},
+    };
+    for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++) {
+        ASSERT_GT(cbm_store_upsert_node(store, &nodes[i]), 0);
+    }
+    ASSERT_EQ(th_publish_store_project(store, "outline-project"), 0);
+
+    char *response =
+        cbm_mcp_handle_tool(srv, "get_file_outline",
+                            "{\"project\":\"outline-project\",\"file_path\":\"./src/main.c\","
+                            "\"labels\":[\"Function\",\"Method\"],\"limit\":1}");
+    ASSERT_NOT_NULL(response);
+    char *inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    yyjson_doc *doc = yyjson_read(inner, strlen(inner), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(root, "file_path")), "src/main.c");
+    yyjson_val *results = yyjson_obj_get(root, "results");
+    ASSERT_EQ(yyjson_arr_size(results), 1U);
+    yyjson_val *row = yyjson_arr_get_first(results);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(row, "name")), "alpha");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(row, "label")), "Function");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(row, "lines")), "10-14");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(row, "qn")), "outline-project.src.main.alpha");
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total")), 2);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "returned")), 1);
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(root, "has_more")));
+    yyjson_doc_free(doc);
+    free(inner);
+    free(response);
+
+    /* compact renders the same rows as a table. */
+    response = cbm_mcp_handle_tool(srv, "get_file_outline",
+                                   "{\"project\":\"outline-project\",\"file_path\":\"src/main.c\","
+                                   "\"format\":\"compact\"}");
+    ASSERT_NOT_NULL(response);
+    inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "results[3]"));
+    ASSERT_NOT_NULL(strstr(inner, "IgnoredClass"));
+    ASSERT_NOT_NULL(strstr(inner, "omega"));
+    ASSERT_NULL(strstr(inner, "other"));
+    ASSERT_NOT_NULL(strstr(inner, "has_more: false"));
+    free(inner);
+    free(response);
+
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_get_file_outline_validates_arguments) {
+    th_remove_zova_user_database();
+    cbm_mcp_server_t *srv = setup_mcp_with_data();
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "outline-controls", "/tmp/outline-controls"),
+              CBM_STORE_OK);
+    cbm_mcp_server_set_project(srv, "outline-controls");
+    cbm_node_t node = {.project = "outline-controls", .label = "Function", .name = "bounded",
+                       .qualified_name = "outline-controls.src.main.bounded",
+                       .file_path = "src/main.c", .start_line = 7, .end_line = 9};
+    ASSERT_GT(cbm_store_upsert_node(store, &node), 0);
+    ASSERT_EQ(th_publish_store_project(store, "outline-controls"), 0);
+
+    static const char *const bad_args[][2] = {
+        {"{\"project\":\"outline-controls\",\"file_path\":\"../outside.c\"}",
+         "repository-relative"},
+        {"{\"project\":\"outline-controls\",\"file_path\":\"/abs/main.c\"}",
+         "repository-relative"},
+        {"{\"project\":\"outline-controls\"}", "file_path is required"},
+        {"{\"project\":\"outline-controls\",\"file_path\":\"src/main.c\",\"limit\":201}",
+         "between 1 and 200"},
+        {"{\"project\":\"outline-controls\",\"file_path\":\"src/main.c\",\"limit\":\"5\"}",
+         "between 1 and 200"},
+        {"{\"project\":\"outline-controls\",\"file_path\":\"src/main.c\",\"offset\":-1}",
+         "non-negative"},
+        {"{\"project\":\"outline-controls\",\"file_path\":\"src/main.c\",\"labels\":\"Function\"}",
+         "at most 16"},
+        {"{\"project\":\"outline-controls\",\"file_path\":\"src/main.c\",\"labels\":[\"\"]}",
+         "non-empty"},
+        {"{\"project\":\"outline-controls\",\"file_path\":\"src/main.c\",\"format\":\"tree\"}",
+         "format must be"},
+    };
+    for (size_t i = 0; i < sizeof(bad_args) / sizeof(bad_args[0]); i++) {
+        char *response = cbm_mcp_handle_tool(srv, "get_file_outline", bad_args[i][0]);
+        ASSERT_NOT_NULL(response);
+        ASSERT_NOT_NULL(strstr(response, bad_args[i][1]));
+        ASSERT_NOT_NULL(strstr(response, "\"isError\":true"));
+        free(response);
+    }
+
+    /* A file with no declarations is an empty page, not an error. */
+    char *response = cbm_mcp_handle_tool(
+        srv, "get_file_outline", "{\"project\":\"outline-controls\",\"file_path\":\"none.c\"}");
+    ASSERT_NOT_NULL(response);
+    ASSERT_NULL(strstr(response, "\"isError\":true"));
+    ASSERT_NOT_NULL(strstr(response, "total"));
+    free(response);
+
+    cbm_mcp_server_free(srv);
+    PASS();
+}
 
 TEST(tool_search_graph_semantic_only_skips_structural_results_issue1295) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new();
@@ -5910,6 +6041,8 @@ SUITE(mcp) {
     RUN_TEST(tool_list_projects_empty);
     RUN_TEST(tool_get_graph_schema_empty);
     RUN_TEST(tool_unknown_tool);
+    RUN_TEST(tool_get_file_outline_returns_bounded_filtered_rows);
+    RUN_TEST(tool_get_file_outline_validates_arguments);
     RUN_TEST(tool_search_graph_basic);
     RUN_TEST(tool_search_graph_semantic_only_skips_structural_results_issue1295);
     RUN_TEST(tool_search_graph_empty_structural_search_keeps_envelope);
