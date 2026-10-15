@@ -276,7 +276,10 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     HANDLE hlog = INVALID_HANDLE_VALUE;
     STARTUPINFOW si = {.cb = sizeof(si)};
     if (opts->log_file) {
-        hlog = CreateFileA(opts->log_file, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
+        /* STARTF_USESTDHANDLES needs inheritable handles; a default (NULL)
+         * security descriptor is not, and the child's output would be lost. */
+        SECURITY_ATTRIBUTES sa = {.nLength = sizeof(sa), .bInheritHandle = TRUE};
+        hlog = CreateFileA(opts->log_file, GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, NULL);
         if (hlog != INVALID_HANDLE_VALUE) {
             si.dwFlags = STARTF_USESTDHANDLES;

@@ -6307,8 +6307,10 @@ static int search_result_cmp(const void *a, const void *b) {
 }
 
 /* Build the grep/search command string based on scoped vs recursive mode.
- * On Windows, uses PowerShell Select-String with tab-delimited output.
- * On POSIX, uses grep with colon-delimited output. */
+ * On Windows, the PowerShell Select-String script (tab-delimited output),
+ * run as `powershell -Command <script>`. It holds no double quote, so it
+ * stays one argument through cbm_build_win_cmdline.
+ * On POSIX, a grep sh command with colon-delimited output. */
 static void build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped,
                            const char *file_pattern, const char *tmpfile, const char *filelist,
                            const char *root_path) {
@@ -6318,37 +6320,37 @@ static void build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped
         if (file_pattern) {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"$pat = Get-Content '%s'; "
+                "$pat = Get-Content '%s'; "
                 "Get-Content '%s' | ForEach-Object { Select-String -LiteralPath $_ -Pattern $pat%s "
                 "-ErrorAction SilentlyContinue }"
                 " | Where-Object { $_.Path -like '*%s' }"
-                " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
+                " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }",
                 tmpfile, filelist, sm, file_pattern);
         } else {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"$pat = Get-Content '%s'; "
+                "$pat = Get-Content '%s'; "
                 "Get-Content '%s' | ForEach-Object { Select-String -LiteralPath $_ -Pattern $pat%s "
                 "-ErrorAction SilentlyContinue }"
-                " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
+                " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }",
                 tmpfile, filelist, sm);
         }
     } else {
         if (file_pattern) {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"Get-ChildItem -Recurse -Path '%s\\*' -Include '%s' -File "
+                "Get-ChildItem -Recurse -Path '%s\\*' -Include '%s' -File "
                 "-ErrorAction SilentlyContinue"
                 " | Select-String -Pattern (Get-Content '%s')%s -ErrorAction SilentlyContinue"
-                " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
+                " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }",
                 root_path, file_pattern, tmpfile, sm);
         } else {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"Get-ChildItem -Recurse -Path '%s\\*' -File -ErrorAction "
+                "Get-ChildItem -Recurse -Path '%s\\*' -File -ErrorAction "
                 "SilentlyContinue"
                 " | Select-String -Pattern (Get-Content '%s')%s -ErrorAction SilentlyContinue"
-                " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
+                " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }",
                 root_path, tmpfile, sm);
         }
     }
@@ -7100,17 +7102,22 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         build_grep_cmd(cmd, sizeof(cmd), use_regex, scoped, file_pattern, tmpfile, filelist,
                        root_path);
 
-#ifndef _WIN32
         /* Run the scan supervised instead of through popen: a wall-clock
          * deadline and an output cap, with the kill taking the whole
          * sh/xargs/grep group. Either bound fails the request closed rather
          * than returning a silently partial match set. grep's own exit status
-         * stays ignored, as with popen (1 = no match, 2 = unreadable file). */
+         * stays ignored, as with popen (1 = no match, 2 = unreadable file).
+         * On Windows the scan is one PowerShell process with no children, so
+         * the TerminateProcess kill covers it. */
         char outfile[CBM_SZ_256 + 8];
         snprintf(outfile, sizeof(outfile), "%s.out", tmpfile);
+#ifdef _WIN32
+        const char *const scan_argv[] = {"powershell", "-Command", cmd, NULL};
+#else
         const char *const scan_argv[] = {"/bin/sh", "-c", cmd, NULL};
+#endif
         cbm_proc_opts_t scan_opts = {0};
-        scan_opts.bin = "/bin/sh";
+        scan_opts.bin = scan_argv[0];
         scan_opts.argv = scan_argv;
         scan_opts.log_file = outfile;
         scan_opts.deadline_ms = MCP_SEARCH_SCAN_TIMEOUT_MS;
@@ -7150,24 +7157,6 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
                                   grep_limit, &gm_count);
         (void)fclose(fp);
         (void)cbm_unlink(outfile);
-#else
-        FILE *fp = cbm_popen(cmd, "r");
-        if (!fp) {
-            cbm_unlink(tmpfile);
-            if (scoped) {
-                cbm_unlink(filelist);
-            }
-            free(root_path);
-            free(pattern);
-            free(project);
-            free(file_pattern);
-            return cbm_mcp_text_result("search failed", true);
-        }
-
-        gm = collect_grep_matches(fp, root_path, strlen(root_path), has_path_filter, &path_regex,
-                                  grep_limit, &gm_count);
-        cbm_pclose(fp);
-#endif
         cbm_unlink(tmpfile);
         if (scoped) {
             cbm_unlink(filelist);
