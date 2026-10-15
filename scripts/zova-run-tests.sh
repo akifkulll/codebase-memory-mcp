@@ -16,7 +16,7 @@ runner_group_for_suite() {
       printf 'mcp\n'
       ;;
     graph_buffer|registry|pipeline|index_resilience|call_reference|fqn|route_canon|path_alias|\
-    configlink|infrascan|worker_pool|parallel|incremental)
+    configlink|infrascan|worker_pool|parallel|incremental|importance)
       printf 'pipeline\n'
       ;;
     *)

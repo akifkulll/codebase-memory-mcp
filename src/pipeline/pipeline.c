@@ -780,6 +780,9 @@ static void predump_cfg(cbm_pipeline_ctx_t *ctx) {
 static void predump_complexity(cbm_pipeline_ctx_t *ctx) {
     cbm_pipeline_pass_complexity(ctx);
 }
+static void predump_importance(cbm_pipeline_ctx_t *ctx) {
+    cbm_pipeline_pass_importance(ctx);
+}
 
 static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
     static const struct {
@@ -790,8 +793,13 @@ static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
         {predump_deco, "decorator_tags", false}, {predump_cfg, "configlink", false},
         {predump_route, "route_match", false},   {predump_sim, "similarity", true},
         {predump_sem, "semantic_edges", true},   {predump_complexity, "complexity", false},
+        /* Importance runs LAST: it reads CALLS/USAGE (extraction) and TESTS
+         * (pass_tests, run before this loop). */
+        {predump_importance, "importance", false},
     };
-    enum { PREDUMP_PASS_COUNT = 6 };
+    /* Derived from the table: a hand-written count that lags an appended
+     * entry silently skips the last pass. */
+    enum { PREDUMP_PASS_COUNT = (int)(sizeof(passes) / sizeof(passes[0])) };
     struct timespec t;
     for (int i = 0; i < PREDUMP_PASS_COUNT && !check_cancel(p); i++) {
         /* "moderate_only" passes (similarity/semantic edges) run in FULL,

@@ -913,6 +913,15 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
     cbm_log_info("pass.timing", "pass", "incr_complexity", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(t)));
 
+    /* Importance reads CALLS/USAGE (re-extraction plus relinked inbound
+     * edges) and TESTS (pass_tests, first in this function). It must run
+     * before the digest below, which hashes properties_json. Nodes from
+     * unchanged files already carry the key; the write-back overwrites it. */
+    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
+    cbm_pipeline_pass_importance(ctx);
+    cbm_log_info("pass.timing", "pass", "incr_importance", "elapsed_ms",
+                 itoa_buf((int)elapsed_ms(t)));
+
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
     cbm_incremental_derived_state_t after = derived_state(ctx->gbuf);
     bool input_unchanged = before && derived_digest_equal(&before->input, &after.input);

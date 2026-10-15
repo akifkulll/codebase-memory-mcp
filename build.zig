@@ -522,6 +522,7 @@ const native_sources = [_][]const u8{
     "src/pipeline/pass_similarity.c",
     "src/pipeline/pass_semantic_edges.c",
     "src/pipeline/pass_complexity.c",
+    "src/pipeline/pass_importance.c",
     "src/pipeline/pass_pkgmap.c",
     "src/simhash/minhash.c",
     "src/semantic/semantic.c",
@@ -581,6 +582,7 @@ const pipeline_test_sources = [_][]const u8{
     "tests/test_worker_pool.c",
     "tests/test_parallel.c",
     "tests/test_incremental.c",
+    "tests/test_importance.c",
 };
 
 const all_test_sources = [_][]const u8{
@@ -616,6 +618,7 @@ const all_test_sources = [_][]const u8{
     "tests/test_graph_buffer.c",
     "tests/test_registry.c",
     "tests/test_pipeline.c",
+    "tests/test_importance.c",
     "tests/test_fqn.c",
     "tests/test_route_canon.c",
     "tests/test_path_alias.c",

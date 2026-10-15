@@ -229,6 +229,7 @@ extern void suite_discover(void);
 extern void suite_graph_buffer(void);
 extern void suite_registry(void);
 extern void suite_pipeline(void);
+extern void suite_importance(void);
 extern void suite_index_resilience(void);
 extern void suite_call_reference(void);
 extern void suite_fqn(void);
@@ -344,6 +345,7 @@ int main(int argc, char **argv) {
     RUN_SELECTED_SUITE(graph_buffer);
     RUN_SELECTED_SUITE(registry);
     RUN_SELECTED_SUITE(pipeline);
+    RUN_SELECTED_SUITE(importance);
     RUN_SELECTED_SUITE(index_resilience);
     RUN_SELECTED_SUITE(call_reference);
     RUN_SELECTED_SUITE(fqn);
@@ -402,6 +404,7 @@ int main(int argc, char **argv) {
     /* Pipeline (M8) */
     RUN_SELECTED_SUITE(registry);
     RUN_SELECTED_SUITE(pipeline);
+    RUN_SELECTED_SUITE(importance);
     RUN_SELECTED_SUITE(index_resilience);
     RUN_SELECTED_SUITE(call_reference);
     RUN_SELECTED_SUITE(fqn);
