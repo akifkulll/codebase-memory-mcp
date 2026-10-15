@@ -10,12 +10,13 @@ mcp_query=(
   mcp cypher cli integration security
 )
 pipeline=(
-  graph_buffer registry pipeline index_resilience fqn route_canon path_alias watcher
+  graph_buffer registry pipeline importance index_resilience call_reference fqn route_canon
+  path_alias watcher
   configlink infrascan worker_pool parallel incremental discover language userconfig
   gitignore git_context
 )
 languages=(
-  extraction extraction_inheritance extraction_imports grammar_regression grammar_labels
+  extraction parse_coverage extraction_inheritance extraction_imports grammar_regression grammar_labels
   grammar_imports scope type_rep go_lsp c_lsp php_lsp cs_lsp cs_lsp_bench py_lsp
   kotlin_lsp rust_lsp py_lsp_bench py_lsp_stress py_lsp_scale ts_lsp java_lsp
   java_lsp_coverage lang_contract edge_imports edge_structural lsp_resolution_probe
