@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Layer 1: Static security audit — scans C source for dangerous calls.
+# Layer 1: Static security audit — scans C and Zig source for dangerous calls.
 # Every occurrence must be on the checked-in allow-list.
 #
 # Usage: scripts/security-audit.sh
@@ -56,7 +56,7 @@ while IFS= read -r file; do
             fi
         fi
     done
-done < <(find "$ROOT/src" -name '*.c' -type f | sort)
+done < <(find "$ROOT/src" \( -name '*.c' -o -name '*.zig' \) -type f | sort)
 
 # ── 1b. Raw network calls (must not exist) ──────────────────────
 
@@ -64,7 +64,7 @@ echo ""
 echo "--- Scanning for raw network calls (must not exist) ---"
 
 NETWORK_FUNCS='[^a-z_]connect\(|[^a-z_]socket\(|[^a-z_]sendto\('
-if grep -rn -E "$NETWORK_FUNCS" "$ROOT/src/" --include='*.c' 2>/dev/null | grep -v '^\s*//' | grep -v '^\s*\*' | grep -v 'test'; then
+if grep -rn -E "$NETWORK_FUNCS" "$ROOT/src/" --include='*.c' --include='*.zig' 2>/dev/null | grep -v '^\s*//' | grep -v '^\s*\*' | grep -v 'test'; then
     echo "BLOCKED: Raw network calls found in src/."
     fail
 else
@@ -153,7 +153,7 @@ while IFS= read -r file; do
             fi
         done < <(echo "$match" | grep -oE 'https?://[A-Za-z0-9._/~:@!$&()*+,;=?#%-]+' || true)
     done < <(grep -n 'https\?://' "$file" 2>/dev/null | grep -v '^\s*//' | grep -v '^\s*\*' || true)
-done < <(find "$ROOT/src" -name '*.c' -type f | sort)
+done < <(find "$ROOT/src" \( -name '*.c' -o -name '*.zig' \) -type f | sort)
 
 if $URL_OK; then
     echo "OK: All URLs are on the allow-list."
@@ -178,7 +178,7 @@ while IFS= read -r match; do
             FOPEN_FOUND=true
             ;;
     esac
-done < <(grep -rn 'fopen.*"w' "$ROOT/src/" --include='*.c' 2>/dev/null | grep -v '/test' | grep -v '^\s*//' || true)
+done < <(grep -rn 'fopen.*"w' "$ROOT/src/" --include='*.c' --include='*.zig' 2>/dev/null | grep -v '/test' | grep -v '^\s*//' || true)
 
 if ! $FOPEN_FOUND; then
     echo "OK: All file writes are in expected locations."
@@ -215,7 +215,7 @@ while IFS= read -r file; do
             TIMEBOMB_FOUND=true
         fi
     done
-done < <(find "$ROOT/src" -name '*.c' -type f | sort)
+done < <(find "$ROOT/src" \( -name '*.c' -o -name '*.zig' \) -type f | sort)
 
 if ! $TIMEBOMB_FOUND; then
     echo "OK: No suspicious time-bomb patterns found."

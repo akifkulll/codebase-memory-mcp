@@ -391,8 +391,8 @@ fn addNativeSources(
         module.addObject(bridge);
     }
 
-    const cli_zig = addCliZigLibrary(b, cfg);
-    module.linkLibrary(cli_zig);
+    const cbm_zig = addCbmZigLibrary(b, cfg);
+    module.linkLibrary(cbm_zig);
 }
 
 fn addZovaRuntimeArchive(b: *std.Build, module: *std.Build.Module, cfg: Config) void {
@@ -402,15 +402,34 @@ fn addZovaRuntimeArchive(b: *std.Build, module: *std.Build.Module, cfg: Config) 
     });
 }
 
-fn addCliZigLibrary(b: *std.Build, cfg: Config) *std.Build.Step.Compile {
+fn addCbmZigLibrary(b: *std.Build, cfg: Config) *std.Build.Step.Compile {
+    // Zig modules implement C headers; they see the C declarations through a
+    // translate-c module of src/cbm_zig_c.h (Zig has no @cImport).
+    const c_decls = b.addTranslateC(.{
+        .root_source_file = b.path("src/cbm_zig_c.h"),
+        .target = cfg.target,
+        .optimize = .ReleaseFast,
+    });
+    c_decls.defineCMacro("_DEFAULT_SOURCE", null);
+    c_decls.defineCMacro("_GNU_SOURCE", null);
+    for ([_][]const u8{
+        "src",
+        "vendored",
+        "vendored/sqlite3",
+        "vendored/mimalloc/include",
+        "internal/cbm",
+        "internal/cbm/vendored/ts_runtime/include",
+    }) |dir| c_decls.addIncludePath(b.path(dir));
+
     const module = b.createModule(.{
-        .root_source_file = b.path("src/cli_zig/cbm_cli_zig.zig"),
+        .root_source_file = b.path("src/cbm_zig.zig"),
         .target = cfg.target,
         .optimize = .ReleaseFast,
         .link_libc = true,
     });
+    module.addImport("c", c_decls.createModule());
     const lib = b.addLibrary(.{
-        .name = "cbm_cli_zig",
+        .name = "cbm_zig",
         .linkage = .static,
         .root_module = module,
     });
@@ -575,12 +594,9 @@ const native_sources = [_][]const u8{
     "src/pipeline/pass_complexity.c",
     "src/pipeline/pass_importance.c",
     "src/pipeline/pass_pkgmap.c",
-    "src/simhash/minhash.c",
     "src/semantic/semantic.c",
     "src/semantic/ast_profile.c",
     "src/semantic/rotsq.c",
-    "src/watcher/watcher.c",
-    "src/git/git_context.c",
     "src/cli/cli.c",
     "src/cli/progress_sink.c",
     "src/cli/hook_augment.c",

@@ -1,7 +1,7 @@
 # Security allow-list for dangerous function calls.
 # Format: file:function:justification
 # Lines starting with # are comments. Empty lines are ignored.
-# Any call to a listed function in a .c file under src/ that is NOT on this
+# Any call to a listed function in a .c or .zig file under src/ that is NOT on this
 # list causes the security audit (scripts/security-audit.sh) to fail.
 
 # ── Foundation: platform abstraction (defines cbm_popen wrapper + shell-free exec) ──
@@ -17,15 +17,12 @@ src/cli/cli.c:cbm_popen:pgrep for kill_other_instances (hardcoded process name)
 src/cli/cli.c:popen:sha256 checksum computation via shasum
 
 # ── Watcher: git status polling (repo paths validated via cbm_validate_shell_arg) ──
-src/watcher/watcher.c:system:git repo detection (is_git_repo)
-src/watcher/watcher.c:cbm_popen:git HEAD hash (git_head)
-src/watcher/watcher.c:cbm_popen:git working tree status (git_is_dirty)
-src/watcher/watcher.c:cbm_popen:git file count (git_file_count)
-src/watcher/watcher.c:popen:via cbm_popen wrapper calls
+src/watcher/watcher.zig:cbm_popen:git rev-parse/status/submodule/ls-files polling (popenGit)
+src/watcher/watcher.zig:popen:via cbm_popen wrapper call
 
 # ── Git context: git metadata resolution (repo paths validated via cbm_validate_shell_arg) ──
-src/git/git_context.c:cbm_popen:git rev-parse/symbolic-ref/merge-base metadata lookup
-src/git/git_context.c:popen:via cbm_popen wrapper call
+src/git/git_context.zig:cbm_popen:git rev-parse/symbolic-ref/merge-base metadata lookup
+src/git/git_context.zig:popen:via cbm_popen wrapper call
 
 # ── MCP server: search and change detection ────────────────────────────────
 src/mcp/mcp.c:cbm_popen:search_code via grep (pattern in temp file, path validated)

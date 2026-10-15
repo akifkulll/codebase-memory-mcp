@@ -106,11 +106,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .ci/windows-zig "$RUNNER_TEMP/cbm-zig-local" "$RUNNER_TEMP/cbm-zig-global"
+          # CBM's Zig modules read C declarations from a translate-c module "c".
+          zig translate-c -lc -target "$TARGET" -D_DEFAULT_SOURCE -D_GNU_SOURCE \
+            -Isrc -Ivendored -Ivendored/sqlite3 -Ivendored/mimalloc/include \
+            -Iinternal/cbm -Iinternal/cbm/vendored/ts_runtime/include \
+            src/cbm_zig_c.h > "$RUNNER_TEMP/cbm_c.zig"
           zig build-lib -static -O ReleaseFast -lc -fcompiler-rt -target "$TARGET" \
             --cache-dir "$RUNNER_TEMP/cbm-zig-local" \
             --global-cache-dir "$RUNNER_TEMP/cbm-zig-global" \
-            -femit-bin=.ci/windows-zig/libcbm_cli_zig.a \
-            src/cli_zig/cbm_cli_zig.zig
+            -femit-bin=.ci/windows-zig/libcbm_zig.a \
+            --dep c -Mroot=src/cbm_zig.zig -Mc="$RUNNER_TEMP/cbm_c.zig"
           # Zova 1.x imports its SQLite bindings and build options by name.
           zig translate-c -lc -target "$TARGET" vendored/sqlite3/sqlite3.h \
             > "$RUNNER_TEMP/sqlite_c.zig"
@@ -173,7 +178,7 @@ jobs:
         shell: msys2 {0}
         run: |
           test -f .ci/windows-zig/libzova_c.a
-          test -f .ci/windows-zig/libcbm_cli_zig.a
+          test -f .ci/windows-zig/libcbm_zig.a
           test -f .ci/windows-zig/cbm_zova_bridge.o
           grep -q 'Zova C ABI, v1.3.0' .ci/zova/include/zova.h
           mkdir -p .ci/zova/zig-out/lib

@@ -87,14 +87,14 @@ verify_compiler "$CC"
 # Step 1: Clean C build artifacts
 rm -rf "$ROOT/build/c"
 if [[ -n "${CBM_PREBUILT_ZIG_DIR:-}" ]]; then
-    for artifact in libcbm_cli_zig.a cbm_zova_bridge.o; do
+    for artifact in libcbm_zig.a cbm_zova_bridge.o; do
         [[ -s "$CBM_PREBUILT_ZIG_DIR/$artifact" ]] || {
             echo "error: missing prebuilt Zig artifact: $CBM_PREBUILT_ZIG_DIR/$artifact" >&2
             exit 1
         }
     done
     mkdir -p "$ROOT/build/c"
-    cp "$CBM_PREBUILT_ZIG_DIR/libcbm_cli_zig.a" "$ROOT/build/c/"
+    cp "$CBM_PREBUILT_ZIG_DIR/libcbm_zig.a" "$ROOT/build/c/"
     cp "$CBM_PREBUILT_ZIG_DIR/cbm_zova_bridge.o" "$ROOT/build/c/"
     export CBM_PREBUILT_ZIG=1
 fi
