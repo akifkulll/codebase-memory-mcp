@@ -1335,6 +1335,78 @@ TEST(tool_check_index_coverage_exact_paths_beyond_partial_cap) {
 #endif
 }
 
+/* Upstream #963 (a9535092): a file whose one range covers most of it is
+ * reported as unusable, and a range list clipped by the extractor cap says how
+ * many ranges it lost instead of reading as complete. */
+TEST(tool_check_index_coverage_reports_unusable_and_truncated_ranges) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    enum { GARBAGE_BLOCKS = 400 };
+    char root[512];
+    char cache[512];
+    snprintf(root, sizeof(root), "%s/cbm-mcp-coverage-unusable-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-coverage-unusable-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    ASSERT_EQ(th_write_file(TH_PATH(root, "whole.py"), ")))\n((( \n]]] [[[\ndef x(:\n"), 0);
+    char *src = malloc(GARBAGE_BLOCKS * 96 + 1);
+    ASSERT_NOT_NULL(src);
+    size_t off = 0;
+    for (int i = 0; i < GARBAGE_BLOCKS; i++) {
+        off += (size_t)snprintf(src + off, 96, "def ok%d():\n    return %d\n%%%%%% g%d ((( %%%%%%\n",
+                                i, i, i);
+    }
+    ASSERT_EQ(th_write_file(TH_PATH(root, "many.py"), src), 0);
+    free(src);
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"fast\",\"name\":\"cov-unus\"}",
+             root);
+    char *indexed = cbm_mcp_handle_tool(srv, "index_repository", args);
+    bool index_ok = response_contains_json_fragment(indexed, "\"status\":\"indexed\"") &&
+                    response_contains_json_fragment(indexed, "\"parse_unusable\":true");
+
+    char *cov = cbm_mcp_handle_tool(srv, "check_index_coverage",
+                                    "{\"project\":\"cov-unus\",\"paths\":[\"whole.py\",\"many.py\"]}");
+    bool whole_ok = coverage_path_is(cov, "whole.py", "status", "unusable") &&
+                    coverage_path_is(cov, "whole.py", "recommended_action", "read_source_directly");
+    bool many_ok = coverage_path_is(cov, "many.py", "status", "partial") &&
+                   coverage_path_is(cov, "many.py", "parse_error_ranges_truncated", "true");
+    char *dropped = coverage_path_field(cov, "many.py", "parse_error_ranges_dropped");
+    bool dropped_ok = dropped && atoi(dropped) > 0;
+    free(dropped);
+    free(cov);
+
+    cov = cbm_mcp_handle_tool(srv, "check_index_coverage",
+                              "{\"project\":\"cov-unus\",\"scopes\":[\".\"]}");
+    bool scope_ok = response_contains_json_fragment(cov, "\"unusable\":1") &&
+                    response_contains_json_fragment(cov, "\"partial\":1") &&
+                    response_contains_json_fragment(cov, "\"total_gaps\":2");
+    free(cov);
+
+    free(indexed);
+    cbm_mcp_server_free(srv);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+    th_rmtree(root);
+    th_rmtree(cache);
+
+    ASSERT_TRUE(index_ok);
+    ASSERT_TRUE(whole_ok);
+    ASSERT_TRUE(many_ok);
+    ASSERT_TRUE(dropped_ok);
+    ASSERT_TRUE(scope_ok);
+    PASS();
+#endif
+}
+
 /* #12 (upstream d024f41e): coverage survives an index-mode downgrade. A
  * fast re-index of a full index keeps files that fast discovery skips (the
  * additive mode_skipped contract in pipeline_incremental.c), so their
@@ -5602,6 +5674,7 @@ SUITE(mcp) {
     RUN_TEST(tool_index_repository_reports_zova_committed_counts);
     RUN_TEST(tool_check_index_coverage_reports_recorded_gaps);
     RUN_TEST(tool_check_index_coverage_exact_paths_beyond_partial_cap);
+    RUN_TEST(tool_check_index_coverage_reports_unusable_and_truncated_ranges);
     RUN_TEST(tool_check_index_coverage_survives_mode_downgrade);
     RUN_TEST(mcp_render_compact_tables_and_scalars);
     RUN_TEST(tool_list_projects_pages_and_detects_catalog_changes);

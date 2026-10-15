@@ -534,7 +534,8 @@ static const tool_def_t TOOLS[] = {
      "repository-relative paths and path scopes. Use it for files you cite or act on, and on "
      "scopes before negative or exhaustive claims: files the parser skipped or only partly "
      "understood can be missing from graph results. Reports status (no_recorded_issue, partial "
-     "with parse_error_ranges, skipped, excluded, not_indexed, missing, coverage_unavailable), "
+     "with parse_error_ranges, unusable when one range covers most of the file, skipped, "
+     "excluded, not_indexed, missing, coverage_unavailable), "
      "filesystem freshness against the indexed metadata, and a recommended_action. Best-effort "
      "and about extraction only. At least one of paths or scopes is required.",
      "{\"type\":\"object\",\"properties\":{"
@@ -2231,7 +2232,7 @@ enum {
     COVERAGE_SCOPE_MAX = 32,
     COVERAGE_SCOPE_DEFAULT_LIMIT = 200,
     COVERAGE_SCOPE_MAX_LIMIT = 1000,
-    COVERAGE_RANGE_MAX = 64,
+    COVERAGE_RANGE_MAX = 256, /* matches CBM_MAX_ERROR_REGIONS */
     COVERAGE_STATUS_EXAMPLES = 5,
 };
 
@@ -2243,8 +2244,8 @@ typedef enum {
 
 /* What one File row says about extraction. */
 typedef struct {
-    const char *status; /* no_recorded_issue | partial | skipped */
-    char *ranges;       /* partial: "12-40,88-90" */
+    const char *status; /* no_recorded_issue | partial | unusable | skipped */
+    char *ranges;       /* partial/unusable: "12-40,88-90", ",+N" when clipped */
     char *phase;        /* skipped */
     char *reason;       /* skipped */
 } coverage_file_t;
@@ -2264,7 +2265,11 @@ static void coverage_file_parse(const cbm_zova_file_coverage_t *row, coverage_fi
     const char *coverage = yyjson_get_str(yyjson_obj_get(root, "coverage"));
     if (coverage && strcmp(coverage, CBM_COVERAGE_PARTIAL) == 0) {
         const char *ranges = yyjson_get_str(yyjson_obj_get(root, "parse_error_ranges"));
-        out->status = "partial";
+        /* One range over most of the file: the ranges are no help, so the
+         * file is reported as unusable rather than partial (upstream
+         * a9535092). It was still indexed. */
+        out->status = yyjson_get_bool(yyjson_obj_get(root, "parse_unusable")) ? "unusable"
+                                                                               : "partial";
         out->ranges = heap_strdup(ranges ? ranges : "");
     } else if (coverage && strcmp(coverage, CBM_COVERAGE_MISSED) == 0) {
         const char *phase = yyjson_get_str(yyjson_obj_get(root, "coverage_phase"));
@@ -2416,6 +2421,9 @@ static const char *coverage_exclusion(const char *rel, const cbm_gitignore_t *gi
     return NULL;
 }
 
+/* Ranges as {start,end} objects. The extractor ends a clipped list with
+ * ",+N" (N ranges dropped by its cap); that, or this reader's own cap, sets
+ * "truncated" so a clipped list never reads as a complete one. */
 static void coverage_add_ranges(yyjson_mut_doc *doc, yyjson_mut_val *item, const char *ranges) {
     if (!ranges || !ranges[0]) {
         return;
@@ -2423,7 +2431,19 @@ static void coverage_add_ranges(yyjson_mut_doc *doc, yyjson_mut_val *item, const
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     const char *p = ranges;
     int emitted = 0;
-    while (*p && emitted < COVERAGE_RANGE_MAX) {
+    long dropped = 0;
+    bool truncated = false;
+    while (*p) {
+        if (*p == '+') {
+            char *end = NULL;
+            dropped = strtol(p + 1, &end, 10);
+            truncated = end != p + 1 && dropped > 0;
+            break;
+        }
+        if (emitted >= COVERAGE_RANGE_MAX) {
+            truncated = true;
+            break;
+        }
         char *end = NULL;
         long start = strtol(p, &end, 10);
         if (end == p || start <= 0) {
@@ -2450,6 +2470,12 @@ static void coverage_add_ranges(yyjson_mut_doc *doc, yyjson_mut_val *item, const
         p++;
     }
     yyjson_mut_obj_add_val(doc, item, "parse_error_ranges", arr);
+    if (truncated) {
+        yyjson_mut_obj_add_bool(doc, item, "parse_error_ranges_truncated", true);
+        if (dropped > 0) {
+            yyjson_mut_obj_add_int(doc, item, "parse_error_ranges_dropped", dropped);
+        }
+    }
 }
 
 static void coverage_add_detail(yyjson_mut_doc *doc, yyjson_mut_val *item,
@@ -2476,7 +2502,7 @@ static const char *coverage_recommended_action(const char *status, const char *f
     if (strcmp(status, "partial") == 0) {
         return "read_ranges_and_verify_scope";
     }
-    if (strcmp(status, "skipped") == 0) {
+    if (strcmp(status, "skipped") == 0 || strcmp(status, "unusable") == 0) {
         return "read_source_directly";
     }
     return "use_graph_with_best_effort_caveat";
@@ -2534,6 +2560,7 @@ static void coverage_add_scope_json(yyjson_mut_doc *doc, yyjson_mut_val *item, c
     yyjson_mut_obj_add_strcpy(doc, item, "scope", scope[0] ? scope : ".");
     int files = 0;
     int partial = 0;
+    int unusable = 0;
     int skipped = 0;
     int gaps = 0;
     yyjson_mut_val *entries = yyjson_mut_arr(doc);
@@ -2548,6 +2575,8 @@ static void coverage_add_scope_json(yyjson_mut_doc *doc, yyjson_mut_val *item, c
         if (gap) {
             if (strcmp(c.status, "partial") == 0) {
                 partial++;
+            } else if (strcmp(c.status, "unusable") == 0) {
+                unusable++;
             } else {
                 skipped++;
             }
@@ -2568,8 +2597,9 @@ static void coverage_add_scope_json(yyjson_mut_doc *doc, yyjson_mut_val *item, c
                                       : "no_recorded_issue";
     yyjson_mut_obj_add_str(doc, item, "status", status);
     yyjson_mut_obj_add_int(doc, item, "files", files);
-    yyjson_mut_obj_add_int(doc, item, "no_recorded_issue", files - partial - skipped);
+    yyjson_mut_obj_add_int(doc, item, "no_recorded_issue", files - partial - unusable - skipped);
     yyjson_mut_obj_add_int(doc, item, "partial", partial);
+    yyjson_mut_obj_add_int(doc, item, "unusable", unusable);
     yyjson_mut_obj_add_int(doc, item, "skipped", skipped);
     yyjson_mut_obj_add_int(doc, item, "total_gaps", gaps);
     int end = offset + limit < gaps ? offset + limit : gaps;
@@ -4010,9 +4040,10 @@ enum { INDEX_SKIPPED_FILE_CAP = 50 };
  * When there are skips, also emits:
  *   "skipped": {"files":[{path,reason,phase}..(<=50)], "count":N, "truncated":bool}
  * and, if a per-run logfile was written, "logfile": "<path>".
- * Files the parser only partly understood (phase "parse_partial") were still
- * indexed, so they are reported apart as "parse_partial" with their error
- * line ranges and do not count as skipped.
+ * Files the parser only partly understood (phase "parse_partial", or
+ * "parse_unusable" when one range covers most of the file) were still indexed,
+ * so they are reported apart as "parse_partial" with their error line ranges
+ * and do not count as skipped.
  * The run status stays "indexed" — a skipped file is the expected handled
  * outcome, not a failure. errs[] is borrowed (copied into doc). */
 static void add_skipped_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
@@ -4020,7 +4051,7 @@ static void add_skipped_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
     int skipped_count = 0;
     int partial_count = 0;
     for (int i = 0; errs && i < count; i++) {
-        if (errs[i].phase && strcmp(errs[i].phase, "parse_partial") == 0) {
+        if (cbm_pipeline_phase_is_partial(errs[i].phase)) {
             partial_count++;
         } else {
             skipped_count++;
@@ -4040,7 +4071,7 @@ static void add_skipped_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
         yyjson_mut_val *files = yyjson_mut_arr(doc);
         int shown = 0;
         for (int i = 0; i < count && shown < INDEX_SKIPPED_FILE_CAP; i++) {
-            bool is_partial = errs[i].phase && strcmp(errs[i].phase, "parse_partial") == 0;
+            bool is_partial = cbm_pipeline_phase_is_partial(errs[i].phase);
             if (is_partial != partial) {
                 continue;
             }
@@ -4049,6 +4080,9 @@ static void add_skipped_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
             if (partial) {
                 yyjson_mut_obj_add_strcpy(doc, fe, "error_ranges",
                                           errs[i].reason ? errs[i].reason : "");
+                if (strcmp(errs[i].phase, "parse_unusable") == 0) {
+                    yyjson_mut_obj_add_bool(doc, fe, "parse_unusable", true);
+                }
             } else {
                 yyjson_mut_obj_add_strcpy(doc, fe, "reason", errs[i].reason ? errs[i].reason : "");
                 yyjson_mut_obj_add_strcpy(doc, fe, "phase", errs[i].phase ? errs[i].phase : "");

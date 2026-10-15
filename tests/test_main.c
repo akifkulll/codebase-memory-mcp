@@ -160,6 +160,7 @@ extern void suite_str_util(void);
 extern void suite_platform(void);
 extern void suite_subprocess(void);
 extern void suite_extraction(void);
+extern void suite_parse_coverage(void);
 extern void suite_extraction_inheritance(void);
 extern void suite_extraction_imports(void);
 extern void suite_grammar_regression(void);
@@ -315,6 +316,7 @@ int main(int argc, char **argv) {
     /* Existing C code regression tests */
     RUN_SELECTED_SUITE(ac);
     RUN_SELECTED_SUITE(extraction);
+    RUN_SELECTED_SUITE(parse_coverage);
     RUN_SELECTED_SUITE(extraction_inheritance);
     RUN_SELECTED_SUITE(extraction_imports);
     RUN_SELECTED_SUITE(grammar_regression);

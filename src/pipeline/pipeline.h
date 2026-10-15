@@ -196,12 +196,13 @@ bool cbm_pipeline_get_zova_publish_stats(
 typedef struct {
     char *path;   /* repo-relative path of the skipped file */
     char *reason; /* human-readable cause (e.g. "oversized (712 MB > 512 MB)",
-                   * "parse timeout", "read failed"). For phase "parse_partial"
+                   * "parse timeout", "read failed"). For the partial phases
                    * this is the 1-based line-range list ("12-40,88-90"). */
     char *phase;  /* "read" | "extract" | "oversized" | "crash" | "hang" |
-                   * "parse_partial". "parse_partial" is NOT a skip: the file
-                   * was indexed but has unrecovered parse-error regions; the
-                   * MCP layer reports it apart from skipped[]. "cross_lsp" is a RESERVED
+                   * "parse_partial" | "parse_unusable". Neither is a skip: the
+                   * file was indexed but has unrecovered parse-error regions
+                   * ("parse_unusable": one range covers most of the file); the
+                   * MCP layer reports them apart from skipped[]. "cross_lsp" is a RESERVED
                    * phase string for Track C's crash-attribution signal and is
                    * intentionally NOT emitted today (the cross-LSP passes are
                    * best-effort/void with no genuine per-file failure). */
@@ -212,6 +213,10 @@ typedef struct {
  * NOT thread-safe: call it from the sequential extraction pass, or from the
  * parallel merge step (never from inside a parallel worker — workers collect
  * into per-worker lists and merge sequentially). */
+/* True for the phases that mean "indexed, but with unrecovered parse-error
+ * regions" ("parse_partial", "parse_unusable"), as opposed to a skip. */
+bool cbm_pipeline_phase_is_partial(const char *phase);
+
 void cbm_pipeline_add_file_error(cbm_pipeline_t *p, const char *path, const char *reason,
                                  const char *phase);
 

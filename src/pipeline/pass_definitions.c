@@ -590,7 +590,8 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
              * pass_parallel.c (keep in sync). */
             cbm_pipeline_add_file_error(ctx->pipeline, rel,
                                         result->error_ranges ? result->error_ranges : "",
-                                        "parse_partial");
+                                        result->parse_unusable ? "parse_unusable"
+                                                               : "parse_partial");
         }
 
         /* Create nodes for each definition */

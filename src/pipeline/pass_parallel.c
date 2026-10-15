@@ -909,10 +909,11 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
         } else if (result->parse_incomplete) {
             /* Indexed, but with unrecovered ERROR/MISSING regions. Not a skip:
              * recorded under the distinct "parse_partial" phase with the
-             * line-range list as the reason. Keep in sync with
-             * pass_definitions.c. */
+             * line-range list as the reason, or "parse_unusable" when one range
+             * covers most of the file (see parse_unusable in cbm.h). Keep in
+             * sync with pass_definitions.c. */
             pp_err_add(errs, fi->rel_path, result->error_ranges ? result->error_ranges : "",
-                       "parse_partial");
+                       result->parse_unusable ? "parse_unusable" : "parse_partial");
         }
 
         /* Create definition nodes in local gbuf */

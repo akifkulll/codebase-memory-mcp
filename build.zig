@@ -595,6 +595,7 @@ const all_test_sources = [_][]const u8{
     "tests/test_dump_verify.c",
     "tests/test_subprocess.c",
     "tests/test_extraction.c",
+    "tests/test_parse_coverage.c",
     "tests/test_extraction_inheritance.c",
     "tests/test_extraction_imports.c",
     "tests/test_grammar_regression.c",

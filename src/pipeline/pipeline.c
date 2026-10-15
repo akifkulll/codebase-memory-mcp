@@ -254,6 +254,10 @@ static char *fe_strdup(const char *s) {
     return d;
 }
 
+bool cbm_pipeline_phase_is_partial(const char *phase) {
+    return phase && (strcmp(phase, "parse_partial") == 0 || strcmp(phase, "parse_unusable") == 0);
+}
+
 void cbm_pipeline_add_file_error(cbm_pipeline_t *p, const char *path, const char *reason,
                                  const char *phase) {
     if (!p) {
@@ -304,6 +308,9 @@ static bool stamp_file_coverage(cbm_pipeline_t *p, cbm_gbuf_t *gbuf, const cbm_f
     if (partial) {
         yyjson_mut_obj_add_str(doc, root, "coverage", CBM_COVERAGE_PARTIAL);
         yyjson_mut_obj_add_str(doc, root, "parse_error_ranges", e->reason ? e->reason : "");
+        if (strcmp(e->phase, "parse_unusable") == 0) {
+            yyjson_mut_obj_add_bool(doc, root, "parse_unusable", true);
+        }
     } else {
         yyjson_mut_obj_add_str(doc, root, "coverage", CBM_COVERAGE_MISSED);
         yyjson_mut_obj_add_str(doc, root, "coverage_phase", e->phase);
@@ -331,7 +338,7 @@ void cbm_pipeline_stamp_coverage(cbm_pipeline_t *p, cbm_gbuf_t *gbuf) {
             if (!e->path || !e->phase) {
                 continue;
             }
-            bool is_partial = strcmp(e->phase, "parse_partial") == 0;
+            bool is_partial = cbm_pipeline_phase_is_partial(e->phase);
             if (is_partial != (pass == 0)) {
                 continue;
             }
