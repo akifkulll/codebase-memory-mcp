@@ -4,7 +4,7 @@ set -euo pipefail
 # install.sh — One-line installer for codebase-memory-mcp.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/0ctacity/codebase-memory-mcp/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/octacity-org/codebase-memory-mcp/main/install.sh | bash
 #   curl -fsSL ... | bash -s -- --dir /path   # Custom install directory
 #
 # Environment:
@@ -16,7 +16,7 @@ set -euo pipefail
 # called because the final line hasn't arrived yet.
 main() {
 
-REPO="0ctacity/codebase-memory-mcp"
+REPO="octacity-org/codebase-memory-mcp"
 INSTALL_DIR="$HOME/.local/bin"
 SKIP_CONFIG=false
 REPLACE=false

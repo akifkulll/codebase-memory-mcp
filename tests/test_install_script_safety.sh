@@ -139,8 +139,8 @@ PATH="$FAKE_BIN_DIR:$PATH" CBM_DOWNLOAD_URL=http://localhost/releases \
     exit 1
 fi
 
-grep -q 'REPO="0ctacity/codebase-memory-mcp"' "$ROOT/install.sh"
-grep -q '\$Repo = "0ctacity/codebase-memory-mcp"' "$ROOT/install.ps1"
+grep -q 'REPO="octacity-org/codebase-memory-mcp"' "$ROOT/install.sh"
+grep -q '\$Repo = "octacity-org/codebase-memory-mcp"' "$ROOT/install.ps1"
 grep -q '\$AlreadyInstalled = \$true' "$ROOT/install.ps1"
 grep -q '\$PSScriptRoot' "$ROOT/install.ps1"
 # TLS 1.3 only where schannel can negotiate it (build 20348+); an unsupported

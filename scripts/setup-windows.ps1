@@ -13,7 +13,7 @@ if ($RootInstaller -and (Test-Path $RootInstaller)) {
 }
 
 $TmpInstaller = Join-Path ([System.IO.Path]::GetTempPath()) "cbm-install-$(Get-Random).ps1"
-$Url = "https://raw.githubusercontent.com/0ctacity/codebase-memory-mcp/main/install.ps1"
+$Url = "https://raw.githubusercontent.com/octacity-org/codebase-memory-mcp/main/install.ps1"
 try {
     Invoke-WebRequest -Uri $Url -OutFile $TmpInstaller -UseBasicParsing
     & $TmpInstaller @args

@@ -20,7 +20,7 @@ if ([Environment]::OSVersion.Version.Build -ge 20348 -and
 }
 [Net.ServicePointManager]::SecurityProtocol = $CbmProtocols
 
-$Repo = "0ctacity/codebase-memory-mcp"
+$Repo = "octacity-org/codebase-memory-mcp"
 $InstallDir = "$env:LOCALAPPDATA\Programs\codebase-memory-mcp"
 $BinName = "codebase-memory-mcp.exe"
 $BaseUrl = if ($env:CBM_DOWNLOAD_URL) { $env:CBM_DOWNLOAD_URL } else { "https://github.com/$Repo/releases/latest/download" }
