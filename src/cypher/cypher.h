@@ -196,6 +196,10 @@ typedef struct {
     const char *op; /* "=", "<>", "=~", "CONTAINS", "STARTS WITH", "ENDS WITH",
                        ">", "<", ">=", "<=", "IN", "IS NULL", "IS NOT NULL" */
     const char *value;
+    /* Right side is another bound property (a.x <> b.y) instead of a literal
+     * value: value_variable is set and value is NULL. */
+    const char *value_variable;
+    const char *value_property;
     bool negated;           /* NOT prefix */
     const char **in_values; /* IN [...] list */
     int in_value_count;
@@ -258,6 +262,8 @@ typedef struct {
     cbm_case_expr_t *kase; /* CASE expression (NULL if not CASE) */
     cbm_func_arg_t *args;  /* args for a multi-argument function (NULL if none) */
     int arg_count;
+    bool has_index;        /* labels(n)[i] / keys(n)[i]: element i of the list */
+    int index;             /* negative counts from the end */
 } cbm_return_item_t;
 
 /* Upper bound on ORDER BY sort keys. Queries with more keys are rejected at

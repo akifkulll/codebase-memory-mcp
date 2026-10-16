@@ -1101,6 +1101,74 @@ TEST(cypher_func_labels) {
     PASS();
 }
 
+/* labels(n)[i] / keys(n)[i] select one list element; out of range is null. */
+TEST(cypher_func_list_index) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) WHERE f.name = \"HandleOrder\" RETURN "
+                                "labels(f)[0], labels(f)[-1] AS last, labels(f)[1], keys(f)[0]",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.columns[0], "labels(f)[0]");
+    ASSERT_STR_EQ(r.rows[0][0], "Function");
+    ASSERT_STR_EQ(r.rows[0][1], "Function");
+    ASSERT_STR_EQ(r.rows[0][2], "");
+    ASSERT_STR_EQ(r.rows[0][3], "name");
+    cbm_cypher_result_free(&r);
+
+    /* Other bracket forms still fail loudly (#373). */
+    memset(&r, 0, sizeof(r));
+    rc = cbm_cypher_execute(s, "MATCH (f:Function) RETURN labels(f)[0..1]", "test", 0, &r);
+    ASSERT_TRUE(rc != 0 || r.error != NULL);
+    cbm_cypher_result_free(&r);
+    memset(&r, 0, sizeof(r));
+    rc = cbm_cypher_execute(s, "MATCH (f:Function) RETURN f.name[0]", "test", 0, &r);
+    ASSERT_TRUE(rc != 0 || r.error != NULL);
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* WHERE compares two bound properties, not only a property and a literal. */
+TEST(cypher_where_property_vs_property) {
+    cbm_store_t *s = setup_cypher_store();
+    const char *base = "MATCH (a:Function)-[:CALLS]->(b:Function) WHERE ";
+    struct {
+        const char *where;
+        int rows;
+    } cases[] = {
+        {"a.file_path <> b.file_path RETURN a.name", 3},
+        {"a.file_path = b.file_path RETURN a.name", 0},
+        {"NOT a.name = b.name RETURN a.name", 3},
+        {"a.start_line < b.end_line RETURN b.name", 1},
+        {"NOT b.name = \"SubmitOrder\" RETURN b.name", 2},
+        {"a.name = \"HandleOrder\" AND NOT b.name = \"LogError\" RETURN b.name", 1},
+    };
+    char q[256];
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        cbm_cypher_result_t r = {0};
+        snprintf(q, sizeof(q), "%s%s", base, cases[i].where);
+        int rc = cbm_cypher_execute(s, q, "test", 0, &r);
+        ASSERT_EQ(rc, 0);
+        ASSERT_EQ(r.row_count, cases[i].rows);
+        if (i == 3) {
+            ASSERT_STR_EQ(r.rows[0][0], "ValidateOrder");
+        }
+        cbm_cypher_result_free(&r);
+    }
+
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s, "MATCH (f:Function) WHERE f.start_line < f.end_line RETURN f.name",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(cypher_func_type) {
     cbm_store_t *s = setup_cypher_store();
     cbm_cypher_result_t r = {0};
@@ -4125,6 +4193,8 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_where_starts_with);
     RUN_TEST(cypher_exec_return_properties);
     RUN_TEST(cypher_func_labels);
+    RUN_TEST(cypher_func_list_index);
+    RUN_TEST(cypher_where_property_vs_property);
     RUN_TEST(cypher_func_type);
     RUN_TEST(cypher_func_id);
     RUN_TEST(cypher_func_keys);

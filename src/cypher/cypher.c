@@ -784,6 +784,8 @@ static void expr_free(cbm_expr_t *e) {
             safe_str_free(&cur->cond.property);
             safe_str_free(&cur->cond.op);
             safe_str_free(&cur->cond.value);
+            safe_str_free(&cur->cond.value_variable);
+            safe_str_free(&cur->cond.value_property);
             for (int i = 0; i < cur->cond.in_value_count; i++) {
                 safe_str_free(&cur->cond.in_values[i]);
             }
@@ -1120,6 +1122,21 @@ static cbm_expr_t *parse_condition_op(parser_t *p, cbm_condition_t *c) {
     } else if (check(p, TOK_FALSE)) {
         advance(p);
         c->value = heap_strdup("false");
+    } else if (check(p, TOK_IDENT)) {
+        /* Another bound variable or property: a.file_path <> b.file_path */
+        c->value_variable = heap_strdup(advance(p)->text);
+        if (match(p, TOK_DOT)) {
+            const cbm_token_t *prop = expect(p, TOK_IDENT);
+            if (!prop) {
+                cond_func_fields_free(c);
+                safe_str_free(&c->variable);
+                safe_str_free(&c->property);
+                safe_str_free(&c->op);
+                safe_str_free(&c->value_variable);
+                return NULL;
+            }
+            c->value_property = heap_strdup(prop->text);
+        }
     } else {
         snprintf(p->error, sizeof(p->error), "expected value at pos %d", peek(p)->pos);
         cond_func_fields_free(c);
@@ -1657,6 +1674,20 @@ static int parse_return_item(parser_t *p, cbm_return_item_t *item) {
     if (rc < 0) {
         return CBM_NOT_FOUND;
     }
+    /* labels(n)[i], keys(n)[i]: one element of a list-valued function. */
+    if (item->func && (strcmp(item->func, "labels") == 0 || strcmp(item->func, "keys") == 0) &&
+        match(p, TOK_LBRACKET)) {
+        bool negative = match(p, TOK_DASH);
+        const cbm_token_t *num = expect(p, TOK_NUMBER);
+        if (!num || strchr(num->text, '.') || !expect(p, TOK_RBRACKET)) {
+            snprintf(p->error, sizeof(p->error),
+                     "unsupported expression: only an integer index '[n]' may follow %s()",
+                     item->func);
+            return CBM_NOT_FOUND;
+        }
+        item->has_index = true;
+        item->index = (negative ? -1 : 1) * atoi(num->text);
+    }
     /* A bare identifier followed by '(' is a function we don't recognise
      * (recognised aggregates / string funcs / scalar funcs are handled above),
      * and '[' begins list indexing/slicing we don't support. Rather than
@@ -2152,6 +2183,8 @@ static void free_where(cbm_where_clause_t *w) {
         safe_str_free(&w->conditions[i].property);
         safe_str_free(&w->conditions[i].op);
         safe_str_free(&w->conditions[i].value);
+        safe_str_free(&w->conditions[i].value_variable);
+        safe_str_free(&w->conditions[i].value_property);
         for (int j = 0; j < w->conditions[i].in_value_count; j++) {
             safe_str_free(&w->conditions[i].in_values[j]);
         }
@@ -2727,7 +2760,15 @@ static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
         return c->negated ? !result : result;
     }
 
-    result = eval_comparison_op(c->op, actual, c->value);
+    const char *expected = c->value;
+    if (c->value_variable) {
+        cbm_condition_t rhs = {.variable = c->value_variable, .property = c->value_property};
+        expected = resolve_condition_value(&rhs, b);
+        if (!expected) {
+            return true; /* unbound, same as an unbound left side */
+        }
+    }
+    result = eval_comparison_op(c->op, actual, expected);
     return c->negated ? !result : result;
 }
 
@@ -3570,6 +3611,34 @@ static void rb_free(result_builder_t *rb) {
 
 /* ── Get projection value for a binding + return item ─────────── */
 
+/* Element idx (negative from the end) of a JSON list of plain strings, as
+ * labels()/keys() build them; "" (null) when out of range. */
+static const char *json_str_list_at(const char *list, int idx, char *buf, size_t buf_sz) {
+    const char *starts[CBM_SZ_32];
+    size_t lens[CBM_SZ_32];
+    int n = 0;
+    for (const char *q = list; q && *q && n < CBM_SZ_32; q++) {
+        if (*q != '"') {
+            continue;
+        }
+        const char *end = strchr(q + SKIP_ONE, '"');
+        if (!end) {
+            break;
+        }
+        starts[n] = q + SKIP_ONE;
+        lens[n] = (size_t)(end - q - SKIP_ONE);
+        n++;
+        q = end;
+    }
+    int i = idx < 0 ? n + idx : idx;
+    if (i < 0 || i >= n || lens[i] >= buf_sz) {
+        return "";
+    }
+    memmove(buf, starts[i], lens[i]);
+    buf[lens[i]] = '\0';
+    return buf;
+}
+
 /* Build a JSON list of a node's non-null property keys: keys(n). */
 static const char *node_keys_list(const cbm_node_t *n, char *buf, size_t buf_sz) {
     const struct {
@@ -3713,9 +3782,10 @@ static const char *project_item(binding_t *b, cbm_return_item_t *item, char *fun
             cbm_node_t *n = binding_get(b, item->variable);
             if (n && n->label) {
                 snprintf(func_buf, buf_sz, "[\"%s\"]", n->label);
-                return func_buf;
+                return item->has_index ? json_str_list_at(func_buf, item->index, func_buf, buf_sz)
+                                       : func_buf;
             }
-            return "[]";
+            return item->has_index ? "" : "[]";
         }
         if (strcmp(item->func, "type") == 0) {
             cbm_edge_t *e = binding_get_edge(b, item->variable);
@@ -3736,7 +3806,11 @@ static const char *project_item(binding_t *b, cbm_return_item_t *item, char *fun
         }
         if (strcmp(item->func, "keys") == 0) {
             cbm_node_t *n = binding_get(b, item->variable);
-            return n ? node_keys_list(n, func_buf, buf_sz) : "[]";
+            if (!n) {
+                return item->has_index ? "" : "[]";
+            }
+            const char *keys = node_keys_list(n, func_buf, buf_sz);
+            return item->has_index ? json_str_list_at(keys, item->index, func_buf, buf_sz) : keys;
         }
         if (strcmp(item->func, "properties") == 0) {
             cbm_node_t *n = binding_get(b, item->variable);
@@ -4537,7 +4611,11 @@ static void build_return_columns(result_builder_t *rb, cbm_return_clause_t *ret)
             col_names[i] = item->alias;
         } else if (item->func) {
             char buf[CBM_SZ_128];
-            snprintf(buf, sizeof(buf), "%s(%s)", item->func, item->variable);
+            if (item->has_index) {
+                snprintf(buf, sizeof(buf), "%s(%s)[%d]", item->func, item->variable, item->index);
+            } else {
+                snprintf(buf, sizeof(buf), "%s(%s)", item->func, item->variable);
+            }
             col_names[i] = heap_strdup(buf);
         } else if (item->kase) {
             col_names[i] = "CASE";
@@ -4902,6 +4980,42 @@ static void execute_return_clause(cbm_query_t *q, cbm_return_clause_t *ret, bind
     rb_apply_skip_limit(rb, ret->skip, ret->limit >= 0 ? ret->limit : max_rows);
 }
 
+static bool var_is(const char *name, const char *var) {
+    return !name || strcmp(name, var) == 0;
+}
+
+/* Does every condition in e reference only var? An unbound variable counts as
+ * a match, so NOT over a condition on a later variable would drop every row
+ * if the WHERE ran before that variable is bound. */
+static bool expr_only_uses_var(const cbm_expr_t *e, const char *var) { // NOLINT(misc-no-recursion)
+    if (!e) {
+        return true;
+    }
+    if (e->type != EXPR_CONDITION) {
+        return expr_only_uses_var(e->left, var) && expr_only_uses_var(e->right, var);
+    }
+    const cbm_condition_t *c = &e->cond;
+    if (!var_is(c->variable, var) || !var_is(c->value_variable, var)) {
+        return false;
+    }
+    for (int i = 0; i < c->arg_count; i++) {
+        if (!var_is(c->args[i].variable, var)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Early WHERE on the first scanned node: apply each top-level AND part that
+ * references only that node; the late WHERE checks the full expression. */
+static bool eval_early_where(const cbm_expr_t *e, binding_t *b, // NOLINT(misc-no-recursion)
+                             const char *var) {
+    if (e && e->type == EXPR_AND) {
+        return eval_early_where(e->left, b, var) && eval_early_where(e->right, b, var);
+    }
+    return !expr_only_uses_var(e, var) || eval_expr(e, b);
+}
+
 static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *project, int max_rows,
                           result_builder_t *rb) {
     cbm_pattern_t *pat0 = &q->patterns[0];
@@ -4916,6 +5030,7 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
     binding_t *bindings = malloc((bind_cap + SKIP_ONE) * sizeof(binding_t));
     int bind_count = 0;
     const char *var_name = pat0->nodes[0].variable ? pat0->nodes[0].variable : CYP_ANON_HEAD_VAR;
+    bool late_where = q->where && (pat0->rel_count > 0 || q->pattern_count > SKIP_ONE);
 
     for (int i = 0; i < scan_count && bind_count < bind_cap; i++) {
         if ((i & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_deadline_exceeded()) {
@@ -4924,7 +5039,9 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
         binding_t b = {0};
         b.store = store;
         binding_set(&b, var_name, &scanned[i]);
-        bool pass = !q->where || eval_where(q->where, &b);
+        bool pass = !q->where ||
+                    (late_where && q->where->root ? eval_early_where(q->where->root, &b, var_name)
+                                                  : eval_where(q->where, &b));
         if (pass) {
             bindings[bind_count++] = b;
         } else {
@@ -4948,7 +5065,7 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
     }
 
     /* Step 3: Late WHERE */
-    if (q->where && (pat0->rel_count > 0 || q->pattern_count > SKIP_ONE)) {
+    if (late_where) {
         filter_bindings_where(q->where, bindings, &bind_count);
     }
 
