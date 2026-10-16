@@ -1613,6 +1613,40 @@ TEST(githistory_is_trackable) {
     PASS();
 }
 
+/* The history pass adds change_count/last_modified to File nodes without
+ * dropping keys already there: the parse-coverage stamp is written before it
+ * runs, and replacing the properties lost every partial/missed file in a git
+ * repository. */
+TEST(githistory_apply_keeps_coverage_stamp) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("proj", "/repo");
+    ASSERT_NOT_NULL(gb);
+    char *qn = cbm_pipeline_fqn_compute("proj", "include/zova.h", "__file__");
+    ASSERT_NOT_NULL(qn);
+    ASSERT_TRUE(cbm_gbuf_upsert_node(gb, "File", "zova.h", qn, "include/zova.h", 0, 0,
+                                     "{\"extension\":\".h\",\"coverage\":\"partial\","
+                                     "\"parse_error_ranges\":\"2021-2021\"}") > 0);
+    cbm_file_temporal_t ft = {0};
+    snprintf(ft.file_path, sizeof(ft.file_path), "%s", "include/zova.h");
+    ft.change_count = 29;
+    ft.last_modified = 1790588152LL;
+    cbm_githistory_result_t res = {0};
+    res.file_temporal = &ft;
+    res.file_temporal_count = 1;
+    cbm_pipeline_ctx_t ctx = {.project_name = "proj", .repo_path = "/repo", .gbuf = gb};
+    cbm_pipeline_githistory_apply(&ctx, &res);
+    const cbm_gbuf_node_t *n = cbm_gbuf_find_by_qn(gb, qn);
+    ASSERT_NOT_NULL(n);
+    const char *props = n->properties_json;
+    ASSERT_NOT_NULL(strstr(props, "\"coverage\":\"partial\""));
+    ASSERT_NOT_NULL(strstr(props, "\"parse_error_ranges\":\"2021-2021\""));
+    ASSERT_NOT_NULL(strstr(props, "\"change_count\":29"));
+    ASSERT_NOT_NULL(strstr(props, "\"last_modified\":1790588152"));
+    ASSERT_NOT_NULL(strstr(props, "\"extension\":\".h\""));
+    free(qn);
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
 TEST(githistory_compute_coupling) {
     /* 5 commits with overlapping files */
     char *files_0[] = {"a.go", "b.go", "c.go"};
@@ -9550,6 +9584,7 @@ SUITE(pipeline) {
     /* Git history pass */
     RUN_TEST(githistory_is_trackable);
     RUN_TEST(githistory_compute_coupling);
+    RUN_TEST(githistory_apply_keeps_coverage_stamp);
     RUN_TEST(githistory_coupling_carries_last_co_change);
     RUN_TEST(githistory_skip_large_commits);
     RUN_TEST(githistory_limits_to_max);

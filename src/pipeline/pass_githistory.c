@@ -24,6 +24,7 @@ enum { GH_RING = 4, GH_RING_MASK = 3, GH_INIT_CAP = 16, GH_MIN_COMMITS = 3, GH_M
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/str_util.h"
+#include "yyjson/yyjson.h"
 
 /* Minimum coupling score to create an edge */
 #define MIN_COUPLING_SCORE 0.3
@@ -462,31 +463,43 @@ int cbm_pipeline_githistory_apply(cbm_pipeline_ctx_t *ctx, const cbm_githistory_
     }
 
     /* Apply per-file temporal metadata to existing File nodes so callers
-     * can query change_count / last_modified for hotspot analysis. The
-     * extension is re-derived and JSON-escaped to keep the props blob
-     * well-formed even for paths with quotes or backslashes. */
+     * can query change_count / last_modified for hotspot analysis. The keys
+     * are merged into the node's properties: the coverage stamp written
+     * after extraction lives there too, and replacing the blob dropped it. */
     for (int i = 0; i < result->file_temporal_count; i++) {
         const cbm_file_temporal_t *ft = &result->file_temporal[i];
         char *qn = cbm_pipeline_fqn_compute(ctx->project_name, ft->file_path, "__file__");
         const cbm_gbuf_node_t *node = cbm_gbuf_find_by_qn(ctx->gbuf, qn);
-        free(qn);
         if (!node) {
+            free(qn);
             continue;
         }
 
         const char *base = strrchr(ft->file_path, '/');
         base = base ? base + SKIP_ONE : ft->file_path;
         const char *ext = strrchr(base, '.');
-        char ext_escaped[CBM_SZ_64];
-        cbm_json_escape(ext_escaped, (int)sizeof(ext_escaped), ext ? ext : "");
 
-        char props[CBM_SZ_256];
-        snprintf(props, sizeof(props),
-                 "{\"extension\":\"%s\",\"last_modified\":%lld,\"change_count\":%d}", ext_escaped,
-                 ft->last_modified, ft->change_count);
-
-        cbm_gbuf_upsert_node(ctx->gbuf, node->label, node->name, node->qualified_name,
-                             node->file_path, node->start_line, node->end_line, props);
+        const char *old = node->properties_json ? node->properties_json : "{}";
+        yyjson_doc *odoc = yyjson_read(old, strlen(old), 0);
+        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+        yyjson_mut_val *root = odoc && yyjson_is_obj(yyjson_doc_get_root(odoc))
+                                   ? yyjson_val_mut_copy(doc, yyjson_doc_get_root(odoc))
+                                   : yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+        yyjson_mut_obj_remove_key(root, "extension");
+        yyjson_mut_obj_remove_key(root, "last_modified");
+        yyjson_mut_obj_remove_key(root, "change_count");
+        yyjson_mut_obj_add_strcpy(doc, root, "extension", ext ? ext : "");
+        yyjson_mut_obj_add_sint(doc, root, "last_modified", (int64_t)ft->last_modified);
+        yyjson_mut_obj_add_int(doc, root, "change_count", ft->change_count);
+        char *props = yyjson_mut_write(doc, 0, NULL);
+        yyjson_mut_doc_free(doc);
+        yyjson_doc_free(odoc);
+        if (props) {
+            cbm_gbuf_set_node_props(ctx->gbuf, qn, props);
+            free(props);
+        }
+        free(qn);
     }
 
     return edge_count;
