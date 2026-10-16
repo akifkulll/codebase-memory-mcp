@@ -1766,6 +1766,14 @@ TEST(tool_check_index_coverage_reports_recorded_gaps) {
                     response_contains_json_fragment(cov, "\"next_offset\":1");
     free(cov);
 
+    /* Neither paths nor scopes: the whole-project summary. */
+    cov = cbm_mcp_handle_tool(srv, "check_index_coverage", "{\"project\":\"cov-a\"}");
+    bool summary_ok = response_contains_json_fragment(cov, "\"requested_scope\":\".\"") &&
+                      response_contains_json_fragment(cov, "\"status\":\"known_gaps\"") &&
+                      response_contains_json_fragment(cov, "\"partial\":2") &&
+                      response_contains_json_fragment(cov, "\"total_gaps\":2");
+    free(cov);
+
     char *status = cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"cov-a\"}");
     bool status_ok = response_contains_json_fragment(status, "\"recorded\":true") &&
                      response_contains_json_fragment(status, "\"total_gaps\":2");
@@ -1826,6 +1834,7 @@ TEST(tool_check_index_coverage_reports_recorded_gaps) {
     ASSERT_TRUE(paths_ok);
     ASSERT_TRUE(ranges_ok);
     ASSERT_TRUE(scope_ok);
+    ASSERT_TRUE(summary_ok);
     ASSERT_TRUE(status_ok);
     ASSERT_TRUE(snippet_ok);
     ASSERT_TRUE(isolated);
@@ -2659,6 +2668,39 @@ TEST(tool_trace_call_path_ambiguous) {
     ASSERT_NOT_NULL(a_suggestion);
     ASSERT_NOT_NULL(b_suggestion);
     ASSERT_TRUE(a_suggestion < b_suggestion);
+    free(inner);
+    free(resp);
+
+    /* file_path picks one of the tied definitions; a file that defines
+     * neither is an error, not an empty trace. */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":62,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_call_path\",\"arguments\":{\"function_name\":"
+             "\"amb\",\"project\":\"amb-proj\",\"file_path\":\"b.c\"}}}");
+    inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NULL(strstr(inner, "ambiguous"));
+    ASSERT_NOT_NULL(strstr(inner, "\"function\":\"amb\""));
+    free(inner);
+    free(resp);
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":63,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_call_path\",\"arguments\":{\"function_name\":"
+             "\"amb\",\"project\":\"amb-proj\",\"file_path\":\"c.c\"}}}");
+    inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "not defined in file_path c.c"));
+    free(inner);
+    free(resp);
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":64,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"get_code_snippet\",\"arguments\":{\"qualified_name\":"
+             "\"amb\",\"project\":\"amb-proj\",\"file_path\":\"a.c\"}}}");
+    inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NULL(strstr(inner, "ambiguous"));
+    ASSERT_NOT_NULL(strstr(inner, "amb-proj.a.amb"));
+    ASSERT_NULL(strstr(inner, "amb-proj.b.amb"));
     free(inner);
     free(resp);
     cbm_mcp_server_free(srv);
@@ -4825,6 +4867,19 @@ TEST(snippet_ambiguous_short_name) {
     /* Should have at least 2 suggestions with qualified_name */
     ASSERT_NOT_NULL(strstr(resp, "test-project.cmd.server.Run"));
     ASSERT_NOT_NULL(strstr(resp, "test-project.cmd.worker.Run"));
+    free(resp);
+
+    /* Both Run nodes sit in main.go: that file_path keeps both; a file that
+     * defines neither is an error. */
+    resp = call_snippet(srv, "{\"qualified_name\":\"Run\",\"project\":\"test-project\","
+                             "\"file_path\":\"main.go\"}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "\"status\":\"ambiguous\""));
+    free(resp);
+    resp = call_snippet(srv, "{\"qualified_name\":\"Run\",\"project\":\"test-project\","
+                             "\"file_path\":\"other.go\"}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "not defined in file_path other.go"));
     free(resp);
 
     cbm_mcp_server_free(srv);

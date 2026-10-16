@@ -441,7 +441,9 @@ static const tool_def_t TOOLS[] = {
      "\"description\":\"compact: indented key/value text with flat object arrays as "
      "tables; fewer bytes, same data.\"},"
      "\"function_name\":{\"type\":\"string\"},\"project\":{"
-     "\"type\":\"string\"},\"direction\":{\"type\":\"string\",\"enum\":[\"inbound\",\"outbound\","
+     "\"type\":\"string\"},\"file_path\":{\"type\":\"string\",\"description\":"
+     "\"Keep only functions defined in this repository-relative file (or path suffix) when "
+     "the name is ambiguous.\"},\"direction\":{\"type\":\"string\",\"enum\":[\"inbound\",\"outbound\","
      "\"both\"],\"default\":\"both\"},\"depth\":{\"type\":\"integer\",\"default\":3},\"mode\":{"
      "\"type\":\"string\",\"enum\":[\"calls\",\"data_flow\",\"cross_service\"],\"default\":"
      "\"calls\",\"description\":\"calls: follow CALLS edges. data_flow: follow CALLS+DATA_FLOWS "
@@ -468,7 +470,9 @@ static const tool_def_t TOOLS[] = {
      "full qualified_name (exact match) or short function name (returns suggestions if ambiguous).",
      "{\"type\":\"object\",\"properties\":{\"qualified_name\":{\"type\":\"string\",\"description\":"
      "\"Full qualified_name from search_graph, or short function name\"},\"project\":{"
-     "\"type\":\"string\"},\"include_neighbors\":{"
+     "\"type\":\"string\"},\"file_path\":{\"type\":\"string\",\"description\":"
+     "\"Keep only matches defined in this repository-relative file (or path suffix) when a "
+     "short name is ambiguous.\"},\"include_neighbors\":{"
      "\"type\":\"boolean\",\"default\":false}},\"required\":[\"qualified_name\",\"project\"]}"},
 
     {"get_file_outline", "Get file outline",
@@ -587,7 +591,8 @@ static const tool_def_t TOOLS[] = {
      "with parse_error_ranges, unusable when one range covers most of the file, skipped, "
      "excluded, not_indexed, missing, coverage_unavailable), "
      "filesystem freshness against the indexed metadata, and a recommended_action. Best-effort "
-     "and about extraction only. At least one of paths or scopes is required.",
+     "and about extraction only. With neither paths nor scopes it summarizes the whole project "
+     "(the same as scopes [\".\"]).",
      "{\"type\":\"object\",\"properties\":{"
      "\"project\":{\"type\":\"string\"},"
      "\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":128,"
@@ -3304,13 +3309,17 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
     size_t path_count = yyjson_is_arr(paths) ? yyjson_arr_size(paths) : 0U;
     size_t scope_count = yyjson_is_arr(scopes) ? yyjson_arr_size(scopes) : 0U;
     if (!aroot || (paths && !yyjson_is_arr(paths)) || (scopes && !yyjson_is_arr(scopes)) ||
-        (path_count == 0U && scope_count == 0U) || path_count > COVERAGE_PATH_MAX ||
-        scope_count > COVERAGE_SCOPE_MAX) {
+        path_count > COVERAGE_PATH_MAX || scope_count > COVERAGE_SCOPE_MAX) {
         yyjson_doc_free(adoc);
         cbm_zova_repository_close(repo);
         free(project);
         return cbm_mcp_text_result(
-            "paths or scopes is required (arrays; max 128 paths and 32 scopes)", true);
+            "paths and scopes must be arrays (max 128 paths and 32 scopes)", true);
+    }
+    /* Neither given: summarize the whole project, as scopes ["."] would. */
+    bool project_summary = path_count == 0U && scope_count == 0U;
+    if (project_summary) {
+        scope_count = 1U;
     }
     int scope_limit = cbm_mcp_get_int_arg(args, "scope_limit", COVERAGE_SCOPE_DEFAULT_LIMIT);
     int scope_offset = cbm_mcp_get_int_arg(args, "scope_offset", 0);
@@ -3422,6 +3431,12 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
             coverage_add_scope_json(doc, item, scope, all, all_count, recorded, scope_offset,
                                     scope_limit);
         }
+        yyjson_mut_arr_add_val(scope_results, item);
+    }
+    if (project_summary && rc == CBM_STORE_OK) {
+        yyjson_mut_val *item = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, item, "requested_scope", ".");
+        coverage_add_scope_json(doc, item, "", all, all_count, recorded, scope_offset, scope_limit);
         yyjson_mut_arr_add_val(scope_results, item);
     }
     yyjson_mut_obj_add_val(doc, root, "scopes", scope_results);
@@ -4295,6 +4310,33 @@ static bool node_is_real_callable_def(const cbm_node_t *n) {
     return (long)n->end_line - (long)n->start_line > 0;
 }
 
+/* Keep the nodes defined in `file`: its exact repository-relative path, or a
+ * trailing path suffix of one ("db.zig" matches "src/db.zig"). Dropped nodes
+ * are freed; returns the new count. */
+static int filter_nodes_by_file(cbm_node_t *nodes, int count, const char *file) {
+    if (!nodes || !file || !file[0]) {
+        return count;
+    }
+    size_t fl = strlen(file);
+    int kept = 0;
+    for (int i = 0; i < count; i++) {
+        const char *fp = nodes[i].file_path ? nodes[i].file_path : "";
+        size_t pl = strlen(fp);
+        bool match = strcmp(fp, file) == 0 ||
+                     (pl > fl && fp[pl - fl - SKIP_ONE] == '/' && strcmp(fp + pl - fl, file) == 0);
+        if (!match) {
+            free_node_contents(&nodes[i]);
+        } else if (kept != i) {
+            nodes[kept] = nodes[i];
+            memset(&nodes[i], 0, sizeof(nodes[i]));
+            kept++;
+        } else {
+            kept++;
+        }
+    }
+    return kept;
+}
+
 /* Pick the best-resolving node among name matches. Sets *ambiguous when the
  * matches can't be reduced to one logical symbol, so resolution never silently
  * traces (or conflates) the wrong same-named node:
@@ -4511,6 +4553,27 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
             }
         }
     }
+
+    char *file_filter = cbm_mcp_get_string_arg(args, "file_path");
+    if (file_filter && node_count > 0) {
+        node_count = filter_nodes_by_file(nodes, node_count, file_filter);
+        if (node_count == 0) {
+            char hint[CBM_SZ_512];
+            snprintf(hint, sizeof(hint),
+                     "function %s is not defined in file_path %s. Omit file_path to list "
+                     "every match.",
+                     func_name, file_filter);
+            free(file_filter);
+            free(func_name);
+            free(project);
+            free(direction);
+            free(mode);
+            free(param_name);
+            cbm_store_free_nodes(nodes, 0);
+            return cbm_mcp_text_result(hint, true);
+        }
+    }
+    free(file_filter);
 
     if (node_count == 0) {
         enum { HINT_BUF_SZ = 512 };
@@ -5651,7 +5714,8 @@ static char *snippet_suggestions(const char *input, cbm_node_t *nodes, int count
     char msg[CBM_SZ_512];
     snprintf(msg, sizeof(msg),
              "%d matches for \"%s\". Pick a qualified_name from suggestions below, "
-             "or use search_graph(name_pattern=\"...\") to narrow results.",
+             "pass file_path to choose by file, or use search_graph(name_pattern=\"...\") "
+             "to narrow results.",
              count, input);
     yyjson_mut_obj_add_str(doc, root, "message", msg);
 
@@ -6227,6 +6291,24 @@ static char *handle_get_code_snippet(cbm_mcp_server_t *srv, const char *args) {
                                               &suffix_count);
         }
     }
+
+    char *file_filter = cbm_mcp_get_string_arg(args, "file_path");
+    if (file_filter && suffix_count > 0) {
+        suffix_count = filter_nodes_by_file(suffix_nodes, suffix_count, file_filter);
+        if (suffix_count == 0) {
+            char msg[CBM_SZ_512];
+            snprintf(msg, sizeof(msg),
+                     "symbol %s is not defined in file_path %s. Omit file_path to list every "
+                     "match.",
+                     qn, file_filter);
+            free(file_filter);
+            cbm_store_free_nodes(suffix_nodes, 0);
+            free(qn);
+            free(project);
+            return cbm_mcp_text_result(msg, true);
+        }
+    }
+    free(file_filter);
 
     if (suffix_count == SKIP_ONE) {
         copy_node(&suffix_nodes[0], &node);
