@@ -577,7 +577,6 @@ cat > "$MCP_INPUT" << 'MCPEOF'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke-test","version":"1.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
-{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"cursor":"8"}}
 MCPEOF
 
 mcp_run "$MCP_INPUT" "$MCP_OUTPUT" 10
@@ -602,21 +601,45 @@ if ! grep -q '"id":2' "$MCP_OUTPUT"; then
 fi
 echo "OK: tools/list response received (id:2)"
 
-# 5c: Verify expected tools are present. tools/list pages 8 tools at a time,
-# so the input above also asks for the second page (id:3).
-if ! grep -q '"nextCursor":"8"' "$MCP_OUTPUT" || ! grep -q '"id":3' "$MCP_OUTPUT"; then
-  echo "FAIL: tools/list did not page as expected (nextCursor 8, second page id:3)"
-  rm -f "$MCP_INPUT" "$MCP_OUTPUT"
-  exit 1
-fi
+# 5c: Verify expected tools are present. tools/list is paged, so follow
+# nextCursor until the last page and check the tools across every page.
+MCP_TOOLS_ALL=$(mktemp)
+MCP_PAGE=$(mktemp)
+cp "$MCP_OUTPUT" "$MCP_TOOLS_ALL"
+cp "$MCP_OUTPUT" "$MCP_PAGE"
+pages=1
+while CURSOR=$(grep -o '"nextCursor":"[^"]*"' "$MCP_PAGE" | head -1 | cut -d'"' -f4) &&
+      [ -n "$CURSOR" ]; do
+  pages=$((pages + 1))
+  if [ "$pages" -gt 10 ]; then
+    echo "FAIL: tools/list still returns a nextCursor after 10 pages"
+    rm -f "$MCP_INPUT" "$MCP_OUTPUT" "$MCP_TOOLS_ALL" "$MCP_PAGE"
+    exit 1
+  fi
+  cat > "$MCP_INPUT" << MCPEOF
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke-test","version":"1.0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"cursor":"$CURSOR"}}
+MCPEOF
+  mcp_run "$MCP_INPUT" "$MCP_PAGE" 10
+  if ! grep -q '"id":2' "$MCP_PAGE"; then
+    echo "FAIL: no tools/list response for cursor $CURSOR"
+    rm -f "$MCP_INPUT" "$MCP_OUTPUT" "$MCP_TOOLS_ALL" "$MCP_PAGE"
+    exit 1
+  fi
+  cat "$MCP_PAGE" >> "$MCP_TOOLS_ALL"
+done
+rm -f "$MCP_PAGE"
+echo "OK: tools/list read across $pages page(s)"
 for TOOL in index_repository search_graph trace_path get_code_snippet search_code; do
-  if ! grep -q "\"$TOOL\"" "$MCP_OUTPUT"; then
+  if ! grep -q "\"$TOOL\"" "$MCP_TOOLS_ALL"; then
     echo "FAIL: tool '$TOOL' not found in tools/list response"
-    rm -f "$MCP_INPUT" "$MCP_OUTPUT"
+    rm -f "$MCP_INPUT" "$MCP_OUTPUT" "$MCP_TOOLS_ALL"
     exit 1
   fi
 done
 echo "OK: all 5 core MCP tools present in tools/list"
+rm -f "$MCP_TOOLS_ALL"
 
 # 5d: Verify protocol version in initialize response
 if ! grep -q '"protocolVersion"' "$MCP_OUTPUT"; then
