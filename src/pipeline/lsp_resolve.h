@@ -113,6 +113,15 @@ static inline int cbm_pipeline_qn_class_method_tail_eq(const char *qn, const cha
     return qt && tail && strcmp(qt, tail) == 0;
 }
 
+/* An invocation row that carries a site span (end > start) proves ONE call: it
+ * joins only the call whose node starts at that byte, so `db.deinit()` and
+ * `st.deinit()` in one function each keep their own target. Rows without a span
+ * join every same-named call in the caller, as before. */
+static inline bool cbm_pipeline_lsp_site_admits(const CBMResolvedCall *rc, const CBMCall *call) {
+    return rc->site_end_byte <= rc->site_start_byte ||
+           rc->site_start_byte == call->site_start_byte;
+}
+
 /* Look up the highest-confidence LSP-resolved call entry whose caller QN
  * matches the textual call's enclosing function and whose callee QN
  * short-name matches the textual callee. Returns a pointer into `arr`
@@ -148,6 +157,9 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution(
             continue;
         }
         if (strcmp(rc->caller_qn, call->enclosing_func_qn) != 0) {
+            continue;
+        }
+        if (!cbm_pipeline_lsp_site_admits(rc, call)) {
             continue;
         }
         const char *short_name = cbm_lsp_bare_segment(rc->callee_qn);
@@ -210,6 +222,9 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution(
             continue;
         }
         if (!cbm_pipeline_qn_class_method_tail_eq(rc->caller_qn, call_tail)) {
+            continue;
+        }
+        if (!cbm_pipeline_lsp_site_admits(rc, call)) {
             continue;
         }
         if (best_tail) {

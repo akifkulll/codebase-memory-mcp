@@ -1495,6 +1495,356 @@ TEST(pipeline_go_cross_package_field_chain_resolves) {
     PASS();
 }
 
+/* CALLS edges from project QN suffix src to project QN suffix tgt (both after
+ * "<project>."); *strategy_ok counts those whose properties hold fragment. */
+static int calls_between_qns(cbm_store_t *s, const char *project, const char *src,
+                             const char *tgt, const char *fragment, int *strategy_ok) {
+    char sq[512];
+    char tq[512];
+    snprintf(sq, sizeof(sq), "%s.%s", project, src);
+    snprintf(tq, sizeof(tq), "%s.%s", project, tgt);
+    cbm_node_t a = {0};
+    cbm_node_t b = {0};
+    int n = 0;
+    if (cbm_store_find_node_by_qn(s, project, sq, &a) == CBM_STORE_OK &&
+        cbm_store_find_node_by_qn(s, project, tq, &b) == CBM_STORE_OK) {
+        cbm_edge_t *edges = NULL;
+        int ec = 0;
+        cbm_store_find_edges_by_source_type(s, a.id, "CALLS", &edges, &ec);
+        for (int i = 0; i < ec; i++) {
+            if (edges[i].target_id != b.id) {
+                continue;
+            }
+            n++;
+            if (strategy_ok && fragment && edges[i].properties_json &&
+                strstr(edges[i].properties_json, fragment)) {
+                (*strategy_ok)++;
+            }
+        }
+        if (edges) {
+            cbm_store_free_edges(edges, ec);
+        }
+    }
+    cbm_node_free_fields(&a);
+    cbm_node_free_fields(&b);
+    return n;
+}
+
+static int inbound_calls_to_qn(cbm_store_t *s, const char *project, const char *tgt) {
+    char tq[512];
+    snprintf(tq, sizeof(tq), "%s.%s", project, tgt);
+    cbm_node_t b = {0};
+    int ec = 0;
+    if (cbm_store_find_node_by_qn(s, project, tq, &b) == CBM_STORE_OK) {
+        cbm_edge_t *edges = NULL;
+        cbm_store_find_edges_by_target_type(s, b.id, "CALLS", &edges, &ec);
+        if (edges) {
+            cbm_store_free_edges(edges, ec);
+        }
+    } else {
+        ec = -1; /* the target itself is missing */
+    }
+    cbm_node_free_fields(&b);
+    return ec;
+}
+
+/* Zig member calls bind by the receiver's inferred type, across files and
+ * relative `@import` paths, on both the sequential and the parallel (>= 50
+ * files) path. The same-named deinit() calls in run() reach their own
+ * targets; tmp.cleanup() on a std value gets no edge although exactly one
+ * project function is named cleanup. app/ sees the library only as the
+ * build.zig module "zova", whose root re-exports it, and db.zig spells a
+ * return type through its own import (`!sqlite.Statement`); a Python package
+ * of the same name must not capture the Zig import. */
+static void zig_receiver_fixture(const char *tmp, int fillers) {
+    write_temp_file(tmp, "build.zig",
+                    "const std = @import(\"std\");\n"
+                    "\n"
+                    "pub fn build(b: *std.Build) void {\n"
+                    "    const lib_module = b.createModule(.{\n"
+                    "        .root_source_file = b.path(\"src/root.zig\"),\n"
+                    "    });\n"
+                    "    const exe = b.addExecutable(.{\n"
+                    "        .name = \"app\",\n"
+                    "        .root_module = b.createModule(.{ .root_source_file = "
+                    "b.path(\"app/main.zig\") }),\n"
+                    "    });\n"
+                    "    exe.root_module.addImport(\"zova\", lib_module);\n"
+                    "}\n");
+    write_temp_file(tmp, "bindings/python/pyproject.toml", "[project]\nname = \"zova\"\n");
+    write_temp_file(tmp, "bindings/python/zova/__init__.py", "def open():\n    return None\n");
+    write_temp_file(tmp, "src/root.zig",
+                    "const impl = @import(\"db.zig\");\n"
+                    "pub const Database = impl.Database;\n"
+                    "pub const sqlite = @import(\"sqlite.zig\");\n"
+                    "pub const api = struct {\n"
+                    "    pub const Db = impl.Database;\n"
+                    "    const Local = struct {\n"
+                    "        pub fn ping() void {}\n"
+                    "    };\n"
+                    "    pub const L = Local;\n"
+                    "};\n");
+    write_temp_file(tmp, "src/sqlite.zig",
+                    "pub const Statement = struct {\n"
+                    "    pub fn step(self: *Statement) bool {\n"
+                    "        _ = self;\n"
+                    "        return false;\n"
+                    "    }\n"
+                    "    pub fn reset(self: *Statement) void {\n"
+                    "        _ = self;\n"
+                    "    }\n"
+                    "};\n");
+    write_temp_file(tmp, "app/main.zig",
+                    "const zova = @import(\"zova\");\n"
+                    "\n"
+                    "pub fn main() !void {\n"
+                    "    var d = try zova.Database.open();\n"
+                    "    defer d.deinit();\n"
+                    "    var raw = try d.raw();\n"
+                    "    _ = raw.step();\n"
+                    "}\n"
+                    "\n"
+                    "pub fn rows(stmt: *zova.sqlite.Statement) void {\n"
+                    "    stmt.reset();\n"
+                    "}\n"
+                    "\n"
+                    "pub fn viaApi() !void {\n"
+                    "    var d = try zova.api.Db.open();\n"
+                    "    d.deinit();\n"
+                    "    zova.api.L.ping();\n"
+                    "}\n");
+    write_temp_file(tmp, "src/db.zig",
+                    "const sqlite = @import(\"sqlite.zig\");\n"
+                    "\n"
+                    "pub const Statement = struct {\n"
+                    "    pub fn deinit(self: *Statement) void {\n"
+                    "        _ = self;\n"
+                    "    }\n"
+                    "};\n"
+                    "\n"
+                    "pub const Database = struct {\n"
+                    "    const Self = @This();\n"
+                    "    pub fn open() !Self {\n"
+                    "        return .{};\n"
+                    "    }\n"
+                    "    pub fn prepare(self: *Self) !Statement {\n"
+                    "        _ = self;\n"
+                    "        return .{};\n"
+                    "    }\n"
+                    "    pub fn deinit(self: *Self) void {\n"
+                    "        _ = self;\n"
+                    "    }\n"
+                    "    pub fn raw(self: *Self) !sqlite.Statement {\n"
+                    "        _ = self;\n"
+                    "        return .{};\n"
+                    "    }\n"
+                    "};\n");
+    write_temp_file(tmp, "src/handles.zig",
+                    "const builtin = @import(\"builtin\");\n"
+                    "const AbiMutex = if (builtin.os.tag == .emscripten) struct {\n"
+                    "    pub fn lock(_: *@This()) void {}\n"
+                    "} else struct {\n"
+                    "    state: u32 = 0,\n"
+                    "    pub fn lock(self: *AbiMutex) void {\n"
+                    "        _ = self;\n"
+                    "    }\n"
+                    "};\n"
+                    "pub const Handle = struct {\n"
+                    "    mutex: AbiMutex = .{},\n"
+                    "    pub fn run(h: *Handle) void {\n"
+                    "        h.mutex.lock();\n"
+                    "    }\n"
+                    "};\n"
+                    "const std = @import(\"std\");\n"
+                    "pub const Registry = struct {\n"
+                    "    list: std.ArrayList(*Handle),\n"
+                    "    by_name: std.StringHashMap(Handle),\n"
+                    "    pub fn named(r: *Registry) void {\n"
+                    "        if (r.by_name.getPtr(\"x\")) |h| h.run();\n"
+                    "    }\n"
+                    "};\n");
+    write_temp_file(tmp, "src/pool.zig",
+                    "pub fn Pool(comptime T: type) type {\n"
+                    "    return struct {\n"
+                    "        items: []T,\n"
+                    "        pub fn first(self: *@This()) *T {\n"
+                    "            return &self.items[0];\n"
+                    "        }\n"
+                    "    };\n"
+                    "}\n"
+                    "fn Ops(comptime kind: u8) type {\n"
+                    "    return switch (kind) {\n"
+                    "        0 => struct {\n"
+                    "            fn copy() void {}\n"
+                    "        },\n"
+                    "        else => struct {\n"
+                    "            fn copy() void {}\n"
+                    "        },\n"
+                    "    };\n"
+                    "}\n"
+                    "pub fn useOps() void {\n"
+                    "    Ops(1).copy();\n"
+                    "}\n");
+    /* `anytype`: support.zig does not import handles.zig. */
+    write_temp_file(tmp, "src/support.zig",
+                    "pub fn runAll(h: anytype) void {\n"
+                    "    h.run();\n"
+                    "}\n");
+    write_temp_file(tmp, "src/publication.zig",
+                    "const Publication = struct {\n"
+                    "    fn cleanup(self: *Publication) void {\n"
+                    "        _ = self;\n"
+                    "    }\n"
+                    "};\n");
+    write_temp_file(tmp, "src/main.zig",
+                    "const std = @import(\"std\");\n"
+                    "const db = @import(\"db.zig\");\n"
+                    "const handles = @import(\"handles.zig\");\n"
+                    "const pool = @import(\"pool.zig\");\n"
+                    "const support = @import(\"support.zig\");\n"
+                    "\n"
+                    "pub fn viaAny(h: *handles.Handle) void {\n"
+                    "    support.runAll(h);\n"
+                    "}\n"
+                    "\n"
+                    "pub fn pooled(p: *pool.Pool(handles.Handle)) void {\n"
+                    "    p.first().run();\n"
+                    "}\n"
+                    "\n"
+                    "pub fn first(r: *handles.Registry) void {\n"
+                    "    for (r.list.items) |h| h.run();\n"
+                    "}\n"
+                    "\n"
+                    "pub fn fresh() !void {\n"
+                    "    const h = try std.heap.page_allocator.create(handles.Handle);\n"
+                    "    h.run();\n"
+                    "}\n"
+                    "\n"
+                    "pub fn run() !void {\n"
+                    "    var conn = try db.Database.open();\n"
+                    "    defer conn.deinit();\n"
+                    "    var st = try conn.prepare();\n"
+                    "    st.deinit();\n"
+                    "}\n"
+                    "\n"
+                    "test \"tmp dir\" {\n"
+                    "    var tmp = std.testing.tmpDir(.{});\n"
+                    "    defer tmp.cleanup();\n"
+                    "}\n");
+    write_temp_file(tmp, "src/cli/tool.zig",
+                    "const db = @import(\"../db.zig\");\n"
+                    "\n"
+                    "pub fn main() !void {\n"
+                    "    var d = try db.Database.open();\n"
+                    "    d.deinit();\n"
+                    "}\n");
+    for (int i = 0; i < fillers; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "fill/filler%d.zig", i);
+        snprintf(body, sizeof(body), "pub fn filler%d() u32 {\n    return %d;\n}\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+}
+
+static int check_zig_receiver_edges(int fillers) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_zig_recv_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    zig_receiver_fixture(tmp, fillers);
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    if (fillers > 0) {
+        cbm_setenv("CBM_WORKERS", "4", 1);
+    }
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL);
+    int rc = p ? cbm_pipeline_run(p) : -1;
+    const char *project = p ? cbm_pipeline_project_name(p) : NULL;
+    cbm_store_t *s = rc == 0 ? th_open_repo_store(tmp) : NULL;
+    const char *lsp = "\"strategy\":\"lsp_zig";
+    int ok[20] = {0};
+    int n[20] = {0};
+    int cleanup_in = -2;
+    if (s) {
+        n[0] = calls_between_qns(s, project, "src.main.run", "src.db.Database.deinit", lsp, &ok[0]);
+        n[1] = calls_between_qns(s, project, "src.main.run", "src.db.Statement.deinit", lsp, &ok[1]);
+        n[2] = calls_between_qns(s, project, "src.main.run", "src.db.Database.open", lsp, &ok[2]);
+        n[3] = calls_between_qns(s, project, "src.main.run", "src.db.Database.prepare", lsp, &ok[3]);
+        n[4] = calls_between_qns(s, project, "src.cli.tool.main", "src.db.Database.deinit", lsp,
+                                 &ok[4]);
+        n[5] = calls_between_qns(s, project, "app.main.main", "src.db.Database.open", lsp, &ok[5]);
+        n[6] = calls_between_qns(s, project, "app.main.main", "src.db.Database.deinit", lsp, &ok[6]);
+        n[7] = calls_between_qns(s, project, "app.main.main", "src.sqlite.Statement.step", lsp,
+                                 &ok[7]);
+        n[8] = calls_between_qns(s, project, "app.main.rows", "src.sqlite.Statement.reset", lsp,
+                                 &ok[8]);
+        /* Re-exports declared inside a struct (zova.api.Db, zova.api.L). */
+        n[9] = calls_between_qns(s, project, "app.main.viaApi", "src.db.Database.open", lsp, &ok[9]);
+        n[10] = calls_between_qns(s, project, "app.main.viaApi", "src.db.Database.deinit", lsp,
+                                  &ok[10]);
+        n[11] = calls_between_qns(s, project, "app.main.viaApi", "src.root.api.Local.ping", lsp,
+                                  &ok[11]);
+        /* A type chosen by a compile-time `if`: both branches are AbiMutex. */
+        n[12] = calls_between_qns(s, project, "src.handles.Handle.run", "src.handles.AbiMutex.lock",
+                                  lsp, &ok[12]);
+        /* Element types carried through std containers and allocators. */
+        n[13] = calls_between_qns(s, project, "src.handles.Registry.named", "src.handles.Handle.run",
+                                  lsp, &ok[13]);
+        n[14] = calls_between_qns(s, project, "src.main.first", "src.handles.Handle.run", lsp,
+                                  &ok[14]);
+        n[15] = calls_between_qns(s, project, "src.main.fresh", "src.handles.Handle.run", lsp,
+                                  &ok[15]);
+        /* Project generics: Pool(T) binds T across files; Ops switches. */
+        n[16] = calls_between_qns(s, project, "src.main.pooled", "src.pool.Pool.first", lsp,
+                                  &ok[16]);
+        n[17] = calls_between_qns(s, project, "src.main.pooled", "src.handles.Handle.run", lsp,
+                                  &ok[17]);
+        n[18] = calls_between_qns(s, project, "src.pool.useOps", "src.pool.Ops.copy", lsp,
+                                  &ok[18]);
+        /* An `anytype` parameter takes the type main.viaAny passes. */
+        n[19] = calls_between_qns(s, project, "src.support.runAll", "src.handles.Handle.run", lsp,
+                                  &ok[19]);
+        cleanup_in = inbound_calls_to_qn(s, project, "src.publication.Publication.cleanup");
+        cbm_store_close(s);
+    }
+    if (p) {
+        cbm_pipeline_free(p);
+    }
+    if (fillers > 0) {
+        if (saved) {
+            cbm_setenv("CBM_WORKERS", saved, 1);
+        } else {
+            cbm_unsetenv("CBM_WORKERS");
+        }
+    }
+    free(saved);
+    th_rmtree(tmp);
+    printf("    fillers=%d run->Database.deinit %d/%d Statement.deinit %d/%d open %d/%d "
+           "prepare %d/%d tool->Database.deinit %d/%d app->open %d/%d deinit %d/%d step %d/%d "
+           "rows->reset %d/%d api.Db.open %d/%d api.Db.deinit %d/%d api.L.ping %d/%d "
+           "AbiMutex.lock %d/%d std map %d/%d std list %d/%d std alloc %d/%d Pool.first %d/%d "
+           "Pool T %d/%d Ops.copy %d/%d anytype %d/%d cleanup_in=%d\n",
+           fillers, ok[0], n[0], ok[1], n[1], ok[2], n[2], ok[3], n[3], ok[4], n[4], ok[5], n[5],
+           ok[6], n[6], ok[7], n[7], ok[8], n[8], ok[9], n[9], ok[10], n[10], ok[11], n[11],
+           ok[12], n[12], ok[13], n[13], ok[14], n[14], ok[15], n[15], ok[16], n[16], ok[17],
+           n[17], ok[18], n[18], ok[19], n[19], cleanup_in);
+    ASSERT_EQ(rc, 0);
+    for (int i = 0; i < 20; i++) {
+        ASSERT_EQ(n[i], 1);
+        ASSERT_EQ(ok[i], 1);
+    }
+    ASSERT_EQ(cleanup_in, 0);
+    return 0;
+}
+
+TEST(pipeline_zig_member_calls_bind_by_receiver_type) {
+    ASSERT_EQ(check_zig_receiver_edges(0), 0);
+    ASSERT_EQ(check_zig_receiver_edges(52), 0);
+    PASS();
+}
+
 /* Parallel path of the same guard (>= 50 files, CBM_WORKERS=4): the
  * field-type heuristic and suffix matching must not bind accelerator.print(),
  * accelerator.backward() or trainer.lr_scheduler.step() to project methods,
@@ -9579,6 +9929,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_go_bare_ref_never_binds_field_parallel);
     RUN_TEST(pipeline_go_cross_package_field_chain_resolves);
     RUN_TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges);
+    RUN_TEST(pipeline_zig_member_calls_bind_by_receiver_type);
     RUN_TEST(pipeline_python_bare_local_binding_suppresses_weak_edge);
     RUN_TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge);
     /* Git history pass */

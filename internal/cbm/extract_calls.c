@@ -1945,6 +1945,26 @@ static void extract_kotlin_desugared_calls(CBMExtractCtx *ctx, TSNode node, cons
     }
 }
 
+/* True when a Zig member-call receiver names a type: an identifier, or a field
+ * chain ending in one, spelled in TitleCase (`Database.open()`,
+ * `zova.Database.open()`). Zig names types that way and values in camelCase or
+ * snake_case, so a lowercase receiver (`tmp`, `self.db`, a call result) is a
+ * value whose type the textual resolver cannot know. */
+static bool zig_receiver_is_type_name(CBMExtractCtx *ctx, TSNode receiver) {
+    if (ts_node_is_null(receiver)) {
+        return false;
+    }
+    TSNode name = receiver;
+    if (strcmp(ts_node_type(receiver), "field_expression") == 0) {
+        name = ts_node_child_by_field_name(receiver, TS_FIELD("member"));
+    }
+    if (ts_node_is_null(name) || strcmp(ts_node_type(name), "identifier") != 0) {
+        return false;
+    }
+    uint32_t start = ts_node_start_byte(name);
+    return ts_node_end_byte(name) > start && isupper((unsigned char)ctx->source[start]);
+}
+
 /* True when a Python attribute-call receiver is EXEMPT from the weak-member
  * guard (#1276). Three exemptions, each because the receiver is in fact known:
  *   - `self.x()` / `cls.x()`  — a direct self/cls receiver keeps class-local
@@ -2071,6 +2091,7 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             call.loop_depth = state->loop_depth;     // enclosing loop nesting at this call
             call.branch_depth = state->branch_depth; // enclosing branch nesting at this call
             call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
+            call.site_start_byte = ts_node_start_byte(node);
             // Perl-only: flag arrow/method calls ($obj->m / Class->m). The
             // generic short-name resolver cannot place a method without a known
             // receiver type, so the call-resolution pass suppresses those edges.
@@ -2121,6 +2142,19 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
                             call.is_method = true;
                         }
                     }
+                }
+            }
+
+            // Zig receiver-aware guard (same intent as the flags above). Flag a
+            // member call x.m() whose receiver is a value rather than a type
+            // name, so a weak short-name match cannot bind it (`tmp.cleanup()`
+            // must not bind the one project `cleanup`). The Zig LSP resolves
+            // the receivers whose type it can prove.
+            if (ctx->language == CBM_LANG_ZIG && strcmp(ts_node_type(node), "call_expression") == 0) {
+                TSNode fn = ts_node_child_by_field_name(node, TS_FIELD("function"));
+                if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "field_expression") == 0) {
+                    TSNode obj = ts_node_child_by_field_name(fn, TS_FIELD("object"));
+                    call.is_method = !zig_receiver_is_type_name(ctx, obj);
                 }
             }
 

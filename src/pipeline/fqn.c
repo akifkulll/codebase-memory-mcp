@@ -232,9 +232,15 @@ static void seed_source_dir(char *buf, size_t buf_size, const char *source_rel) 
 
 /* Detect the flavor of relative import based on the leading characters.
  * Returns 1 for Python dotted form (e.g. ".foo" or "..bar.baz"),
- *         2 for JS/TS slash form (e.g. "./foo" or "../bar/baz"),
+ *         2 for JS/TS slash form (e.g. "./foo" or "../bar/baz") and for a Zig
+ *           file import ("db.zig", "sub/x.zig"), which Zig resolves against
+ *           the importing file's directory with or without a leading "./",
  *         0 for anything not relative (caller should skip). */
 static int classify_relative_import(const char *module_path) {
+    size_t len = module_path ? strlen(module_path) : 0;
+    if (len > 4 && module_path[0] != '/' && strcmp(module_path + len - 4, ".zig") == 0) {
+        return FQN_REL_KIND_JS;
+    }
     if (!module_path || module_path[0] != '.') {
         return FQN_REL_KIND_NONE;
     }
@@ -274,11 +280,11 @@ static char *resolve_python_relative(char *buf, size_t buf_size, const char *mod
     return strdup(buf);
 }
 
-/* Strip an explicit JS/TS module file extension while preserving dots that are
- * part of an extensionless basename (e.g. "featureX.engine"). */
+/* Strip an explicit JS/TS (or Zig) module file extension while preserving dots
+ * that are part of an extensionless basename (e.g. "featureX.engine"). */
 static size_t strip_js_module_ext(const char *seg_start, size_t seg_len) {
     static const char *const extensions[] = {
-        ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".json",
+        ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".json", ".zig",
     };
     for (size_t i = 0; i < sizeof(extensions) / sizeof(extensions[0]); i++) {
         size_t ext_len = strlen(extensions[i]);

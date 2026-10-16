@@ -764,6 +764,42 @@ TEST(parallel_lsp_tail_match_fallbacks_gated_to_jvm) {
     PASS();
 }
 
+TEST(parallel_lsp_site_rows_join_their_own_call) {
+    /* Two same-named calls in one function (`db.deinit(); st.deinit();`)
+     * resolve to different targets; each row carries its call site. */
+    CBMResolvedCall rows[2] = {{0}, {0}};
+    rows[0].caller_qn = "proj.main.run";
+    rows[0].callee_qn = "proj.db.Database.deinit";
+    rows[0].confidence = 0.95f;
+    rows[0].site_start_byte = 40;
+    rows[0].site_end_byte = 51;
+    rows[1].caller_qn = "proj.main.run";
+    rows[1].callee_qn = "proj.db.Statement.deinit";
+    rows[1].confidence = 0.95f;
+    rows[1].site_start_byte = 60;
+    rows[1].site_end_byte = 71;
+    CBMResolvedCallArray arr = {0};
+    arr.items = rows;
+    arr.count = 2;
+    arr.cap = 2;
+
+    CBMCall call = {0};
+    call.enclosing_func_qn = "proj.main.run";
+    call.callee_name = "db.deinit";
+    call.site_start_byte = 40;
+    ASSERT_TRUE(cbm_pipeline_find_lsp_resolution(&arr, &call, false) == &rows[0]);
+    call.callee_name = "st.deinit";
+    call.site_start_byte = 60;
+    ASSERT_TRUE(cbm_pipeline_find_lsp_resolution(&arr, &call, false) == &rows[1]);
+    /* A call at neither site joins neither row. */
+    call.site_start_byte = 80;
+    ASSERT_TRUE(cbm_pipeline_find_lsp_resolution(&arr, &call, false) == NULL);
+    /* Rows without a site keep matching by caller + short name. */
+    rows[1].site_end_byte = 0;
+    ASSERT_TRUE(cbm_pipeline_find_lsp_resolution(&arr, &call, false) == &rows[1]);
+    PASS();
+}
+
 TEST(parallel_python_lsp_override_emits_lsp_strategy_edges) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_par_pylsp_XXXXXX");
@@ -1250,6 +1286,7 @@ SUITE(parallel) {
     RUN_TEST(parallel_cross_file_reread_preserves_unretained_edges);
     RUN_TEST(parallel_java_kotlin_lsp_override_cross_file_emits_lsp_strategy_edges);
     RUN_TEST(parallel_lsp_tail_match_fallbacks_gated_to_jvm);
+    RUN_TEST(parallel_lsp_site_rows_join_their_own_call);
     RUN_TEST(parallel_calls_parity);
     RUN_TEST(parallel_defines_parity);
     RUN_TEST(parallel_defines_method_parity);

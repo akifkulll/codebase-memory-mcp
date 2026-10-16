@@ -2337,7 +2337,13 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                 const char *short_name = strrchr(rc_e->callee_qn, '.');
                 short_name = short_name ? short_name + 1 : rc_e->callee_qn;
                 char key[1024];
-                int kn = snprintf(key, sizeof(key), "%s|%s", rc_e->caller_qn, short_name);
+                /* A row with a site span proves one call site: key it by that
+                 * site so it never answers a same-named call elsewhere in the
+                 * caller (cbm_pipeline_lsp_site_admits). */
+                int kn = rc_e->site_end_byte > rc_e->site_start_byte
+                             ? snprintf(key, sizeof(key), "%s|%s@%u", rc_e->caller_qn, short_name,
+                                        rc_e->site_start_byte)
+                             : snprintf(key, sizeof(key), "%s|%s", rc_e->caller_qn, short_name);
                 if (kn <= 0 || kn >= (int)sizeof(key))
                     continue;
                 CBMResolvedCall *existing = (CBMResolvedCall *)cbm_ht_get(lsp_idx, key);
@@ -2383,9 +2389,15 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         if (lsp_idx && call->enclosing_func_qn) {
             const char *call_leaf = cbm_pipeline_call_callee_leaf(call->callee_name);
             char key[1024];
-            int kn = call_leaf
-                         ? snprintf(key, sizeof(key), "%s|%s", call->enclosing_func_qn, call_leaf)
-                         : -1;
+            int kn = call_leaf ? snprintf(key, sizeof(key), "%s|%s@%u", call->enclosing_func_qn,
+                                          call_leaf, call->site_start_byte)
+                               : -1;
+            if (kn > 0 && kn < (int)sizeof(key)) {
+                lsp = (const CBMResolvedCall *)cbm_ht_get(lsp_idx, key);
+            }
+            kn = call_leaf && !lsp
+                     ? snprintf(key, sizeof(key), "%s|%s", call->enclosing_func_qn, call_leaf)
+                     : -1;
             if (kn > 0 && kn < (int)sizeof(key)) {
                 lsp = (const CBMResolvedCall *)cbm_ht_get(lsp_idx, key);
             }
@@ -2465,7 +2477,8 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
          * This language set MUST match the one in pass_calls.c exactly — see the
          * note there. */
         bool suppress_weak_member = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
-                                    lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
+                                    lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX ||
+                                    lang == CBM_LANG_ZIG;
         /* Bare-call local-binding suppression — see the note in pass_calls.c.
          * This gate MUST stay identical to the one there. */
         bool suppress_weak_local_binding = lang == CBM_LANG_PYTHON;
@@ -2943,7 +2956,9 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
              result->calls.count > 0 &&
              (jvm_cross_lsp || rust_workspace_cross_lsp ||
               cbm_pipeline_invocation_row_count(&result->resolved_calls) <
-                  result->calls.count) &&
+                  result->calls.count ||
+              (lang == CBM_LANG_ZIG && rc->def_modules &&
+               cbm_pxc_zig_args_in_module(rc->cross_registries, rc->def_modules[file_idx]))) &&
              !is_generated);
 
         /* Skip files with nothing else to resolve and no cross-LSP work. */

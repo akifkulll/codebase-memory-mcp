@@ -360,6 +360,166 @@ TSNode cbm_find_child_by_kind(TSNode parent, const char *kind) {
     return null_node;
 }
 
+static bool zig_is_if(TSNode n) {
+    const char *k = ts_node_type(n);
+    return strcmp(k, "if_expression") == 0 || strcmp(k, "if_type_expression") == 0;
+}
+
+/* Is n a branch of the if node p, not its condition? */
+static bool zig_is_if_branch(TSNode p, TSNode n) {
+    TSNode cond = ts_node_child_by_field_name(p, TS_FIELD("condition"));
+    return ts_node_is_null(cond) || !ts_node_eq(cond, n);
+}
+
+static bool zig_is_container_kind(TSNode n) {
+    const char *k = ts_node_type(n);
+    return strcmp(k, "struct_declaration") == 0 || strcmp(k, "enum_declaration") == 0 ||
+           strcmp(k, "union_declaration") == 0 || strcmp(k, "opaque_declaration") == 0;
+}
+
+/* The function a `return` belongs to, or a null node when a container or a
+ * test sits in between. */
+static TSNode zig_return_function(TSNode ret) {
+    TSNode null_node = {0};
+    for (TSNode cur = ts_node_parent(ret); !ts_node_is_null(cur); cur = ts_node_parent(cur)) {
+        const char *k = ts_node_type(cur);
+        if (strcmp(k, "function_declaration") == 0) {
+            return cur;
+        }
+        if (zig_is_container_kind(cur) || strcmp(k, "test_declaration") == 0 ||
+            strcmp(k, "source_file") == 0) {
+            return null_node;
+        }
+    }
+    return null_node;
+}
+
+TSNode cbm_zig_container_decl(TSNode container) {
+    TSNode null_node = {0};
+    TSNode cur = container;
+    TSNode parent = ts_node_parent(cur);
+    for (int guard = 0; guard < CBM_SZ_32 && !ts_node_is_null(parent); guard++) {
+        if (zig_is_if(parent) && zig_is_if_branch(parent, cur)) {
+            cur = parent;
+        } else if (strcmp(ts_node_type(parent), "switch_case") == 0 &&
+                   ts_node_eq(ts_node_named_child(parent, ts_node_named_child_count(parent) - 1),
+                              cur) &&
+                   strcmp(ts_node_type(ts_node_parent(parent)), "switch_expression") == 0) {
+            cur = ts_node_parent(parent); /* a prong's value */
+        } else {
+            break;
+        }
+        parent = ts_node_parent(cur);
+    }
+    if (ts_node_is_null(parent)) {
+        return null_node;
+    }
+    if (strcmp(ts_node_type(parent), "return_expression") == 0) {
+        return zig_return_function(parent);
+    }
+    if (strcmp(ts_node_type(parent), "variable_declaration") != 0) {
+        return null_node;
+    }
+    /* Through an `if`, only the declaration's value names the branches. */
+    if (!ts_node_eq(cur, container) &&
+        !ts_node_eq(ts_node_named_child(parent, ts_node_named_child_count(parent) - 1), cur)) {
+        return null_node;
+    }
+    return parent;
+}
+
+TSNode cbm_zig_container_name_node(TSNode container) {
+    TSNode decl = cbm_zig_container_decl(container);
+    if (ts_node_is_null(decl)) {
+        return decl;
+    }
+    if (strcmp(ts_node_type(decl), "function_declaration") == 0) {
+        return ts_node_child_by_field_name(decl, TS_FIELD("name"));
+    }
+    return cbm_find_child_by_kind(decl, "identifier");
+}
+
+int cbm_zig_returned_containers(TSNode fn, TSNode *out, int max) {
+    TSNode body = ts_node_child_by_field_name(fn, TS_FIELD("body"));
+    if (ts_node_is_null(body) || max <= 0) {
+        return 0;
+    }
+    /* Depth-first over the body; a container or a nested function ends the
+     * descent (what it holds is not returned by fn). */
+    enum { STACK = CBM_SZ_64 };
+    TSNode stack[STACK];
+    int top = 0;
+    int n = 0;
+    stack[top++] = body;
+    while (top > 0 && n < max) {
+        TSNode cur = stack[--top];
+        if (zig_is_container_kind(cur)) {
+            if (ts_node_eq(cbm_zig_container_decl(cur), fn)) {
+                out[n++] = cur;
+            }
+            continue;
+        }
+        if (!ts_node_eq(cur, body) && strcmp(ts_node_type(cur), "function_declaration") == 0) {
+            continue;
+        }
+        uint32_t nc = ts_node_named_child_count(cur);
+        for (uint32_t i = nc; i > 0 && top < STACK; i--) {
+            stack[top++] = ts_node_named_child(cur, i - 1);
+        }
+    }
+    return n;
+}
+
+bool cbm_zig_value_is_container(TSNode v) { // NOLINT(misc-no-recursion)
+    if (ts_node_is_null(v)) {
+        return false;
+    }
+    const char *k = ts_node_type(v);
+    if (strcmp(k, "struct_declaration") == 0 || strcmp(k, "enum_declaration") == 0 ||
+        strcmp(k, "union_declaration") == 0 || strcmp(k, "opaque_declaration") == 0) {
+        return true;
+    }
+    if (!zig_is_if(v)) {
+        return false;
+    }
+    uint32_t nc = ts_node_named_child_count(v);
+    for (uint32_t i = 0; i < nc; i++) {
+        TSNode b = ts_node_named_child(v, i);
+        if (zig_is_if_branch(v, b) && cbm_zig_value_is_container(b)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+const char *cbm_zig_import_local_name(CBMArena *a, TSNode builtin, const char *source,
+                                      const char *path) {
+    TSNode parent = ts_node_parent(builtin);
+    if (!ts_node_is_null(parent) && strcmp(ts_node_type(parent), "variable_declaration") == 0 &&
+        ts_node_eq(ts_node_named_child(parent, ts_node_named_child_count(parent) - 1), builtin)) {
+        TSNode id = cbm_find_child_by_kind(parent, "identifier");
+        if (!ts_node_is_null(id)) {
+            return cbm_node_text(a, id, source);
+        }
+    }
+    if (!path) {
+        return NULL;
+    }
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    size_t n = strlen(base);
+    if (n > 4 && strcmp(base + n - 4, ".zig") == 0) {
+        n -= 4;
+    }
+    char *out = (char *)cbm_arena_alloc(a, n + 1);
+    if (!out) {
+        return NULL;
+    }
+    memcpy(out, base, n);
+    out[n] = '\0';
+    return out;
+}
+
 int cbm_find_children_by_kind(TSNode parent, const char *kind, TSNode *out, int max) {
     int n = 0;
     uint32_t count = ts_node_child_count(parent);
@@ -1092,6 +1252,9 @@ const char *cbm_enclosing_func_qn(CBMArena *a, TSNode node, CBMLanguage lang, co
                 continue;
             }
             TSNode class_name = ts_node_child_by_field_name(cur, TS_FIELD("name"));
+            if (ts_node_is_null(class_name) && lang == CBM_LANG_ZIG) {
+                class_name = cbm_zig_container_name_node(cur);
+            }
             if (ts_node_is_null(class_name)) {
                 continue;
             }

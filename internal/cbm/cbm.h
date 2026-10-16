@@ -226,6 +226,10 @@ typedef struct {
      * every other definition, and in every language outside
      * cbm_is_c_preprocessor_lang. */
     const char *variants;
+    /* Zig module- or container-level alias (`const db = @import("db.zig");`,
+     * `pub const Database = zova.Database;`): the value text, which the
+     * cross-file Zig resolver follows. Not stored on the graph node. */
+    const char *alias_value;
 } CBMDefinition;
 
 /* Argument captured from a call expression */
@@ -259,11 +263,15 @@ typedef struct {
     int loop_depth;                     // enclosing loop nesting at the call site
     int branch_depth;                   // enclosing branch nesting at the call site
     int start_line;                     // 1-based source line of the call (for def range-match)
+    uint32_t site_start_byte;           // start byte of the call node; joins an LSP row that
+                                        // carries an exact invocation site (Zig)
     bool is_method;                     // method/member call with an UNRESOLVED receiver. Perl:
                                         // arrow/method call ($obj->m). TS/JS/TSX: member call
                                         // x.foo() whose receiver is not this/super. Python:
                                         // x.foo() where x is not self/cls/super() and is not
-                                        // rooted in an imported name. Default false.
+                                        // rooted in an imported name. Zig: x.m() whose
+                                        // receiver is a value, not a TitleCase type name.
+                                        // Default false.
     bool callee_is_locally_bound;       // bare call foo() whose callee identifier is bound as a
                                         // parameter of an enclosing function, so it cannot be the
                                         // module-level foo. Python only today. Read by the
@@ -386,7 +394,9 @@ typedef struct {
     float confidence;         // 0.90-0.95
     const char *reason;       // diagnostic label for unresolved calls (NULL if resolved)
     CBMResolvedKind kind;     // invocation (CALLS) or callable reference
-    uint32_t site_start_byte; // reference rows: exact source occurrence (end > start)
+    uint32_t site_start_byte; // reference rows: exact source occurrence (end > start);
+                              // invocation rows with a span match only the call
+                              // whose site_start_byte equals it (Zig)
     uint32_t site_end_byte;   // exclusive byte offset in the source file
 } CBMResolvedCall;
 

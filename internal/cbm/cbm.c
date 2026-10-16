@@ -16,6 +16,7 @@
 #include "lsp/java_lsp.h"
 #include "lsp/kotlin_lsp.h"
 #include "lsp/rust_lsp.h"
+#include "lsp/zig_lsp.h"
 #include "preprocessor.h"
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"  // cbm_fopen — crash-supervisor per-file marker write
@@ -1845,6 +1846,9 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
     }
     if (language == CBM_LANG_RUST) {
         cbm_run_rust_lsp(a, result, source, source_len, root);
+    }
+    if (language == CBM_LANG_ZIG) {
+        cbm_run_zig_lsp(a, result, source, source_len, root);
     }
     atomic_fetch_add(&total_lsp_ns, now_ns() - lsp_start);
 

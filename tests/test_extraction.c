@@ -1472,6 +1472,265 @@ TEST(zig_struct) {
     PASS();
 }
 
+/* --- Zig containers scope their members ---
+ * `const Database = struct {...}` names the struct through its
+ * variable_declaration. Its functions are Methods qualified by the struct, so
+ * two structs' `deinit` stay distinct nodes, and the declaration is not also a
+ * Variable that shadows the Struct. */
+/* A re-export inside a struct is a container-qualified alias Variable;
+ * `const Self = @This()` and nested containers are not. */
+/* A container chosen by a compile-time `if` is named by its declaration: both
+ * branches are the Struct, and their methods are its Methods. */
+TEST(zig_comptime_if_container_is_named) {
+    CBMFileResult *r = extract("const builtin = @import(\"builtin\");\n"
+                               "const AbiMutex = if (builtin.os.tag == .emscripten) struct {\n"
+                               "    pub fn lock(_: *@This()) void {}\n"
+                               "} else struct {\n"
+                               "    state: u32 = 0,\n"
+                               "    pub fn lock(self: *AbiMutex) void { _ = self; }\n"
+                               "};\n"
+                               "pub const Handle = struct {\n"
+                               "    mutex: AbiMutex = .{},\n"
+                               "    fn run(h: *Handle) void { h.mutex.lock(); }\n"
+                               "};\n",
+                               CBM_LANG_ZIG, "t", "src/h.zig");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int structs = 0;
+    int locks = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (strcmp(d->qualified_name, "t.src.h.AbiMutex") == 0 && strcmp(d->label, "Struct") == 0) {
+            structs++;
+        } else if (strcmp(d->qualified_name, "t.src.h.AbiMutex.lock") == 0) {
+            ASSERT_STR_EQ(d->label, "Method");
+            locks++;
+        }
+    }
+    ASSERT_EQ(structs, 2);
+    ASSERT_EQ(locks, 2);
+    ASSERT_EQ(count_defs_named(r, "Variable", "AbiMutex"), 0);
+    ASSERT_FALSE(has_def_qn(r, "t.src.h.lock"));
+    ASSERT(has_def_qn(r, "t.src.h.AbiMutex.state"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A type function names the containers it returns: their members are
+ * `<fn>.<member>` and hang off the Function, which stands for the type (no
+ * Struct def shares its QN). Calls inside them belong to those methods. */
+TEST(zig_type_function_containers_are_named) {
+    CBMFileResult *r = extract("pub fn Pool(comptime T: type) type {\n"
+                               "    return struct {\n"
+                               "        items: []T,\n"
+                               "        pub fn first(self: *@This()) *T { return &self.items[0]; }\n"
+                               "        pub fn grow(self: *@This()) void { self.first(); }\n"
+                               "    };\n"
+                               "}\n"
+                               "fn Ops(comptime kind: u8) type {\n"
+                               "    if (kind == 1) return struct { fn copy() void {} };\n"
+                               "    return switch (kind) {\n"
+                               "        0 => struct { fn copy() void {} },\n"
+                               "        else => enum { a, b },\n"
+                               "    };\n"
+                               "}\n",
+                               CBM_LANG_ZIG, "t", "src/p.zig");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_defs_named(r, "Function", "Pool"), 1);
+    ASSERT_EQ(count_defs_named(r, "Struct", "Pool"), 0);
+    int copies = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (strcmp(d->qualified_name, "t.src.p.Pool.first") == 0) {
+            ASSERT_STR_EQ(d->label, "Method");
+            ASSERT_STR_EQ(d->parent_class, "t.src.p.Pool");
+        } else if (strcmp(d->qualified_name, "t.src.p.Ops.copy") == 0) {
+            copies++;
+        }
+    }
+    ASSERT_EQ(copies, 2);
+    ASSERT(has_def_qn(r, "t.src.p.Pool.items"));
+    ASSERT_EQ(count_defs_named(r, "Enum", "Ops"), 0);
+    ASSERT_FALSE(has_def_qn(r, "t.src.p.first"));
+    int grow_calls = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (strcmp(c->callee_name, "self.first") == 0 || strcmp(c->callee_name, "first") == 0) {
+            ASSERT_STR_EQ(c->enclosing_func_qn, "t.src.p.Pool.grow");
+            grow_calls++;
+        }
+    }
+    ASSERT_EQ(grow_calls, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(zig_container_aliases_are_scoped) {
+    CBMFileResult *r = extract("const impl = @import(\"db.zig\");\n"
+                               "pub const api = struct {\n"
+                               "    const Self = @This();\n"
+                               "    pub const Db = impl.Database;\n"
+                               "    pub const sqlite = @import(\"sqlite.zig\");\n"
+                               "    const Local = struct {};\n"
+                               "    const limit: u32 = 4;\n"
+                               "};\n",
+                               CBM_LANG_ZIG, "t", "src/root.zig");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *db = NULL;
+    const CBMDefinition *sq = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (strcmp(d->qualified_name, "t.src.root.api.Db") == 0) {
+            db = d;
+        } else if (strcmp(d->qualified_name, "t.src.root.api.sqlite") == 0) {
+            sq = d;
+        }
+    }
+    ASSERT_NOT_NULL(db);
+    ASSERT_STR_EQ(db->label, "Variable");
+    ASSERT_STR_EQ(db->parent_class, "t.src.root.api");
+    ASSERT_STR_EQ(db->alias_value, "impl.Database");
+    ASSERT_NOT_NULL(sq);
+    ASSERT_STR_EQ(sq->alias_value, "@import(\"sqlite.zig\")");
+    ASSERT_EQ(count_defs_named(r, "Variable", "Self"), 0);
+    ASSERT_EQ(count_defs_named(r, "Variable", "Local"), 0);
+    ASSERT_EQ(count_defs_named(r, "Variable", "limit"), 0);
+    ASSERT_EQ(count_defs_named(r, "Variable", "Db"), 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(zig_struct_members_are_scoped) {
+    CBMFileResult *r = extract("const std = @import(\"std\");\n"
+                               "pub const Database = struct {\n"
+                               "    handle: i32,\n"
+                               "    const Self = @This();\n"
+                               "    pub fn open() !Database { return .{ .handle = 0 }; }\n"
+                               "    pub fn deinit(self: *Self) void { self.close(); }\n"
+                               "    fn close(self: *Self) void { _ = self; }\n"
+                               "    pub const Inner = struct {\n"
+                               "        pub fn deinit(self: *Inner) void { _ = self; }\n"
+                               "    };\n"
+                               "    test \"inside\" { helper(); }\n"
+                               "};\n"
+                               "const Kind = enum { a, b, pub fn name(self: Kind) u8 { _ = self; "
+                               "return 0; } };\n"
+                               "fn helper() void {}\n",
+                               CBM_LANG_ZIG, "t", "src/db.zig");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *db = NULL;
+    const CBMDefinition *deinit = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (strcmp(d->qualified_name, "t.src.db.Database") == 0) {
+            db = d;
+        } else if (strcmp(d->qualified_name, "t.src.db.Database.deinit") == 0) {
+            deinit = d;
+        }
+    }
+    ASSERT_NOT_NULL(db);
+    ASSERT_STR_EQ(db->label, "Struct");
+    ASSERT_NOT_NULL(deinit);
+    ASSERT_STR_EQ(deinit->label, "Method");
+    ASSERT_STR_EQ(deinit->parent_class, "t.src.db.Database");
+    ASSERT(has_def_qn(r, "t.src.db.Database.open"));
+    ASSERT(has_def_qn(r, "t.src.db.Database.close"));
+    ASSERT(has_def_qn(r, "t.src.db.Database.handle"));
+    ASSERT(has_def_qn(r, "t.src.db.Database.Inner"));
+    ASSERT(has_def_qn(r, "t.src.db.Database.Inner.deinit"));
+    ASSERT(has_def_qn(r, "t.src.db.Kind"));
+    ASSERT(has_def_qn(r, "t.src.db.Kind.name"));
+    ASSERT(has_def_qn(r, "t.src.db.helper"));
+    ASSERT(has_def(r, "Function", "inside"));
+    /* Members are not re-extracted as file-level functions. */
+    ASSERT_FALSE(has_def_qn(r, "t.src.db.deinit"));
+    ASSERT_FALSE(has_def_qn(r, "t.src.db.open"));
+    /* A container declaration is the Struct, not also a Variable. */
+    ASSERT_EQ(count_defs_named(r, "Variable", "Database"), 0);
+    ASSERT_EQ(count_defs_named(r, "Variable", "Inner"), 0);
+    ASSERT_EQ(count_defs_named(r, "Variable", "Kind"), 0);
+    ASSERT_EQ(count_defs_named(r, "Variable", "std"), 1);
+    /* An alias keeps its value text for the resolver, not as a return type. */
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (strcmp(d->label, "Variable") == 0 && strcmp(d->name, "std") == 0) {
+            ASSERT_NULL(d->return_type);
+            ASSERT_STR_EQ(d->alias_value, "@import(\"std\")");
+        }
+    }
+    /* A call inside a method is scoped to the struct-qualified method. */
+    bool close_in_deinit = false;
+    bool helper_in_test = false;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (strstr(c->callee_name, "close") && c->enclosing_func_qn &&
+            strcmp(c->enclosing_func_qn, "t.src.db.Database.deinit") == 0) {
+            close_in_deinit = true;
+        }
+        /* A test inside a struct is a file-level Function; its calls agree. */
+        if (strcmp(c->callee_name, "helper") == 0 && c->enclosing_func_qn &&
+            strcmp(c->enclosing_func_qn, "t.src.db.inside") == 0) {
+            helper_in_test = true;
+        }
+    }
+    ASSERT(close_in_deinit);
+    ASSERT(helper_in_test);
+    ASSERT(has_def_qn(r, "t.src.db.inside"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* --- Zig imports are keyed by their bound name; value receivers are flagged ---
+ * `const db = @import("db.zig")` binds "db" (not the "zig" a '.'-split gave), so
+ * the import map can match `db.helper()`. A member call on a value receiver is
+ * is_method (weak short-name matches must not bind it); a TitleCase type-name
+ * receiver is not. */
+TEST(zig_import_names_and_member_receivers) {
+    CBMFileResult *r = extract("const std = @import(\"std\");\n"
+                               "const db = @import(\"db.zig\");\n"
+                               "const Statement = @import(\"sql/stmt.zig\").Statement;\n"
+                               "fn run(tmp: anytype) void {\n"
+                               "    tmp.cleanup();\n"
+                               "    db.helper();\n"
+                               "    Statement.prepare();\n"
+                               "    db.Database.open();\n"
+                               "    run(tmp);\n"
+                               "}\n",
+                               CBM_LANG_ZIG, "t", "src/main.zig");
+    ASSERT_NOT_NULL(r);
+    const char *want[][2] = {{"std", "std"}, {"db", "db.zig"}, {"stmt", "sql/stmt.zig"}};
+    for (int w = 0; w < 3; w++) {
+        bool found = false;
+        for (int i = 0; i < r->imports.count; i++) {
+            const CBMImport *imp = &r->imports.items[i];
+            if (imp->local_name && strcmp(imp->local_name, want[w][0]) == 0 &&
+                strcmp(imp->module_path, want[w][1]) == 0) {
+                found = true;
+            }
+        }
+        ASSERT(found);
+    }
+    int checked = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (strcmp(c->callee_name, "tmp.cleanup") == 0 || strcmp(c->callee_name, "db.helper") == 0) {
+            ASSERT_TRUE(c->is_method);
+            checked++;
+        } else if (strcmp(c->callee_name, "Statement.prepare") == 0 ||
+                   strcmp(c->callee_name, "db.Database.open") == 0 ||
+                   strcmp(c->callee_name, "run") == 0) {
+            ASSERT_FALSE(c->is_method);
+            checked++;
+        }
+    }
+    ASSERT_EQ(checked, 5);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- C++ function (standalone) --- */
 TEST(cpp_function) {
     CBMFileResult *r = extract("#include <string>\nstd::string greet(const std::string& name) { "
@@ -5395,6 +5654,11 @@ SUITE(extraction) {
     RUN_TEST(dart_top_level_function);
     RUN_TEST(rust_enum);
     RUN_TEST(zig_struct);
+    RUN_TEST(zig_struct_members_are_scoped);
+    RUN_TEST(zig_container_aliases_are_scoped);
+    RUN_TEST(zig_comptime_if_container_is_named);
+    RUN_TEST(zig_type_function_containers_are_named);
+    RUN_TEST(zig_import_names_and_member_receivers);
     RUN_TEST(cpp_function);
     RUN_TEST(cpp_out_of_line_method_issue428);
     RUN_TEST_LANG(CBM_LANG_COBOL, cobol_paragraph);

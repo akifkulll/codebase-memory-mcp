@@ -1024,6 +1024,9 @@ static int run_parallel_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         cross_registries.c = cbm_c_build_cross_registry(&cross_lsp_arena, all_defs, def_count);
         cross_registries.cs = cbm_cs_build_cross_registry(&cross_lsp_arena, all_defs, def_count);
         cross_registries.ts = cbm_ts_build_cross_registry(&cross_lsp_arena, all_defs, def_count);
+        cross_registries.zig_args = cbm_pxc_collect_zig_args(
+            ctx, cache, files, file_count, def_modules, module_def_index, all_defs, def_count,
+            &cross_lsp_arena, &cross_registries.zig_arg_count);
         /* Rust: NOT built here. The shared all_defs registry is built LAZILY on the
          * first NULL-filter rust file (the amplifier files) inside cbm_parallel_resolve
          * — repos whose rust files all filter to subsets never pay the build/RSS. */
@@ -1038,6 +1041,7 @@ static int run_parallel_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
                  itoa_buf((int)elapsed_ms(*t)));
     log_phase_mem("parallel_resolve");
     cbm_pxc_free_module_def_index(module_def_index);
+    free((void *)cross_registries.zig_args);
     cbm_arena_destroy(&cross_lsp_arena); /* releases all per-lang registries */
     free(all_defs);
     if (def_modules) {

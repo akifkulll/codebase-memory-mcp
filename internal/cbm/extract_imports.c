@@ -1094,7 +1094,12 @@ static void parse_zig_imports(CBMExtractCtx *ctx) {
                 if (find_first_descendant_of(node, "string", &str)) {
                     char *path = strip_quotes(a, cbm_node_text(a, str, ctx->source));
                     if (path && path[0]) {
-                        CBMImport imp = {.local_name = path_last(a, path), .module_path = path};
+                        /* path_last splits on '.', which named every Zig import
+                         * "zig" ("db.zig" → "zig"), so no import-map key ever
+                         * matched a receiver. Key by the bound name instead. */
+                        CBMImport imp = {.local_name =
+                                             cbm_zig_import_local_name(a, node, ctx->source, path),
+                                         .module_path = path};
                         cbm_imports_push(&ctx->result->imports, a, imp);
                     }
                 }

@@ -5,7 +5,7 @@
 // NOTE (v1.0.2 #9): the build cache keys on THIS file's content, not on the
 // nested #includes below. Bump CBM_LSP_ALL_REV when changing any nested
 // lsp/*.c file so test/production builds pick it up.
-#define CBM_LSP_ALL_REV 2
+#define CBM_LSP_ALL_REV 3
 
 #include "lsp/type_rep.c"
 #include "lsp/scope.c"
@@ -32,3 +32,4 @@
 #include "lsp/rust_proc_macros.c"
 #include "lsp/rust_rustdoc.c"
 #include "lsp/rust_lsp.c"
+#include "lsp/zig_lsp.c"

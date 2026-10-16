@@ -480,7 +480,10 @@ static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLan
         }
     }
 
-    if (state->enclosing_class_qn) {
+    /* Zig: a `test` block inside a container is still a file-level Function in
+     * the def walk (push_class_body_children), so its call scope is too. */
+    if (state->enclosing_class_qn &&
+        !(ctx->language == CBM_LANG_ZIG && strcmp(ts_node_type(node), "test_declaration") == 0)) {
         return cbm_arena_sprintf(ctx->arena, "%s.%s", state->enclosing_class_qn, name);
     }
     /* Java/Go: directory-based module so this enclosing-func QN matches the def
@@ -513,6 +516,11 @@ static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const WalkS
     if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_RUST &&
         strcmp(ts_node_type(node), "impl_item") == 0) {
         name_node = ts_node_child_by_field_name(node, TS_FIELD("type"));
+    }
+    /* Zig: `const Foo = struct {...}` — the container is named by its
+     * declaration (same rule as the def walk's compute_class_qn). */
+    if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_ZIG) {
+        name_node = cbm_zig_container_name_node(node);
     }
     if (ts_node_is_null(name_node)) {
         return NULL;

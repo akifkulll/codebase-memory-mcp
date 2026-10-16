@@ -18,7 +18,7 @@ pipeline=(
 languages=(
   extraction parse_coverage extraction_inheritance extraction_imports grammar_regression grammar_labels
   grammar_imports scope type_rep go_lsp c_lsp php_lsp cs_lsp cs_lsp_bench py_lsp
-  kotlin_lsp rust_lsp py_lsp_bench py_lsp_stress py_lsp_scale ts_lsp java_lsp
+  kotlin_lsp rust_lsp zig_lsp py_lsp_bench py_lsp_stress py_lsp_scale ts_lsp java_lsp
   java_lsp_coverage lang_contract edge_imports edge_structural lsp_resolution_probe
   node_creation_probe edge_types_probe convergence_probe matrix_known_classes
   matrix_new_constructs grammar_probe_a grammar_probe_b grammar_probe_c grammar_probe_d

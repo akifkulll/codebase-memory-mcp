@@ -114,6 +114,35 @@ char *cbm_cpp_out_of_line_parent_class(CBMArena *a, TSNode node, const char *sou
 // Find a child node by kind string.
 TSNode cbm_find_child_by_kind(TSNode parent, const char *kind);
 
+// Zig containers (struct/enum/union_declaration) are anonymous expressions;
+// `const Foo = struct {...}` names one through the enclosing
+// variable_declaration's identifier. A container chosen by a compile-time `if`
+// (`const M = if (c) struct {...} else struct {...};`) is named by the
+// declaration too, so both branches share one QN. Returns that declaration, or
+// a null node for a container that is not the value of a declaration.
+// A container a function returns (`fn List(comptime T: type) type { return
+// struct {...}; }`, also through `if` and `switch` prongs) is named by that
+// function: the function_declaration is returned.
+TSNode cbm_zig_container_decl(TSNode container);
+
+// The identifier of cbm_zig_container_decl(container), or a null node.
+TSNode cbm_zig_container_name_node(TSNode container);
+
+// The containers function_declaration fn returns (see cbm_zig_container_decl),
+// up to max of them into out. Returns the count.
+int cbm_zig_returned_containers(TSNode fn, TSNode *out, int max);
+
+// True when a declaration value v is a container, or an `if` with a container
+// branch.
+bool cbm_zig_value_is_container(TSNode v);
+
+// Zig: the local name of an `@import(path)` builtin — the declaration it is
+// bound to (`const db = @import("db.zig")` → "db"), else the imported file's
+// stem ("src/db.zig" → "db", "std" → "std"). Shared by import extraction and
+// the Zig LSP so both key the import map identically.
+const char *cbm_zig_import_local_name(CBMArena *a, TSNode builtin, const char *source,
+                                      const char *path);
+
 // Find every child node matching `kind` (unlike cbm_find_child_by_kind,
 // which stops at the first match). Writes up to `max` nodes into `out`;
 // returns how many were found. Repeated sibling nodes of the same kind are

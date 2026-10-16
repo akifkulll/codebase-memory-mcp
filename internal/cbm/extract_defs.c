@@ -186,7 +186,8 @@ static void emit_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *s
 static void extract_c_typedef(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec);
 static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, int depth_unused);
 static void extract_variables(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec);
-static void extract_class_variables(CBMExtractCtx *ctx, TSNode class_node, const CBMLangSpec *spec);
+static void extract_class_variables(CBMExtractCtx *ctx, TSNode class_node, const char *class_qn,
+                                    const CBMLangSpec *spec);
 static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec);
 static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const char *class_qn,
                                   const CBMLangSpec *spec);
@@ -3180,6 +3181,11 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
         def.signature = cbm_node_text(a, params, ctx->source);
         def.param_names = extract_param_names(a, params, ctx->source, ctx->language);
         def.param_types = extract_param_types(a, params, ctx->source, ctx->language);
+    } else if (ctx->language == CBM_LANG_ZIG) {
+        /* tree-sitter-zig's parameters are a child, not a field. The text
+         * names a type function's type parameters (pass_lsp_cross). */
+        params = cbm_find_child_by_kind(func_node, "parameters");
+        def.signature = ts_node_is_null(params) ? NULL : cbm_node_text(a, params, ctx->source);
     }
 
     // Return type — use func_node (inner function for templates)
@@ -3864,11 +3870,7 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
         case CBM_LANG_ZIG: { // `const Foo = struct {...}`: struct/enum/union_declaration
                              // is the value of a variable_declaration; the name is the
                              // parent variable_declaration's identifier child.
-            TSNode parent = ts_node_parent(node);
-            if (!ts_node_is_null(parent) &&
-                strcmp(ts_node_type(parent), "variable_declaration") == 0) {
-                name_node = cbm_find_child_by_kind(parent, "identifier");
-            }
+            name_node = cbm_zig_container_name_node(node);
             break;
         }
         default:
@@ -3926,7 +3928,7 @@ static void emit_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *s
     // through cbm_label_is_type_like(), so a struct still resolves as a type for
     // its methods, fields, inheritance and impls.
     if (ctx->language == CBM_LANG_RUST || ctx->language == CBM_LANG_SWIFT ||
-        ctx->language == CBM_LANG_DLANG) {
+        ctx->language == CBM_LANG_DLANG || ctx->language == CBM_LANG_ZIG) {
         if (strcmp(kind, "struct_item") == 0 || strcmp(kind, "struct_declaration") == 0) {
             label = "Struct";
         }
@@ -3995,7 +3997,13 @@ static void emit_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *s
     }
     def.docstring = extract_docstring(a, doc_node, ctx->source, ctx->language);
 
-    cbm_defs_push(&ctx->result->defs, a, def);
+    /* Zig: a container a type function returns shares the function's QN; the
+     * Function node stands for it and the members below hang off it. */
+    TSNode zig_decl = ctx->language == CBM_LANG_ZIG ? cbm_zig_container_decl(node) : (TSNode){0};
+    if (ts_node_is_null(zig_decl) ||
+        strcmp(ts_node_type(zig_decl), "function_declaration") != 0) {
+        cbm_defs_push(&ctx->result->defs, a, def);
+    }
 
     if (strcmp(label, "Enum") == 0) {
         extract_enum_members(ctx, node, class_qn);
@@ -4008,7 +4016,7 @@ static void emit_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *s
     extract_class_fields(ctx, node, class_qn, spec);
 
     // Extract class-level variables (field declarations)
-    extract_class_variables(ctx, node, spec);
+    extract_class_variables(ctx, node, class_qn, spec);
 
     // C# 12 primary-constructor parameters: declared on the class line
     // (`class Foo(IBar bar, IBaz baz) : Base { ... }`) and bound to implicit
@@ -4225,6 +4233,11 @@ static TSNode find_class_body(TSNode class_node, CBMLanguage lang) {
     if (lang == CBM_LANG_SMALI) {
         return class_node;
     }
+    // Zig: container_field, function_declaration and variable_declaration
+    // members are direct children of the struct/enum/union_declaration.
+    if (lang == CBM_LANG_ZIG) {
+        return class_node;
+    }
     // GraphQL: object/interface fields live in a fields_definition child.
     if (lang == CBM_LANG_GRAPHQL) {
         TSNode b = cbm_find_child_by_kind(class_node, "fields_definition");
@@ -4425,6 +4438,9 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, TSNode class_node,
     if (!ts_node_is_null(params)) {
         def.signature = cbm_node_text(a, params, ctx->source);
         def.param_types = extract_param_types(a, params, ctx->source, ctx->language);
+    } else if (ctx->language == CBM_LANG_ZIG) {
+        params = cbm_find_child_by_kind(child, "parameters"); /* as in extract_func_def */
+        def.signature = ts_node_is_null(params) ? NULL : cbm_node_text(a, params, ctx->source);
     }
 
     // Return type (same fields as extract_func_def)
@@ -5526,6 +5542,28 @@ static void extract_vars_config(CBMExtractCtx *ctx, TSNode node, CBMArena *a, co
     }
 }
 
+/* A Zig declaration value that can name a container, module or function:
+ * `x`, `a.b.C`, `@import("m.zig")`, `@import("m.zig").C`. */
+static bool zig_is_alias_value(TSNode v, const char *source) {
+    for (int guard = 0; guard < CBM_SZ_32 && !ts_node_is_null(v); guard++) {
+        const char *k = ts_node_type(v);
+        if (strcmp(k, "identifier") == 0) {
+            return true;
+        }
+        if (strcmp(k, "builtin_function") == 0) {
+            TSNode b = cbm_find_child_by_kind(v, "builtin_identifier");
+            uint32_t s = ts_node_is_null(b) ? 0 : ts_node_start_byte(b);
+            return !ts_node_is_null(b) && ts_node_end_byte(b) - s == strlen("@import") &&
+                   memcmp(source + s, "@import", strlen("@import")) == 0;
+        }
+        if (strcmp(k, "field_expression") != 0) {
+            return false;
+        }
+        v = ts_node_child_by_field_name(v, TS_FIELD("object"));
+    }
+    return false;
+}
+
 /* ── Variable name extraction dispatcher ────────────────────────── */
 
 static void extract_var_names(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
@@ -5632,6 +5670,36 @@ static void extract_var_names(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
             }
         }
         return;
+    /* Zig: `const Foo = struct {...}` is the Struct def extract_class_def
+     * emits under the same QN; a Variable there would shadow it. */
+    case CBM_LANG_ZIG: {
+        /* A container declaration (also one chosen by a compile-time `if`) is
+         * extracted as its type, not as a Variable. */
+        uint32_t zn = ts_node_named_child_count(node);
+        for (uint32_t i = 0; i < zn; i++) {
+            if (cbm_zig_value_is_container(ts_node_named_child(node, i))) {
+                return;
+            }
+        }
+        /* `const db = @import("db.zig");`, `pub const Database = zova.Database;`:
+         * an alias keeps its value text as alias_value, so the cross-file Zig
+         * resolver can follow imports and re-exports declared in another file. */
+        TSNode id = cbm_find_child_by_kind(node, "identifier");
+        if (ts_node_is_null(id)) {
+            break;
+        }
+        int before = ctx->result->defs.count;
+        push_var_def(ctx, cbm_node_text(a, id, ctx->source), node);
+        TSNode val = ts_node_named_child(node, zn - 1);
+        TSNode type = ts_node_child_by_field_name(node, TS_FIELD("type"));
+        if (ctx->result->defs.count > before && zn >= 2 && !ts_node_eq(val, id) &&
+            (ts_node_is_null(type) || !ts_node_eq(val, type)) &&
+            zig_is_alias_value(val, ctx->source)) {
+            ctx->result->defs.items[ctx->result->defs.count - 1].alias_value =
+                cbm_node_text(a, val, ctx->source);
+        }
+        return;
+    }
     default:
         break;
     }
@@ -6021,10 +6089,59 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
     }
 }
 
+/* Zig: a container-level alias (`pub const Db = impl.Database;`, `pub const
+ * sqlite = @import("sqlite.zig");`) is a Variable qualified by its container,
+ * so a re-export declared inside a struct can be followed from another file.
+ * Other container-level consts (`const Self = @This();`, values) are not
+ * extracted, and nested containers are extracted as their own types. */
+static void zig_extract_container_aliases(CBMExtractCtx *ctx, TSNode body, const char *class_qn) {
+    CBMArena *a = ctx->arena;
+    uint32_t count = ts_node_named_child_count(body);
+    for (uint32_t i = 0; i < count; i++) {
+        TSNode child = ts_node_named_child(body, i);
+        if (strcmp(ts_node_type(child), "variable_declaration") != 0) {
+            continue;
+        }
+        uint32_t zn = ts_node_named_child_count(child);
+        TSNode id = cbm_find_child_by_kind(child, "identifier");
+        TSNode val = zn >= 2 ? ts_node_named_child(child, zn - 1) : id;
+        TSNode type = ts_node_child_by_field_name(child, TS_FIELD("type"));
+        if (ts_node_is_null(id) || ts_node_eq(val, id) ||
+            (!ts_node_is_null(type) && ts_node_eq(val, type)) ||
+            !zig_is_alias_value(val, ctx->source)) {
+            continue;
+        }
+        char *name = cbm_node_text(a, id, ctx->source);
+        if (!name || !name[0] || strcmp(name, "_") == 0) {
+            continue;
+        }
+        CBMDefinition def;
+        memset(&def, 0, sizeof(def));
+        def.name = name;
+        def.qualified_name = cbm_arena_sprintf(a, "%s.%s", class_qn, name);
+        def.label = "Variable";
+        def.file_path = ctx->rel_path;
+        def.parent_class = class_qn;
+        def.alias_value = cbm_node_text(a, val, ctx->source);
+        def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;
+        def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
+        def.is_exported = cbm_is_exported(name, ctx->language);
+        cbm_defs_push(&ctx->result->defs, a, def);
+    }
+}
+
 // Extract class-level variables (field declarations inside class bodies)
-static void extract_class_variables(CBMExtractCtx *ctx, TSNode class_node,
+static void extract_class_variables(CBMExtractCtx *ctx, TSNode class_node, const char *class_qn,
                                     const CBMLangSpec *spec) {
     if (!spec->variable_node_types || !spec->variable_node_types[0]) {
+        return;
+    }
+    /* Zig: push_var_def qualifies by module, so container-level consts would
+     * collide with their namesakes in the file; only aliases are extracted,
+     * container-qualified. */
+    if (ctx->language == CBM_LANG_ZIG) {
+        zig_extract_container_aliases(ctx, find_class_member_body(class_node, ctx->language),
+                                      class_qn);
         return;
     }
 
@@ -6429,6 +6546,9 @@ static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const char 
     if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_SWIFT) {
         name_node = cbm_find_child_by_kind(node, "type_identifier");
     }
+    if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_ZIG) {
+        name_node = cbm_zig_container_name_node(node);
+    }
     if (!ts_node_is_null(name_node)) {
         char *cname = cbm_node_text(ctx->arena, name_node, ctx->source);
         if (cname && cname[0]) {
@@ -6456,6 +6576,22 @@ static void push_class_body_children(TSNode node, const CBMLangSpec *spec, wd_st
             push_nested_class_nodes(body, spec, s, new_enclosing, ctx);
             return;
         }
+    }
+    /* Zig: a named container's functions and fields are emitted as its
+     * Methods/Fields by extract_class_def, so walk only the declarations that can
+     * hold nested containers (`pub const Inner = struct {...}`) and the tests,
+     * which stay file-level Functions. An anonymous container (a struct passed
+     * as an argument) has no QN for members and keeps the generic descent. */
+    if (spec->language == CBM_LANG_ZIG && !ts_node_is_null(cbm_zig_container_name_node(node))) {
+        uint32_t zc = ts_node_child_count(node);
+        for (int ci = (int)zc - SKIP_CHAR; ci >= 0; ci--) {
+            TSNode child = ts_node_child(node, (uint32_t)ci);
+            const char *ck = ts_node_type(child);
+            if (strcmp(ck, "variable_declaration") == 0 || strcmp(ck, "test_declaration") == 0) {
+                wd_push(s, child, new_enclosing);
+            }
+        }
+        return;
     }
     uint32_t nc = ts_node_child_count(node);
     for (uint32_t ci = 0; ci < nc; ci++) {
@@ -6967,6 +7103,16 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
                     (ctx->language == CBM_LANG_WOLFRAM || ctx->language == CBM_LANG_TYPESCRIPT ||
                      ctx->language == CBM_LANG_JAVASCRIPT || ctx->language == CBM_LANG_TSX ||
                      ctx->language == CBM_LANG_ADA);
+                /* Zig: the containers a type function returns (`fn List(comptime
+                 * T: type) type { return struct {...}; }`) are named by it; walk
+                 * them as its members. */
+                if (ctx->language == CBM_LANG_ZIG && strcmp(kind, "function_declaration") == 0) {
+                    TSNode ret[CBM_SZ_8];
+                    int nr = cbm_zig_returned_containers(node, ret, CBM_SZ_8);
+                    for (int ri = nr - 1; ri >= 0; ri--) {
+                        wd_push(&s, ret[ri], frame.enclosing_class_qn);
+                    }
+                }
                 if (!descend_into_func) {
                     continue;
                 }

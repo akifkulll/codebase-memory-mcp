@@ -36,6 +36,7 @@
 #include "lsp/cs_lsp.h"   /* cbm_cs_build_cross_registry / cbm_run_cs_lsp_cross_with_registry */
 #include "lsp/ts_lsp.h"   /* cbm_ts_build_cross_registry / cbm_run_ts_lsp_cross_with_registry */
 #include "lsp/rust_lsp.h" /* cbm_rust_build_cross_registry / cbm_run_rust_lsp_cross_with_registry */
+#include "lsp/zig_lsp.h"  /* CBMZigArgType */
 #include "pipeline/pipeline_internal.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -126,6 +127,10 @@ typedef struct {
     CBMTypeRegistry *cs;     /* CBM_LANG_CSHARP */
     /* CBM_LANG_RUST: intentionally absent — the shared rust registry is built
      * LAZILY inside cbm_parallel_resolve (first NULL-filter rust file), not eagerly. */
+    /* CBM_LANG_ZIG: the argument types passed to `anytype` parameters
+     * (cbm_pxc_collect_zig_args), sorted by callee. */
+    const CBMZigArgType *zig_args;
+    int zig_arg_count;
 } CBMCrossLspRegistries;
 
 /* Return the appropriate pre-built registry for a language, or NULL
@@ -187,6 +192,20 @@ void cbm_pxc_run_one_ts(CBMFileResult *r, const char *source, int source_len, co
 void cbm_pxc_filter_stats(uint64_t *defs_registered, uint64_t *build_files, uint64_t *filter_files,
                           uint64_t *filter_failed);
 void cbm_pxc_filter_stats_reset(void);
+
+/* Zig `anytype`: walk every Zig file once and collect the types its resolved
+ * calls pass to `anytype` parameters (cbm_run_zig_lsp_cross_ex), sorted and
+ * de-duplicated, strings in arena; the caller frees the array. NULL (count 0)
+ * when no function takes `anytype`. Run after the module-def index is built. */
+CBMZigArgType *cbm_pxc_collect_zig_args(const cbm_pipeline_ctx_t *ctx, CBMFileResult **cache,
+                                        const cbm_file_info_t *files, int file_count,
+                                        char *const *def_modules,
+                                        const CBMModuleDefIndex *module_def_index,
+                                        CBMLSPDef *all_defs, int def_count, CBMArena *arena,
+                                        int *out_count);
+
+/* Does a function of module module_qn take collected `anytype` argument types? */
+bool cbm_pxc_zig_args_in_module(const CBMCrossLspRegistries *r, const char *module_qn);
 
 /* Per-file cross-LSP dispatch shared by the parallel resolve worker AND the
  * sequential driver (one path = one semantics): module-def-index filter →

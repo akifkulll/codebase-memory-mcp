@@ -713,6 +713,7 @@ const all_test_sources = [_][]const u8{
     "tests/test_java_lsp_coverage.c",
     "tests/test_kotlin_lsp.c",
     "tests/test_rust_lsp.c",
+    "tests/test_zig_lsp.c",
     "tests/test_cli.c",
     "tests/test_mem.c",
     "tests/test_security.c",

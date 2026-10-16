@@ -24,6 +24,7 @@
 #include "lsp/kotlin_lsp.h"
 #include "lsp/rust_lsp.h"
 #include "lsp/rust_cargo.h"
+#include "lsp/zig_lsp.h"
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/constants.h"
 #include "foundation/hash_table.h"
@@ -344,6 +345,134 @@ static const char *pxc_infer_jvm_namespace(CBMArena *arena, const char *rel_path
     return ns;
 }
 
+static const char *pxc_import_lookup(const char *local, size_t len, const char **imp_keys,
+                                     const char **imp_vals, int imp_count) {
+    for (int i = 0; i < imp_count; i++) {
+        if (imp_keys[i] && imp_vals[i] && strlen(imp_keys[i]) == len &&
+            strncmp(imp_keys[i], local, len) == 0) {
+            return imp_vals[i];
+        }
+    }
+    return NULL;
+}
+
+/* The innermost container enclosing a container-level Zig alias (a QN prefix
+ * of its parent_class, above the module) that declares `head` in this file,
+ * as `<container>.<head>`. NULL when none does. */
+static const char *pxc_zig_container_head(CBMArena *arena, const CBMFileResult *file,
+                                          const char *scope, const char *module_qn,
+                                          const char *head, size_t len) {
+    size_t mlen = strlen(module_qn);
+    size_t slen = strlen(scope);
+    while (slen > mlen) {
+        for (int i = 0; i < file->defs.count; i++) {
+            const char *qn = file->defs.items[i].qualified_name;
+            if (qn && strlen(qn) == slen + 1 + len && strncmp(qn, scope, slen) == 0 &&
+                qn[slen] == '.' && strncmp(qn + slen + 1, head, len) == 0) {
+                return cbm_arena_strdup(arena, qn);
+            }
+        }
+        while (slen > mlen && scope[slen - 1] != '.') {
+            slen--;
+        }
+        slen = slen > 0 ? slen - 1 : 0;
+    }
+    return NULL;
+}
+
+/* Zig: an alias (`const db = @import("db.zig");`, `pub const Database =
+ * zova.Database;`, alias_value = the value text), at module or container
+ * level, becomes a "Variable" def whose return_types is the QN it names. The
+ * head resolves lexically: a declaration in an enclosing container, then the
+ * declaring file's imports (`const v = @import(..)` is imported as `v`,
+ * `@import("x.zig").C` as `x`); any other head is a path from the declaring
+ * module. Returns -1 for anything else. */
+static int pxc_build_zig_alias(CBMArena *arena, const CBMFileResult *file,
+                               const CBMDefinition *src, const char *module_qn, CBMLSPDef *dst,
+                               const char **imp_keys, const char **imp_vals, int imp_count) {
+    const char *text = src->alias_value;
+    if (!text || !text[0] || !module_qn || strpbrk(text, " \t\r\n")) {
+        return -1;
+    }
+    const char *target = NULL;
+    if (strncmp(text, "@import(\"", strlen("@import(\"")) == 0) {
+        const char *path = text + strlen("@import(\"");
+        const char *close = strchr(path, '"');
+        if (!close || close[1] != ')') {
+            return -1;
+        }
+        const char *rest = close + 2;
+        if ((size_t)(close - path) == strlen("std") && strncmp(path, "std", 3) == 0) {
+            target = cbm_arena_sprintf(arena, "std%s", rest); /* the opaque std namespace */
+        } else {
+            const char *local = src->name;
+            size_t len = strlen(local);
+            if (rest[0]) {
+                local = path;
+                for (const char *p = path; p < close; p++) {
+                    if (*p == '/') {
+                        local = p + 1;
+                    }
+                }
+                len = (size_t)(close - local);
+                if (len > 4 && strncmp(local + len - 4, ".zig", 4) == 0) {
+                    len -= 4;
+                }
+            }
+            const char *head = pxc_import_lookup(local, len, imp_keys, imp_vals, imp_count);
+            target = head ? cbm_arena_sprintf(arena, "%s%s", head, rest) : NULL;
+        }
+    } else {
+        size_t len = strcspn(text, ".");
+        const char *head = src->parent_class ? pxc_zig_container_head(arena, file, src->parent_class,
+                                                                      module_qn, text, len)
+                                             : NULL;
+        if (!head) {
+            head = pxc_import_lookup(text, len, imp_keys, imp_vals, imp_count);
+        }
+        target = head ? cbm_arena_sprintf(arena, "%s%s", head, text + len)
+                      : cbm_arena_sprintf(arena, "%s.%s", module_qn, text);
+    }
+    if (!target) {
+        return -1;
+    }
+    memset(dst, 0, sizeof(*dst));
+    dst->qualified_name = src->qualified_name;
+    dst->short_name = src->name;
+    dst->label = "Variable";
+    dst->def_module_qn = module_qn;
+    dst->return_types = target;
+    dst->lang = CBM_LANG_ZIG;
+    return 0;
+}
+
+/* Zig: a type function (`fn List(comptime T: type) type`) names the
+ * containers it returns, whose members extraction scopes under its QN. The
+ * resolver sees it as a type too: a "Struct" def of the same QN (its fields
+ * fold in like any struct's) whose type_params lists its parameters'
+ * kinds (cbm_zig_param_kinds of the signature text). */
+static bool pxc_is_zig_type_fn(const CBMDefinition *src) {
+    return src->label && (strcmp(src->label, "Function") == 0 || strcmp(src->label, "Method") == 0) &&
+           src->return_type &&
+           strcmp(src->return_type, "type") == 0 && src->qualified_name && src->name;
+}
+
+static int pxc_build_zig_type_fn(CBMArena *arena, const CBMDefinition *src, const char *module_qn,
+                                 CBMLSPDef *dst) {
+    const char *out = cbm_zig_param_kinds(arena, src->signature ? src->signature : "");
+    if (!out) {
+        return -1;
+    }
+    memset(dst, 0, sizeof(*dst));
+    dst->qualified_name = src->qualified_name;
+    dst->short_name = src->name;
+    dst->label = "Struct";
+    dst->def_module_qn = module_qn;
+    dst->type_params = out;
+    dst->lang = CBM_LANG_ZIG;
+    return 0;
+}
+
 /* Convert one CBMDefinition into a CBMLSPDef. Returns 0 on success, -1
  * to skip (unsupported label or missing required field). dst gets borrowed
  * pointers into src and into `arena` for synthesised composites. */
@@ -382,7 +511,7 @@ static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const ch
     return 0;
 }
 
-/* Go: fold per-field "Field" definitions into their owning struct's
+/* Go and Zig: fold per-field "Field" definitions into their owning struct's
  * field_defs. extract_defs.c emits one flat CBMDefinition per struct field
  * (label "Field", parent_class = owning struct QN, name = field name,
  * return_type = raw type text). Those rows are dropped by pxc_build_lsp_def
@@ -483,6 +612,7 @@ static void pxc_own_def_strings(CBMArena *arena, CBMLSPDef *defs, int start, int
         d->field_defs = cbm_arena_strdup(arena, d->field_defs);
         d->method_names_str = cbm_arena_strdup(arena, d->method_names_str);
         d->namespace_name = cbm_arena_strdup(arena, d->namespace_name);
+        d->type_params = cbm_arena_strdup(arena, d->type_params);
     }
 }
 
@@ -517,8 +647,12 @@ CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMFileResult
         if (!result)
             continue;
         const bool loaded = result != cache[fi];
-        if (idx + result->defs.count > cap) {
-            int grown = cap * 2 > idx + result->defs.count ? cap * 2 : idx + result->defs.count;
+        int need = result->defs.count;
+        for (int di = 0; files[fi].language == CBM_LANG_ZIG && di < result->defs.count; di++) {
+            need += pxc_is_zig_type_fn(&result->defs.items[di]) ? 1 : 0;
+        }
+        if (idx + need > cap) {
+            int grown = cap * 2 > idx + need ? cap * 2 : idx + need;
             CBMLSPDef *more = (CBMLSPDef *)realloc(defs, (size_t)grown * sizeof(CBMLSPDef));
             if (!more) {
                 cbm_result_cache_release(cache, fi, result);
@@ -536,26 +670,48 @@ CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMFileResult
          * cross-file base-class resolution needs the same local-name →
          * import-QN view pass_semantic uses. Both drivers have already
          * created this file's IMPORTS edges and filled the registry here.
-         * Built only for the languages that consume resolved base QNs, and
-         * only when a caller supplied the pipeline context. */
+         * Built only for the languages that consume resolved base QNs (and
+         * for Zig, whose aliases resolve through it), and only when a caller
+         * supplied the pipeline context. */
         const cbm_registry_t *base_reg = NULL;
         const char **imp_keys = NULL;
         const char **imp_vals = NULL;
         int imp_count = 0;
         if (ctx && ctx->registry && ctx->gbuf && pxc_lang_resolves_base_qns(files[fi].language)) {
             base_reg = ctx->registry;
+        }
+        if (ctx && ctx->gbuf && (base_reg || files[fi].language == CBM_LANG_ZIG)) {
             pxc_build_import_map(ctx->gbuf, project_name, files[fi].rel_path, &imp_keys,
                                  &imp_vals, &imp_count);
         }
         for (int di = 0; di < result->defs.count; di++) {
-            if (pxc_build_lsp_def(&result->arena, &result->defs.items[di], def_modules[fi],
-                                  namespace_name, files[fi].language, &defs[idx], base_reg,
-                                  imp_keys, imp_vals, imp_count) == 0) {
+            const CBMDefinition *src = &result->defs.items[di];
+            int rc = files[fi].language == CBM_LANG_ZIG && src->label &&
+                             strcmp(src->label, "Variable") == 0 && src->qualified_name &&
+                             src->name
+                         ? pxc_build_zig_alias(&result->arena, result, src, def_modules[fi],
+                                               &defs[idx], imp_keys, imp_vals, imp_count)
+                         : pxc_build_lsp_def(&result->arena, src, def_modules[fi],
+                                             namespace_name, files[fi].language, &defs[idx],
+                                             base_reg, imp_keys, imp_vals, imp_count);
+            if (rc == 0) {
+                /* Zig: a function taking `anytype` carries its parameter kinds,
+                 * so callers' argument types reach it (cbm_pxc_collect_zig_args). */
+                if (files[fi].language == CBM_LANG_ZIG && src->signature &&
+                    strstr(src->signature, "anytype") &&
+                    (strcmp(defs[idx].label, "Function") == 0 ||
+                     strcmp(defs[idx].label, "Method") == 0)) {
+                    defs[idx].type_params = cbm_zig_param_kinds(&result->arena, src->signature);
+                }
+                idx++;
+            }
+            if (files[fi].language == CBM_LANG_ZIG && pxc_is_zig_type_fn(src) &&
+                pxc_build_zig_type_fn(&result->arena, src, def_modules[fi], &defs[idx]) == 0) {
                 idx++;
             }
         }
         pxc_free_import_map(imp_keys, imp_vals, imp_count); /* NULL-safe */
-        if (files[fi].language == CBM_LANG_GO) {
+        if (files[fi].language == CBM_LANG_GO || files[fi].language == CBM_LANG_ZIG) {
             pxc_fold_go_struct_fields(&result->arena, result, defs, file_start, idx);
         }
         if (loaded) {
@@ -671,6 +827,7 @@ bool cbm_pxc_has_cross_lsp(CBMLanguage lang) {
     case CBM_LANG_JAVA:   /* fallback cbm_pxc_run_one path */
     case CBM_LANG_KOTLIN: /* fallback cbm_pxc_run_one path */
     case CBM_LANG_RUST:   /* fallback cbm_pxc_run_one path (manifest-aware) */
+    case CBM_LANG_ZIG:    /* fallback cbm_pxc_run_one path */
         return true;
     default:
         return false;
@@ -690,11 +847,16 @@ bool cbm_pxc_has_cross_lsp(CBMLanguage lang) {
  * The key strings live in a scratch arena that is destroyed after the table. */
 /* Invocation rows dedup on (caller, callee). A reference row is tied to one
  * source occurrence, so its site is part of the key and it never collides
- * with an invocation of the same callee. */
+ * with an invocation of the same callee. An invocation row with a site span
+ * proves one call site (Zig), so its site is part of the key too. */
 static char *pxc_result_key(CBMArena *keys, const CBMResolvedCall *rc) {
     if (rc->kind == CBM_RESOLVED_CALL_REFERENCE) {
         return cbm_arena_sprintf(keys, "%s\x1f%s\x1fR%u:%u", rc->caller_qn, rc->callee_qn,
                                  rc->site_start_byte, rc->site_end_byte);
+    }
+    if (rc->site_end_byte > rc->site_start_byte) {
+        return cbm_arena_sprintf(keys, "%s\x1f%s\x1fI%u", rc->caller_qn, rc->callee_qn,
+                                 rc->site_start_byte);
     }
     return cbm_arena_sprintf(keys, "%s\x1f%s", rc->caller_qn, rc->callee_qn);
 }
@@ -859,11 +1021,35 @@ void cbm_pxc_run_one(CBMLanguage lang, CBMFileResult *r, const char *source, int
                                              g_pxc_rust_manifest, &out);
         break;
     }
+    case CBM_LANG_ZIG:
+        cbm_run_zig_lsp_cross(&scratch, source, source_len, module_qn, defs, def_count, imp_names,
+                              imp_qns, imp_count, tree, &out);
+        break;
     default:
         break;
     }
 
     pxc_append_results(&r->arena, &r->resolved_calls, &out);
+    cbm_arena_destroy(&scratch);
+}
+
+/* cbm_pxc_run_one for Zig with the project's `anytype` argument types (args)
+ * and, when collect is set, collecting them instead: the file's resolved
+ * calls are then discarded. */
+static void pxc_run_one_zig(CBMFileResult *r, const char *source, int source_len,
+                            const char *module_qn, CBMLSPDef *defs, int def_count,
+                            const char **imp_names, const char **imp_qns, int imp_count,
+                            const CBMZigArgType *args, int arg_count,
+                            CBMZigArgTypeArray *collect) {
+    CBMArena scratch;
+    cbm_arena_init(&scratch);
+    CBMResolvedCallArray out;
+    memset(&out, 0, sizeof(out));
+    cbm_run_zig_lsp_cross_ex(&scratch, source, source_len, module_qn, defs, def_count, imp_names,
+                             imp_qns, imp_count, r->cached_tree, &out, args, arg_count, collect);
+    if (!collect) {
+        pxc_append_results(&r->arena, &r->resolved_calls, &out);
+    }
     cbm_arena_destroy(&scratch);
 }
 
@@ -924,6 +1110,56 @@ void cbm_pxc_filter_stats_reset(void) {
     atomic_store_explicit(&g_pxc_build_files, 0, memory_order_relaxed);
     atomic_store_explicit(&g_pxc_filter_files, 0, memory_order_relaxed);
     atomic_store_explicit(&g_pxc_filter_failed, 0, memory_order_relaxed);
+}
+
+/* imp_vals plus every dotted prefix of each QN in the types bound to
+ * module_qn's `anytype` parameters (in arena): the modules among them hold
+ * the defs a bound walk resolves against. */
+static const char **pxc_zig_arg_modules(CBMArena *arena, const CBMCrossLspRegistries *r,
+                                        const char *module_qn, const char **imp_vals,
+                                        int imp_count, int *out_count) {
+    size_t mlen = strlen(module_qn);
+    int cap = imp_count;
+    for (int i = 0; i < r->zig_arg_count; i++) {
+        const char *q = r->zig_args[i].callee_qn;
+        if (strncmp(q, module_qn, mlen) == 0 && q[mlen] == '.') {
+            for (const char *t = r->zig_args[i].type; *t; t++) {
+                cap += *t == '.' ? 1 : 0;
+            }
+        }
+    }
+    const char **out = (const char **)cbm_arena_alloc(arena, (size_t)(cap + 1) * sizeof(char *));
+    if (!out) {
+        *out_count = imp_count;
+        return imp_vals;
+    }
+    int n = 0;
+    for (int i = 0; i < imp_count; i++) {
+        out[n++] = imp_vals[i];
+    }
+    for (int i = 0; i < r->zig_arg_count; i++) {
+        const char *q = r->zig_args[i].callee_qn;
+        if (strncmp(q, module_qn, mlen) != 0 || q[mlen] != '.') {
+            continue;
+        }
+        const char *t = r->zig_args[i].type;
+        size_t start = 0;
+        for (size_t j = 0;; j++) {
+            char ch = t[j];
+            bool qn_char = ch && !strchr("[]()*?, ", ch);
+            if (ch == '.' && j > start && n < cap) {
+                out[n++] = cbm_arena_strndup(arena, t + start, j - start);
+            }
+            if (!qn_char) {
+                start = j + 1;
+            }
+            if (!ch) {
+                break;
+            }
+        }
+    }
+    *out_count = n;
+    return out;
 }
 
 void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *source,
@@ -1026,11 +1262,23 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
     CBMLSPDef *filtered = NULL;
     CBMLSPDef *file_defs = all_defs;
     int file_def_count = all_def_count;
+    /* Zig: a function walked with an `anytype` parameter bound needs the defs
+     * of the bound types' modules too, which it need not import. */
+    const char **filter_qns = imp_vals;
+    int filter_count = imp_count;
+    CBMArena zig_arena;
+    bool zig_arena_live = false;
+    if (lang == CBM_LANG_ZIG && cbm_pxc_zig_args_in_module(cross_registries, def_module)) {
+        cbm_arena_init(&zig_arena);
+        zig_arena_live = true;
+        filter_qns = pxc_zig_arg_modules(&zig_arena, cross_registries, def_module, imp_vals,
+                                         imp_count, &filter_count);
+    }
     if (module_def_index && lang != CBM_LANG_RUST) {
         int filtered_count = 0;
         filtered =
             cbm_pxc_filter_defs_for_file(module_def_index, all_defs, lang, result->namespace_name,
-                                         def_module, imp_vals, imp_count, &filtered_count);
+                                         def_module, filter_qns, filter_count, &filtered_count);
         if (filtered) {
             file_defs = filtered;
             file_def_count = filtered_count;
@@ -1063,11 +1311,111 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
         cbm_pxc_ts_modes(lang, rel, &js, &jsx, &dts);
         cbm_pxc_run_one_ts(result, source, source_len, def_module, file_defs, file_def_count,
                            imp_keys, imp_vals, imp_count, js, jsx, dts);
+    } else if (lang == CBM_LANG_ZIG) {
+        pxc_run_one_zig(result, source, source_len, def_module, file_defs, file_def_count,
+                        imp_keys, imp_vals, imp_count,
+                        cross_registries ? cross_registries->zig_args : NULL,
+                        cross_registries ? cross_registries->zig_arg_count : 0, NULL);
     } else {
         cbm_pxc_run_one(lang, result, source, source_len, def_module, file_defs, file_def_count,
                         imp_keys, imp_vals, imp_count);
     }
     free(filtered);
+    if (zig_arena_live) {
+        cbm_arena_destroy(&zig_arena);
+    }
+}
+
+static int pxc_zig_arg_cmp(const void *a, const void *b) {
+    const CBMZigArgType *x = (const CBMZigArgType *)a;
+    const CBMZigArgType *y = (const CBMZigArgType *)b;
+    int c = strcmp(x->callee_qn, y->callee_qn);
+    if (c == 0) {
+        c = x->param - y->param;
+    }
+    return c != 0 ? c : strcmp(x->type, y->type);
+}
+
+CBMZigArgType *cbm_pxc_collect_zig_args(const cbm_pipeline_ctx_t *ctx, CBMFileResult **cache,
+                                        const cbm_file_info_t *files, int file_count,
+                                        char *const *def_modules,
+                                        const CBMModuleDefIndex *module_def_index,
+                                        CBMLSPDef *all_defs, int def_count, CBMArena *arena,
+                                        int *out_count) {
+    *out_count = 0;
+    bool any = false;
+    for (int i = 0; i < def_count && !any; i++) {
+        any = all_defs[i].lang == CBM_LANG_ZIG && all_defs[i].type_params &&
+              strchr(all_defs[i].type_params, '*') && all_defs[i].label &&
+              (strcmp(all_defs[i].label, "Function") == 0 ||
+               strcmp(all_defs[i].label, "Method") == 0);
+    }
+    if (!any || !ctx || !cache || !def_modules) {
+        return NULL;
+    }
+    CBMZigArgTypeArray collect = {NULL, 0, 0, arena};
+    for (int fi = 0; fi < file_count; fi++) {
+        if (files[fi].language != CBM_LANG_ZIG || !def_modules[fi]) {
+            continue;
+        }
+        CBMFileResult *result = cbm_result_cache_acquire(cache, ctx->spill, fi);
+        if (!result) {
+            continue;
+        }
+        char *owned = NULL;
+        const char *source = result->source;
+        int source_len = result->source_len;
+        if ((!source || source_len <= 0) && result->calls.count > 0) {
+            owned = pxc_read_file(files[fi].path, &source_len);
+            source = owned;
+        }
+        if (source && source_len > 0 && result->calls.count > 0) {
+            const char **imp_keys = NULL;
+            const char **imp_vals = NULL;
+            int imp_count = 0;
+            pxc_build_import_map(ctx->gbuf, ctx->project_name, files[fi].rel_path, &imp_keys,
+                                 &imp_vals, &imp_count);
+            int fc = 0;
+            CBMLSPDef *filtered =
+                module_def_index ? cbm_pxc_filter_defs_for_file(
+                                       module_def_index, all_defs, CBM_LANG_ZIG,
+                                       result->namespace_name, def_modules[fi], imp_vals,
+                                       imp_count, &fc)
+                                 : NULL;
+            pxc_run_one_zig(result, source, source_len, def_modules[fi],
+                            filtered ? filtered : all_defs, filtered ? fc : def_count, imp_keys,
+                            imp_vals, imp_count, NULL, 0, &collect);
+            free(filtered);
+            pxc_free_import_map(imp_keys, imp_vals, imp_count);
+        }
+        free(owned);
+        cbm_result_cache_release(cache, fi, result);
+    }
+    if (collect.count == 0) {
+        free(collect.items);
+        return NULL;
+    }
+    qsort(collect.items, (size_t)collect.count, sizeof(CBMZigArgType), pxc_zig_arg_cmp);
+    int n = 1;
+    for (int i = 1; i < collect.count; i++) {
+        if (pxc_zig_arg_cmp(&collect.items[i], &collect.items[n - 1]) != 0) {
+            collect.items[n++] = collect.items[i];
+        }
+    }
+    cbm_log_info("lsp_cross.zig_anytype", "arg_types", itoa_buf(n));
+    *out_count = n;
+    return collect.items;
+}
+
+bool cbm_pxc_zig_args_in_module(const CBMCrossLspRegistries *r, const char *module_qn) {
+    size_t n = module_qn ? strlen(module_qn) : 0;
+    for (int i = 0; r && n > 0 && i < r->zig_arg_count; i++) {
+        const char *q = r->zig_args[i].callee_qn;
+        if (strncmp(q, module_qn, n) == 0 && q[n] == '.') {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool cbm_pxc_build_rust_manifest(const cbm_pipeline_ctx_t *ctx, CBMArena *marena,
@@ -1154,6 +1502,9 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
         cross_registries.c = cbm_c_build_cross_registry(xa, all_defs, def_count);
         cross_registries.cs = cbm_cs_build_cross_registry(xa, all_defs, def_count);
         cross_registries.ts = cbm_ts_build_cross_registry(xa, all_defs, def_count);
+        cross_registries.zig_args = cbm_pxc_collect_zig_args(
+            ctx, cache, files, file_count, def_modules, module_def_index, all_defs, def_count, xa,
+            &cross_registries.zig_arg_count);
     }
 
     int processed = 0;
@@ -1205,6 +1556,7 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
     }
 
     cbm_pxc_free_module_def_index(module_def_index);
+    free((void *)cross_registries.zig_args);
     free(all_defs);
     for (int i = 0; i < file_count; i++)
         free(def_modules[i]);
@@ -1332,6 +1684,44 @@ static void pxc_mark_module_defs(const CBMModuleDefIndex *idx, bool *selected,
     }
 }
 
+/* Zig: an alias names a module other than the file's imports (a re-export
+ * `pub const Database = zova.Database;`, or `const sqlite = @import(..)` that a
+ * return type text spells), so a Zig file also gets the defs of each module a
+ * selected alias names, transitively. Returns the number of defs added. */
+enum { PXC_ZIG_ALIAS_ROUNDS = 8 };
+static int pxc_mark_zig_alias_modules(const CBMModuleDefIndex *idx, bool *selected,
+                                      const CBMLSPDef *all_defs) {
+    int added_total = 0;
+    for (int round = 0; round < PXC_ZIG_ALIAS_ROUNDS; round++) {
+        int added = 0;
+        for (int i = 0; i < idx->def_count; i++) {
+            const CBMLSPDef *d = &all_defs[i];
+            if (!selected[i] || d->lang != CBM_LANG_ZIG || !d->return_types || !d->label ||
+                strcmp(d->label, "Variable") != 0) {
+                continue;
+            }
+            char buf[CBM_SZ_512];
+            snprintf(buf, sizeof(buf), "%s", d->return_types);
+            for (char *dot = buf; dot;) {
+                pxc_module_entry_t *e = (pxc_module_entry_t *)cbm_ht_get(idx->ht, buf);
+                if (e) {
+                    added += pxc_mark_entry_defs(selected, e, all_defs, CBM_LANG_ZIG);
+                    break;
+                }
+                dot = strrchr(buf, '.');
+                if (dot) {
+                    *dot = '\0';
+                }
+            }
+        }
+        added_total += added;
+        if (added == 0) {
+            break;
+        }
+    }
+    return added_total;
+}
+
 CBMModuleDefIndex *cbm_pxc_build_module_def_index(CBMLSPDef *all_defs, int def_count) {
     if (!all_defs || def_count <= 0) {
         return NULL;
@@ -1404,6 +1794,9 @@ CBMLSPDef *cbm_pxc_filter_defs_for_file(const CBMModuleDefIndex *idx, CBMLSPDef 
     pxc_mark_module_defs(idx, selected, all_defs, caller_lang, own_module, &total);
     for (int i = 0; i < imp_count; i++) {
         pxc_mark_module_defs(idx, selected, all_defs, caller_lang, imp_qns[i], &total);
+    }
+    if (caller_lang == CBM_LANG_ZIG) {
+        total += pxc_mark_zig_alias_modules(idx, selected, all_defs);
     }
     if (pxc_is_jvm_lang(caller_lang) && caller_namespace && caller_namespace[0] &&
         idx->namespace_ht) {

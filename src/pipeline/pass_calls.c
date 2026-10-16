@@ -562,7 +562,8 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
      * language gated on only one resolver produces an edge on the sequential
      * path and not the parallel one (or vice versa), breaking MT determinism. */
     bool suppress_weak_member = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
-                                lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
+                                lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX ||
+                                lang == CBM_LANG_ZIG;
     /* Bare-call local-binding suppression. A member call has a receiver the
      * guard above can reason about; a bare `run()` has none, so that guard
      * cannot see this class at all. Python-only today because the extraction
