@@ -676,7 +676,10 @@ static void zova_sql_camel_split(void *user_data, const zova_sql_function_call *
         sql_result_text(out, "", 0);
         return;
     }
-    char buf[ZV_CAMEL_SPLIT_BUF];
+    /* Zova copies the result bytes after this callback returns, so they must
+     * not live in this stack frame. Callbacks do not re-enter, so one buffer
+     * per thread is enough. */
+    static CBM_TLS char buf[ZV_CAMEL_SPLIT_BUF];
     if (input_len + 1 >= sizeof(buf)) {
         sql_result_text(out, input, input_len);
         return;
