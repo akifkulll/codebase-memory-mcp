@@ -51,6 +51,7 @@ jobs:
       - uses: ./.github/actions/setup-zova
         with:
           target: ${{ matrix.zig_target }}
+          cpu: baseline
 
       - name: Build standard Zova-CBM
         env:
@@ -231,6 +232,8 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
       - uses: ./.github/actions/setup-zova
+        with:
+          cpu: baseline
 
       - name: Build standard portable Zova-CBM
         env:

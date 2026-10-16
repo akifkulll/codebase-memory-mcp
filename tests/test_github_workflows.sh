@@ -54,6 +54,32 @@ test_build_job=$(sed -n '/^  test-build:/,/^  test:/p' "$WORKFLOWS/ci.yml")
   exit 1
 }
 grep -q 'key: cbm-tests-.*-cpu-baseline-' <<<"$test_build_job"
+# Zova bundles compiler_rt's memcpy/memset, so a host-CPU Zova archive restored
+# on an older runner (or shipped to a user) dies with SIGILL at startup.
+sdk_job=$(sed -n '/^  sdk:/,/^  build:/p' "$WORKFLOWS/ci.yml")
+build_job=$(sed -n '/^  build:/,/^  test-build:/p' "$WORKFLOWS/ci.yml")
+grep -q 'cpu: baseline' <<<"$sdk_job" || {
+  echo "error: the sdk job must warm the baseline-CPU Zova cache" >&2
+  exit 1
+}
+grep -q 'cpu: baseline' <<<"$build_job" || {
+  echo "error: the production build must link a baseline-CPU Zova build" >&2
+  exit 1
+}
+grep -q 'key: cbm-prod-.*-cpu-baseline-' <<<"$build_job"
+# Release jobs that build Zova for the runner's own platform; zova-windows
+# cross-builds with an explicit -Dtarget, which already means a baseline CPU.
+for job in unix linux-portable; do
+  job_text=$(sed -n "/^  $job:/,/^  [a-z-]*:\$/p" "$WORKFLOWS/_build.yml")
+  grep -q 'cpu: baseline' <<<"$job_text" || {
+    echo "error: release job $job must build Zova for the baseline CPU" >&2
+    exit 1
+  }
+done
+[[ $(grep -c '^ZIG_TARGET_FLAGS := .*-mcpu=baseline' "$ROOT/Makefile.cbm") -eq 2 ]] || {
+  echo "error: Makefile.cbm Zig objects must target the baseline CPU" >&2
+  exit 1
+}
 grep -q 'CBM_ZOVA_TEST_CPU' "$ROOT/scripts/zova-build-test-runner.sh"
 grep -q -- '-Dcpu="$TEST_CPU"' "$ROOT/scripts/zova-build-test-runner.sh"
 bash "$ROOT/scripts/ci-test-shard.sh" --verify

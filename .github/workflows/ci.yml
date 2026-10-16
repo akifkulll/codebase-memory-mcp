@@ -34,6 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/setup-zova
+        with:
+          cpu: baseline
 
   build:
     needs: [checks, sdk]
@@ -44,13 +46,15 @@ jobs:
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
       - uses: ./.github/actions/setup-zova
+        with:
+          cpu: baseline
       - name: Restore production build cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/.zova-build-cache
-          key: cbm-prod-${{ runner.os }}-${{ runner.arch }}-zig-0.17.0-zova-a30581ef-${{ hashFiles('build.zig', 'src/**', 'internal/**', 'vendored/**', 'scripts/zova-build-once.sh', 'scripts/zova-cache-repair.sh') }}
+          key: cbm-prod-${{ runner.os }}-${{ runner.arch }}-cpu-baseline-zig-0.17.0-zova-a30581ef-${{ hashFiles('build.zig', 'src/**', 'internal/**', 'vendored/**', 'scripts/zova-build-once.sh', 'scripts/zova-cache-repair.sh') }}
           restore-keys: |
-            cbm-prod-${{ runner.os }}-${{ runner.arch }}-zig-0.17.0-zova-a30581ef-
+            cbm-prod-${{ runner.os }}-${{ runner.arch }}-cpu-baseline-zig-0.17.0-zova-a30581ef-
       - name: Build production Zova-CBM
         run: scripts/zova-build-once.sh
       - name: Verify Zova is linked

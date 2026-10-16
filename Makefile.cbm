@@ -486,9 +486,11 @@ CBM_PREBUILT_ZIG ?= 0
 MACOSX_DEPLOYMENT_TARGET ?= 15.0
 ZIG_WITH_ZOVA := $(if $(filter 1,$(CBM_WITH_ZOVA)),true,false)
 ZIG_CBM_ARGS := -Dwith-zova=$(ZIG_WITH_ZOVA) -Dzova-root=$(ZOVA_ROOT) -Dtarget-macos-version=$(MACOSX_DEPLOYMENT_TARGET)
-ZIG_TARGET_FLAGS :=
+# Baseline CPU: the Zig objects (and the compiler_rt memcpy/memset they bundle)
+# ship in release binaries, so they must not use the build host's instructions.
+ZIG_TARGET_FLAGS := -mcpu=baseline
 ifeq ($(shell uname -s),Darwin)
-ZIG_TARGET_FLAGS := -target native-macos.$(MACOSX_DEPLOYMENT_TARGET)
+ZIG_TARGET_FLAGS := -target native-macos.$(MACOSX_DEPLOYMENT_TARGET) -mcpu=baseline
 endif
 # Zig modules: src/cbm_zig.zig imports each one; src/cbm_zig_c.h is translated
 # into the "c" module they use for C declarations.
