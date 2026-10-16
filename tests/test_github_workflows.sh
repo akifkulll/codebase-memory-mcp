@@ -67,6 +67,15 @@ grep -q 'cpu: baseline' <<<"$build_job" || {
   exit 1
 }
 grep -q 'key: cbm-prod-.*-cpu-baseline-' <<<"$build_job"
+# CI must also build through scripts/build.sh and Makefile.cbm, the path the
+# release jobs use; build.zig alone hid a Makefile-only include error.
+release_build_job=$(sed -n '/^  release-build:/,$p' "$WORKFLOWS/ci.yml")
+grep -q 'scripts/build.sh' <<<"$release_build_job" || {
+  echo "error: CI must build the release path (scripts/build.sh)" >&2
+  exit 1
+}
+grep -q 'cpu: baseline' <<<"$release_build_job"
+grep -q 'scripts/smoke-test.sh' <<<"$release_build_job"
 # Release jobs that build Zova for the runner's own platform; zova-windows
 # cross-builds with an explicit -Dtarget, which already means a baseline CPU.
 for job in unix linux-portable; do

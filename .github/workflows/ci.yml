@@ -120,3 +120,27 @@ jobs:
           CBM_ZOVA_BUILD_SKIP: '1'
           CBM_ZOVA_REAL_TEST_RUNNER: ${{ github.workspace }}/build/c/test-runner
         run: scripts/ci-test-shard.sh "${{ matrix.shard }}"
+
+  # The release jobs in _build.yml build through scripts/build.sh and Makefile.cbm,
+  # not build.zig. Build that path here too, so a Makefile-only break fails CI
+  # instead of the release.
+  release-build:
+    needs: [checks, sdk]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
+      - uses: ./.github/actions/setup-zova
+        with:
+          cpu: baseline
+      - name: Build Zova-CBM through the release path
+        run: scripts/build.sh --version v0.0.0-ci CC=gcc CXX=g++ CBM_WITH_ZOVA=1 "ZOVA_ROOT=$ZOVA_ROOT"
+      - name: Verify release binary
+        run: |
+          nm build/c/codebase-memory-mcp > zova-symbols.txt
+          grep -q 'zova_fresh_build_begin' zova-symbols.txt
+          test "$(build/c/codebase-memory-mcp --version)" = "codebase-memory-mcp 0.0.0-ci"
+      - name: Run binary smoke test
+        run: bash scripts/smoke-test.sh "$GITHUB_WORKSPACE/build/c/codebase-memory-mcp"
