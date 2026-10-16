@@ -475,6 +475,14 @@ bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *st
     return weak_short_name_strategy(strategy);
 }
 
+/* Zig member calls are typed by the Zig LSP: mapped @import aliases and relative
+ * files resolve as lsp_zig_*. A qualified_suffix match on a member call that
+ * reached the registry therefore only matched spelling, e.g. `old.hello()` with
+ * an unmapped `old` binding a same-named libs/old/src/old.zig. */
+bool cbm_suppress_zig_qualified_member(bool is_zig, bool is_method, const char *strategy) {
+    return is_zig && is_method && strategy && strcmp(strategy, "qualified_suffix") == 0;
+}
+
 /* Bare-call counterpart of the member guard above. A Python call `foo()` whose
  * callee identifier is bound as a parameter of an enclosing scope cannot be the
  * module-level `foo`: the parameter shadows it for the whole body. Binding such

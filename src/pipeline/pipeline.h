@@ -376,6 +376,13 @@ bool cbm_perl_suppress_generic_match(bool is_perl, bool is_method, const char *c
  * Pure; unit-tested in test_registry.c. */
 bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *strategy);
 
+/* Zig-only addition to the guard above: also drop qualified_suffix for a Zig
+ * member call. The Zig LSP types every mapped or relative @import alias, so a
+ * registry qualified_suffix match there carries no import evidence (an unmapped
+ * `old.hello()` must not bind libs/old/src/old.zig). Pure; unit-tested in
+ * test_registry.c. */
+bool cbm_suppress_zig_qualified_member(bool is_zig, bool is_method, const char *strategy);
+
 /* Bare-call counterpart of the guard above. True when a resolved BARE call edge
  * binds a callee that is shadowed by an enclosing parameter, and the match came
  * from a weak short-name strategy — so the edge is fabricated by construction

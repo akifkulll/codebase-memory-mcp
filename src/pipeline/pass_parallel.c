@@ -2484,6 +2484,7 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         bool suppress_weak_local_binding = lang == CBM_LANG_PYTHON;
         bool drop_plain_call =
             cbm_suppress_weak_member_match(suppress_weak_member, call->is_method, res.strategy) ||
+            cbm_suppress_zig_qualified_member(lang == CBM_LANG_ZIG, call->is_method, res.strategy) ||
             cbm_suppress_weak_local_binding_call(suppress_weak_local_binding,
                                                  call->callee_is_locally_bound, res.strategy);
 

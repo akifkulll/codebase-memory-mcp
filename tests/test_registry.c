@@ -832,6 +832,17 @@ TEST(dynamic_suppress_drops_weak_method_matches) {
     PASS();
 }
 
+TEST(zig_suppress_drops_qualified_suffix_member_matches) {
+    /* Zig only, member calls only, qualified_suffix only. */
+    ASSERT_TRUE(cbm_suppress_zig_qualified_member(true, true, "qualified_suffix"));
+    ASSERT_FALSE(cbm_suppress_zig_qualified_member(false, true, "qualified_suffix"));
+    ASSERT_FALSE(cbm_suppress_zig_qualified_member(true, false, "qualified_suffix"));
+    ASSERT_FALSE(cbm_suppress_zig_qualified_member(true, true, "lsp_zig_decl"));
+    ASSERT_FALSE(cbm_suppress_zig_qualified_member(true, true, "same_module"));
+    ASSERT_FALSE(cbm_suppress_zig_qualified_member(true, true, NULL));
+    PASS();
+}
+
 TEST(dynamic_suppress_keeps_high_confidence_and_non_methods) {
     /* Keep every receiver-/import-aware strategy. Because the PARALLEL resolver
      * runs lsp_* strategies through this same guard variable, an explicit
@@ -1013,6 +1024,7 @@ SUITE(registry) {
     RUN_TEST(cross_language_ref_drops_go_vs_c);
     RUN_TEST(go_bare_ref_never_binds_field);
     RUN_TEST(dynamic_suppress_drops_weak_method_matches);
+    RUN_TEST(zig_suppress_drops_qualified_suffix_member_matches);
     RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);
     RUN_TEST(local_binding_suppress_drops_weak_shadowed_bare_calls);
     RUN_TEST(local_binding_suppress_keeps_unshadowed_and_strong_strategies);

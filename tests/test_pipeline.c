@@ -1839,6 +1839,108 @@ static int check_zig_receiver_edges(int fillers) {
     return 0;
 }
 
+/* build.zig: a module of an in-repo path dependency (build.zig.zon `.path`)
+ * maps to the dependency's addModule root; a URL dependency and a
+ * commented-out one map to no module. */
+TEST(pipeline_zig_dependency_modules_resolve_through_build_zig_zon) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_zig_dep_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    const char *dirs[] = {"libs", "libs/util", "libs/util/src", "libs/old", "libs/old/src"};
+    for (int i = 0; i < 5; i++) {
+        char d[512];
+        snprintf(d, sizeof(d), "%s/%s", tmp, dirs[i]);
+        cbm_mkdir(d);
+    }
+    write_temp_file(tmp, "build.zig.zon",
+                    ".{\n"
+                    "    .name = .app,\n"
+                    "    .dependencies = .{\n"
+                    "        // .old = .{ .path = \"libs/old\" },\n"
+                    "        .util = .{ .path = \"./libs/util/\" },\n"
+                    "        .remote = .{\n"
+                    "            .url = \"https://example.com/remote.tar.gz\",\n"
+                    "            .hash = \"1220abcd\",\n"
+                    "        },\n"
+                    "    },\n"
+                    "}\n");
+    write_temp_file(tmp, "build.zig",
+                    "const std = @import(\"std\");\n"
+                    "\n"
+                    "pub fn build(b: *std.Build) void {\n"
+                    "    const util_dep = b.dependency(\"util\", .{});\n"
+                    "    const exe = b.addExecutable(.{\n"
+                    "        .name = \"app\",\n"
+                    "        .root_module = b.createModule(.{\n"
+                    "            .root_source_file = b.path(\"app/main.zig\"),\n"
+                    "            .imports = &.{\n"
+                    "                .{ .name = \"strings\", .module = util_dep.module(\"strings\") },\n"
+                    "            },\n"
+                    "        }),\n"
+                    "    });\n"
+                    "    exe.root_module.addImport(\"u\", util_dep.module(\"util\"));\n"
+                    "    const old = b.dependency(\"old\", .{}).module(\"old\");\n"
+                    "    exe.root_module.addImport(\"old\", old);\n"
+                    "    exe.root_module.addImport(\"remote\", "
+                    "b.dependency(\"remote\", .{}).module(\"remote\"));\n"
+                    "}\n");
+    write_temp_file(tmp, "libs/util/build.zig",
+                    "const std = @import(\"std\");\n"
+                    "\n"
+                    "pub fn build(b: *std.Build) void {\n"
+                    "    _ = b.addModule(\"util\", .{ .root_source_file = b.path(\"src/util.zig\") });\n"
+                    "    _ = b.addModule(\"strings\", .{ .root_source_file = "
+                    "b.path(\"src/strings.zig\") });\n"
+                    "}\n");
+    write_temp_file(tmp, "libs/util/src/util.zig", "pub fn hello() void {}\n");
+    write_temp_file(tmp, "libs/util/src/strings.zig", "pub fn trim() void {}\n");
+    write_temp_file(tmp, "libs/old/src/old.zig", "pub fn hello() void {}\n");
+    write_temp_file(tmp, "app/main.zig",
+                    "const u = @import(\"u\");\n"
+                    "const strings = @import(\"strings\");\n"
+                    "const old = @import(\"old\");\n"
+                    "const remote = @import(\"remote\");\n"
+                    "\n"
+                    "pub fn main() void {\n"
+                    "    u.hello();\n"
+                    "    strings.trim();\n"
+                    "    old.hello();\n"
+                    "    remote.hello();\n"
+                    "}\n");
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL);
+    int rc = p ? cbm_pipeline_run(p) : -1;
+    const char *project = p ? cbm_pipeline_project_name(p) : NULL;
+    cbm_store_t *s = rc == 0 ? th_open_repo_store(tmp) : NULL;
+    const char *lsp = "\"strategy\":\"lsp_zig";
+    int ok[3] = {0};
+    int n[3] = {0};
+    if (s) {
+        n[0] = calls_between_qns(s, project, "app.main.main", "libs.util.src.util.hello", lsp,
+                                 &ok[0]);
+        n[1] = calls_between_qns(s, project, "app.main.main", "libs.util.src.strings.trim", lsp,
+                                 &ok[1]);
+        n[2] = calls_between_qns(s, project, "app.main.main", "libs.old.src.old.hello", lsp,
+                                 &ok[2]);
+        cbm_store_close(s);
+    }
+    if (p) {
+        cbm_pipeline_free(p);
+    }
+    th_rmtree(tmp);
+    printf("    util.hello %d/%d strings.trim %d/%d old.hello %d/%d\n", ok[0], n[0], ok[1], n[1],
+           ok[2], n[2]);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(n[0], 1);
+    ASSERT_EQ(ok[0], 1);
+    ASSERT_EQ(n[1], 1);
+    ASSERT_EQ(ok[1], 1);
+    /* Not mapped: no edge at all, not even a qualified_suffix guess. */
+    ASSERT_EQ(n[2], 0);
+    PASS();
+}
+
 TEST(pipeline_zig_member_calls_bind_by_receiver_type) {
     ASSERT_EQ(check_zig_receiver_edges(0), 0);
     ASSERT_EQ(check_zig_receiver_edges(52), 0);
@@ -9930,6 +10032,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_go_cross_package_field_chain_resolves);
     RUN_TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges);
     RUN_TEST(pipeline_zig_member_calls_bind_by_receiver_type);
+    RUN_TEST(pipeline_zig_dependency_modules_resolve_through_build_zig_zon);
     RUN_TEST(pipeline_python_bare_local_binding_suppresses_weak_edge);
     RUN_TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge);
     /* Git history pass */

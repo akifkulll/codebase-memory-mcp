@@ -661,6 +661,322 @@ static void parse_gemspec(const char *source, int source_len, const char *rel_pa
     }
 }
 
+/* Zig: build.zig — named modules for `@import("name")`. A module is declared
+ * with `b.addModule("name", .{ .root_source_file = b.path("src/root.zig") })`,
+ * or created into a variable (`const m = b.createModule(.{ .root_source_file =
+ * b.path(...) })`) that is registered under a name by `x.addImport("name", m)`
+ * or `.imports = &.{ .{ .name = "name", .module = m } }`. Keys carry a "zig:"
+ * prefix so a Zig module never collides with another ecosystem's package.
+ *
+ * A module of a dependency (`b.dependency("pkg", .{}).module("x")`) resolves
+ * when build.zig.zon declares the dependency by an in-repo `.path`: the
+ * dependency's build.zig `addModule("x", ...)` names its root. A dependency
+ * fetched by URL has no source in the repo and stays unmapped. Entries for
+ * this: "zigdep:<dir>|<pkg>" -> the dependency's directory (build.zig.zon in
+ * <dir>), "zigmod:<dir>|<x>" -> module x of the build.zig in <dir>, and
+ * "zig:<name>" -> "@<dir>|<pkg>|<x>", resolved by cbm_pkgmap_build. */
+
+static const char *bz_find(const char *p, const char *end, const char *needle) {
+    size_t n = strlen(needle);
+    for (; p && p + n <= end; p++) {
+        if (memcmp(p, needle, n) == 0) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+static const char *bz_skip_ws(const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) {
+        p++;
+    }
+    return p;
+}
+
+static size_t bz_ident_len(const char *p, const char *end) {
+    size_t n = 0;
+    while (p + n < end && (p[n] == '_' || (p[n] >= 'a' && p[n] <= 'z') ||
+                           (p[n] >= 'A' && p[n] <= 'Z') || (n > 0 && p[n] >= '0' && p[n] <= '9'))) {
+        n++;
+    }
+    return n;
+}
+
+/* A "..." string at p (after whitespace): heap copy, *after past the quote. */
+static char *bz_quoted(const char *p, const char *end, const char **after) {
+    p = bz_skip_ws(p, end);
+    if (p >= end || *p != '"') {
+        return NULL;
+    }
+    const char *close = memchr(p + SKIP_ONE, '"', (size_t)(end - p - SKIP_ONE));
+    if (!close) {
+        return NULL;
+    }
+    *after = close + SKIP_ONE;
+    return cbm_strndup(p + SKIP_ONE, (size_t)(close - p - SKIP_ONE));
+}
+
+/* The `.root_source_file = x.path("...zig")` of the statement starting at p. */
+static char *bz_root_source(const char *p, const char *end) {
+    const char *semi = memchr(p, ';', (size_t)(end - p));
+    const char *stop = semi ? semi : end;
+    const char *r = bz_find(p, stop, "root_source_file");
+    const char *call = r ? bz_find(r, stop, ".path(") : NULL;
+    const char *after = NULL;
+    char *path = call ? bz_quoted(call + strlen(".path("), stop, &after) : NULL;
+    if (path && (!ends_with(path, ".zig") || strstr(path, ".."))) {
+        free(path);
+        path = NULL;
+    }
+    return path;
+}
+
+/* Root source of module variable `ident` (from its `const ident = ...;`). */
+static char *bz_var_source(const char *src, const char *end, const char *ident, size_t len) {
+    for (const char *p = bz_find(src, end, "const "); p; p = bz_find(p + SKIP_ONE, end, "const ")) {
+        const char *q = bz_skip_ws(p + strlen("const "), end);
+        if (bz_ident_len(q, end) != len || memcmp(q, ident, len) != 0) {
+            continue;
+        }
+        q = bz_skip_ws(q + len, end);
+        if (q < end && *q == '=') {
+            return bz_root_source(q, end);
+        }
+    }
+    return NULL;
+}
+
+/* The module variable at p (`m` followed by `)`/`,`/`}`): its root source. */
+static char *bz_module_arg_source(const char *src, const char *p, const char *end) {
+    p = bz_skip_ws(p, end);
+    size_t len = bz_ident_len(p, end);
+    const char *q = bz_skip_ws(p + len, end);
+    if (len == 0 || q >= end || (*q != ')' && *q != ',' && *q != '}')) {
+        return NULL;
+    }
+    return bz_var_source(src, end, p, len);
+}
+
+static void bz_push(cbm_pkg_entries_t *entries, const char *rel_path, const char *name,
+                    const char *path, bool exported) {
+    char key[PKGMAP_PATH_BUF];
+    snprintf(key, sizeof(key), "zig:%s", name);
+    char *dir = path_dirname(rel_path);
+    char mod_key[PKGMAP_PATH_BUF];
+    snprintf(mod_key, sizeof(mod_key), "zigmod:%s|%s", dir, name);
+    char *mod_entry = exported ? join_and_strip(dir, path) : NULL;
+    if (mod_entry) {
+        pkg_entries_push(entries, strdup(mod_key), mod_entry);
+    }
+    char *entry = join_and_strip(dir, path);
+    free(dir);
+    if (entry) {
+        pkg_entries_push(entries, strdup(key), entry);
+    }
+}
+
+/* End of the expression at p: the `,` `)` `}` or `;` that closes it. */
+static const char *bz_expr_end(const char *p, const char *end) {
+    int nest = 0;
+    for (; p < end; p++) {
+        if (*p == '"') {
+            const char *close = memchr(p + SKIP_ONE, '"', (size_t)(end - p - SKIP_ONE));
+            p = close ? close : end;
+        } else if (*p == '(' || *p == '{' || *p == '[') {
+            nest++;
+        } else if ((*p == ')' || *p == '}' || *p == ']') && nest > 0) {
+            nest--;
+        } else if (nest == 0 && (*p == ',' || *p == ')' || *p == '}' || *p == ';')) {
+            return p;
+        }
+    }
+    return end;
+}
+
+/* The value expression [*vb, *ve) of `const ident = ...;`, or false. */
+static bool bz_var_value(const char *src, const char *end, const char *ident, size_t len,
+                         const char **vb, const char **ve) {
+    for (const char *p = bz_find(src, end, "const "); p; p = bz_find(p + SKIP_ONE, end, "const ")) {
+        const char *q = bz_skip_ws(p + strlen("const "), end);
+        if (bz_ident_len(q, end) != len || memcmp(q, ident, len) != 0) {
+            continue;
+        }
+        q = bz_skip_ws(q + len, end);
+        if (q < end && *q == '=') {
+            *vb = bz_skip_ws(q + SKIP_ONE, end);
+            *ve = bz_expr_end(*vb, end);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The expression [b, e), or a bare identifier's `const` value. */
+static void bz_deref(const char *src, const char *end, const char **b, const char **e) {
+    size_t len = bz_ident_len(*b, *e);
+    if (len > 0 && bz_skip_ws(*b + len, *e) == *e) {
+        const char *vb = NULL;
+        const char *ve = NULL;
+        if (bz_var_value(src, end, *b, len, &vb, &ve)) {
+            *b = vb;
+            *e = ve;
+        }
+    }
+}
+
+/* A module argument `dep.module("x")` / `b.dependency("pkg", ..).module("x")`
+ * (or a `const` holding one): push "zig:<name>" -> "@<dir>|<pkg>|<x>". */
+static void bz_push_dep_module(cbm_pkg_entries_t *entries, const char *rel_path, const char *name,
+                               const char *src, const char *p, const char *end) {
+    const char *b = bz_skip_ws(p, end);
+    const char *e = bz_expr_end(b, end);
+    bz_deref(src, end, &b, &e);
+    const char *m = NULL;
+    for (const char *q = bz_find(b, e, ".module("); q; q = bz_find(q + SKIP_ONE, e, ".module(")) {
+        m = q;
+    }
+    const char *after = NULL;
+    char *mod = m ? bz_quoted(m + strlen(".module("), e, &after) : NULL;
+    const char *db = b;
+    const char *de = m;
+    if (mod) {
+        bz_deref(src, end, &db, &de);
+    }
+    const char *d = mod ? bz_find(db, de, ".dependency(") : NULL;
+    char *pkg = d ? bz_quoted(d + strlen(".dependency("), de, &after) : NULL;
+    if (pkg) {
+        char key[PKGMAP_PATH_BUF];
+        char val[PKGMAP_PATH_BUF];
+        char *dir = path_dirname(rel_path);
+        snprintf(key, sizeof(key), "zig:%s", name);
+        snprintf(val, sizeof(val), "@%s|%s|%s", dir, pkg, mod);
+        free(dir);
+        pkg_entries_push(entries, strdup(key), strdup(val));
+    }
+    free(mod);
+    free(pkg);
+}
+
+/* build.zig.zon: `.dependencies = .{ .pkg = .{ .path = "libs/pkg" }, ... }`. */
+static void parse_build_zig_zon(const char *source, int source_len, const char *rel_path,
+                                cbm_pkg_entries_t *entries) {
+    /* Blank `//` comments (outside strings), so a commented-out dependency
+     * is not one. */
+    char *text = cbm_strndup(source, (size_t)source_len);
+    if (!text) {
+        return;
+    }
+    bool in_str = false;
+    for (int i = 0; i < source_len; i++) {
+        if (in_str) {
+            in_str = !(text[i] == '"' && text[i - SKIP_ONE] != '\\');
+        } else if (text[i] == '"') {
+            in_str = true;
+        } else if (text[i] == '/' && i + SKIP_ONE < source_len && text[i + SKIP_ONE] == '/') {
+            while (i < source_len && text[i] != '\n') {
+                text[i++] = ' ';
+            }
+        }
+    }
+    const char *end = text + source_len;
+    const char *deps = bz_find(text, end, ".dependencies");
+    const char *open = deps ? bz_find(deps, end, ".{") : NULL;
+    const char *close = open ? bz_expr_end(open + PAIR_LEN, end) : NULL;
+    char *dir = path_dirname(rel_path);
+    for (const char *p = open ? open + PAIR_LEN : NULL; p && close && p < close;) {
+        p = bz_skip_ws(p, close);
+        if (p >= close || *p != '.') {
+            break;
+        }
+        p++;
+        const char *after = p;
+        char *name = NULL;
+        if (*p == '@') {
+            name = bz_quoted(p + SKIP_ONE, close, &after);
+        } else {
+            size_t n = bz_ident_len(p, close);
+            name = n > 0 ? cbm_strndup(p, n) : NULL;
+            after = p + n;
+        }
+        const char *eq = bz_skip_ws(after, close);
+        const char *body = eq < close && *eq == '=' ? bz_skip_ws(eq + SKIP_ONE, close) : close;
+        const char *body_end = bz_expr_end(body, close);
+        const char *path = name ? bz_find(body, body_end, ".path") : NULL;
+        const char *peq = path ? bz_skip_ws(path + strlen(".path"), body_end) : NULL;
+        char *rel = peq && peq < body_end && *peq == '=' ? bz_quoted(peq + SKIP_ONE, body_end, &after)
+                                                         : NULL;
+        if (rel) {
+            size_t rl = strlen(rel);
+            while (rl > 0 && rel[rl - SKIP_ONE] == '/') {
+                rel[--rl] = '\0';
+            }
+            const char *r = rel[0] == '.' && rel[SKIP_ONE] == '/' ? rel + PAIR_LEN : rel;
+            char key[PKGMAP_PATH_BUF];
+            char val[PKGMAP_PATH_BUF];
+            snprintf(key, sizeof(key), "zigdep:%s|%s", dir, name);
+            if (dir[0] == '\0') {
+                snprintf(val, sizeof(val), "%s", r);
+            } else {
+                snprintf(val, sizeof(val), "%s/%s", dir, r);
+            }
+            pkg_entries_push(entries, strdup(key), strdup(val));
+        }
+        free(name);
+        free(rel);
+        p = body_end < close && *body_end == ',' ? body_end + SKIP_ONE : close;
+    }
+    free(dir);
+    free(text);
+}
+
+static void parse_build_zig(const char *source, int source_len, const char *rel_path,
+                            cbm_pkg_entries_t *entries) {
+    const char *end = source + source_len;
+    const char *after = NULL;
+    for (const char *p = bz_find(source, end, "addModule("); p;
+         p = bz_find(p + SKIP_ONE, end, "addModule(")) {
+        char *name = bz_quoted(p + strlen("addModule("), end, &after);
+        char *path = name ? bz_root_source(after, end) : NULL;
+        if (path) {
+            bz_push(entries, rel_path, name, path, true);
+        }
+        free(name);
+        free(path);
+    }
+    for (const char *p = bz_find(source, end, "addImport("); p;
+         p = bz_find(p + SKIP_ONE, end, "addImport(")) {
+        char *name = bz_quoted(p + strlen("addImport("), end, &after);
+        const char *comma = name ? bz_skip_ws(after, end) : NULL;
+        char *path = comma && comma < end && *comma == ','
+                         ? bz_module_arg_source(source, comma + SKIP_ONE, end)
+                         : NULL;
+        if (path) {
+            bz_push(entries, rel_path, name, path, false);
+        } else if (comma && comma < end && *comma == ',') {
+            bz_push_dep_module(entries, rel_path, name, source, comma + SKIP_ONE, end);
+        }
+        free(name);
+        free(path);
+    }
+    for (const char *p = bz_find(source, end, ".name"); p; p = bz_find(p + SKIP_ONE, end, ".name")) {
+        const char *eq = bz_skip_ws(p + strlen(".name"), end);
+        char *name = eq < end && *eq == '=' ? bz_quoted(eq + SKIP_ONE, end, &after) : NULL;
+        const char *close = name ? memchr(after, '}', (size_t)(end - after)) : NULL;
+        const char *mod = close ? bz_find(after, close, ".module") : NULL;
+        const char *meq = mod ? bz_skip_ws(mod + strlen(".module"), close) : NULL;
+        char *path = meq && meq < close && *meq == '='
+                         ? bz_module_arg_source(source, meq + SKIP_ONE, end)
+                         : NULL;
+        if (path) {
+            bz_push(entries, rel_path, name, path, false);
+        } else if (meq && meq < close && *meq == '=') {
+            bz_push_dep_module(entries, rel_path, name, source, meq + SKIP_ONE, end);
+        }
+        free(name);
+        free(path);
+    }
+}
+
 /* ── Public: manifest detection + parsing ──────────────────────── */
 
 bool cbm_pkgmap_try_parse(const char *basename, const char *rel_path, const char *source,
@@ -709,10 +1025,63 @@ bool cbm_pkgmap_try_parse(const char *basename, const char *rel_path, const char
         parse_gemspec(source, source_len, rel_path, entries);
         return true;
     }
+    if (strcmp(basename, "build.zig") == 0) {
+        parse_build_zig(source, source_len, rel_path, entries);
+        return true;
+    }
+    if (strcmp(basename, "build.zig.zon") == 0) {
+        parse_build_zig_zon(source, source_len, rel_path, entries);
+        return true;
+    }
     return false;
 }
 
 /* ── Merge: per-worker entries → hash table ────────────────────── */
+
+/* The entry_rel recorded for key, or NULL. */
+static const char *pkgmap_raw_entry(cbm_pkg_entries_t *worker_entries, int worker_count,
+                                    const char *key) {
+    for (int w = 0; w < worker_count; w++) {
+        for (int i = 0; i < worker_entries[w].count; i++) {
+            if (strcmp(worker_entries[w].items[i].pkg_name, key) == 0) {
+                return worker_entries[w].items[i].entry_rel;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* Zig "zig:<name>" -> "@<dir>|<pkg>|<x>": module x of the build.zig in the
+ * directory build.zig.zon in <dir> gives dependency pkg. Returns the number
+ * of entries added. */
+static int pkgmap_resolve_zig_deps(CBMHashTable *map, cbm_pkg_entries_t *worker_entries,
+                                   int worker_count) {
+    int added = 0;
+    for (int w = 0; w < worker_count; w++) {
+        for (int i = 0; i < worker_entries[w].count; i++) {
+            const char *name = worker_entries[w].items[i].pkg_name;
+            const char *v = worker_entries[w].items[i].entry_rel;
+            const char *bar1 = v[0] == '@' ? strchr(v, '|') : NULL;
+            const char *bar2 = bar1 ? strchr(bar1 + SKIP_ONE, '|') : NULL;
+            if (!bar2 || cbm_ht_has(map, name)) {
+                continue;
+            }
+            char key[PKGMAP_PATH_BUF];
+            snprintf(key, sizeof(key), "zigdep:%.*s", (int)(bar2 - v - SKIP_ONE), v + SKIP_ONE);
+            const char *dep_dir = pkgmap_raw_entry(worker_entries, worker_count, key);
+            if (!dep_dir) {
+                continue;
+            }
+            snprintf(key, sizeof(key), "zigmod:%s|%s", dep_dir, bar2 + SKIP_ONE);
+            const char *qn = (const char *)cbm_ht_get(map, key);
+            if (qn) {
+                cbm_ht_set(map, strdup(name), strdup(qn));
+                added++;
+            }
+        }
+    }
+    return added;
+}
 
 CBMHashTable *cbm_pkgmap_build(cbm_pkg_entries_t *worker_entries, int worker_count,
                                const char *project_name) {
@@ -731,6 +1100,11 @@ CBMHashTable *cbm_pkgmap_build(cbm_pkg_entries_t *worker_entries, int worker_cou
     for (int w = 0; w < worker_count; w++) {
         cbm_pkg_entries_t *we = &worker_entries[w];
         for (int i = 0; i < we->count; i++) {
+            /* Zig dependency entries are resolved below. */
+            if (we->items[i].entry_rel[0] == '@' ||
+                strncmp(we->items[i].pkg_name, "zigdep:", strlen("zigdep:")) == 0) {
+                continue;
+            }
             /* Convert entry_rel to QN: project.dir.parts */
             char *qn = cbm_pipeline_fqn_module(project_name, we->items[i].entry_rel);
             if (!qn) {
@@ -750,6 +1124,7 @@ CBMHashTable *cbm_pkgmap_build(cbm_pkg_entries_t *worker_entries, int worker_cou
         }
     }
 
+    merged += pkgmap_resolve_zig_deps(map, worker_entries, worker_count);
     if (merged == 0) {
         cbm_ht_free(map);
         return NULL;
@@ -769,7 +1144,8 @@ static bool is_pkgmap_manifest_basename(const char *basename) {
         strcmp(basename, "Cargo.toml") == 0 || strcmp(basename, "pyproject.toml") == 0 ||
         strcmp(basename, "composer.json") == 0 || strcmp(basename, "pubspec.yaml") == 0 ||
         strcmp(basename, "pom.xml") == 0 || strcmp(basename, "build.gradle") == 0 ||
-        strcmp(basename, "build.gradle.kts") == 0 || strcmp(basename, "mix.exs") == 0) {
+        strcmp(basename, "build.gradle.kts") == 0 || strcmp(basename, "mix.exs") == 0 ||
+        strcmp(basename, "build.zig") == 0 || strcmp(basename, "build.zig.zon") == 0) {
         return true;
     }
     return ends_with(basename, ".gemspec");
@@ -1151,6 +1527,15 @@ char *cbm_pipeline_resolve_module(const cbm_pipeline_ctx_t *ctx, const char *sou
     CBMHashTable *pkgmap = ctx->pkgmap;
     if (!pkgmap) {
         return cbm_pipeline_fqn_module(ctx->project_name, module_path);
+    }
+
+    /* 2b. Zig: a named `@import("name")` is a build.zig module, never another
+     *     ecosystem's package of the same name. */
+    if (source_rel && ends_with(source_rel, ".zig")) {
+        char key[PKGMAP_PATH_BUF];
+        snprintf(key, sizeof(key), "zig:%s", module_path);
+        const char *zig_qn = (const char *)cbm_ht_get(pkgmap, key);
+        return zig_qn ? strdup(zig_qn) : cbm_pipeline_fqn_module(ctx->project_name, module_path);
     }
 
     /* 3. Exact lookup */
