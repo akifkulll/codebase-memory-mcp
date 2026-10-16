@@ -1,379 +1,504 @@
-# codebase-memory-mcp — Zova-native fork
+# codebase-memory-mcp
 
-[![GitHub Release](https://img.shields.io/github/v/release/0ctacity/codebase-memory-mcp?style=flat&color=blue)](https://github.com/0ctacity/codebase-memory-mcp/releases/latest)
+A local MCP server that indexes a codebase into a knowledge graph your coding agent can query.
+
+codebase-memory-mcp parses your repositories with tree-sitter and type-aware resolvers, stores
+functions, classes, calls, routes, and cross-service links in one local database, and exposes them
+through 15 MCP tools. Your agent asks "what calls `ProcessOrder`?" and gets the answer from the graph
+instead of grepping file by file.
+
+[![GitHub Release](https://img.shields.io/github/v/release/octacity-org/codebase-memory-mcp?style=flat&color=blue)](https://github.com/octacity-org/codebase-memory-mcp/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/0ctacity/codebase-memory-mcp/ci.yml?branch=main&label=CI)](https://github.com/0ctacity/codebase-memory-mcp/actions/workflows/ci.yml)
-[![Languages](https://img.shields.io/badge/languages-158-orange)](https://github.com/DeusData/codebase-memory-mcp)
-[![Hybrid LSP](https://img.shields.io/badge/Hybrid_LSP-9_languages-blue)](#hybrid-lsp)
-[![Platform](https://img.shields.io/badge/macOS_%7C_Linux_%7C_Windows-supported-lightgrey)](https://github.com/0ctacity/codebase-memory-mcp/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/octacity-org/codebase-memory-mcp/ci.yml?branch=main&label=CI)](https://github.com/octacity-org/codebase-memory-mcp/actions/workflows/ci.yml)
 [![arXiv](https://img.shields.io/badge/arXiv-2603.27277-b31b1b?logo=arxiv)](https://arxiv.org/abs/2603.27277)
 
 > [!IMPORTANT]
-> This repository is a fork of the original [DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp). It tracks upstream loosely: useful fixes and features are adopted selectively, but this fork does not mirror upstream releases or preserve identical storage behavior.
+> This is a fork of [DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp).
+> It adopts upstream fixes and features selectively. It does not mirror upstream releases, and its
+> storage is different: every repository lives in one shared [Zova](https://github.com/ata-sesli/zova)
+> database instead of a SQLite file per project.
 
-This fork combines codebase-memory-mcp's tree-sitter/LSP indexing and MCP tools with a **Zova-native shared database**. Zova owns graph topology and vector search in full-authority mode, enabling fast incremental publication, native traversal, compact large-repository storage, and searches spanning several indexed repositories.
+## Contents
 
-High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-sitter/) AST analysis across all 158 languages, enhanced with [**Hybrid LSP** semantic type resolution](#hybrid-lsp) for Python, TypeScript / JavaScript / JSX / TSX, PHP, C#, Go, C, C++, Java, Kotlin, and Rust — producing a persistent knowledge graph of functions, classes, call chains, HTTP routes, and cross-service links. 14 MCP tools. Zero dependencies. Plug and play across 11 coding agents.
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Upgrading to 2.0](#upgrading-to-20)
+- [How it works](#how-it-works)
+- [What it can do](#what-it-can-do)
+- [MCP tools](#mcp-tools)
+- [Graph data model](#graph-data-model)
+- [Agents](#agents)
+- [CLI](#cli)
+- [Configuration](#configuration)
+- [Storage and Zova operations](#storage-and-zova-operations)
+- [Build from source](#build-from-source)
+- [Diagnostics and troubleshooting](#diagnostics-and-troubleshooting)
+- [Current boundaries](#current-boundaries)
+- [Security](#security)
+- [License](#license)
 
-## This fork
+## Install
 
-The current development version uses **CBM schema 7** with a pinned **Zova format 12 / ABI 1.3.0** SDK. Compared with the original pure-SQLite implementation, it adds:
+**macOS / Linux:**
 
-- **One shared database** — multiple repositories live as isolated workspaces in `cbm.zova`.
-- **Cross-repository discovery** — one `search_graph` request can search selected projects or every healthy workspace and identifies the owning project for each result.
-- **Native graph and vectors** — topology, edge payloads, traversal indexes, and int8 vector collections use Zova's native stores rather than duplicate SQLite projections.
-- **Incremental-first performance** — unchanged records are not republished; native delta APIs update only the affected graph, metadata, FTS, and vector records.
-- **Exact compatibility checks** — benchmarked Zova results are required to match the pure-SQLite CBM result set exactly, with no unexpected fallback.
-
-All indexing and queries use the shared Zova database. Older per-project `.db` indexes are not read or migrated; re-index those repositories.
-
-### Latest Zova-native results
-
-ReleaseSafe medians compare this fork's Zova-native mode with the same CBM build using pure SQLite. Lower indexing time, storage, and vector p95 are better.
-
-| Area | TOPS vs pure SQLite | Deno vs pure SQLite |
-|---|---:|---:|
-| Full indexing | 5.7% slower | 6.1% slower |
-| Incremental indexing | 76.9% faster | 51.6% faster |
-| Storage | 12.9% larger | 2.4% smaller |
-| Vector p95 | 76.6% faster | 86.2% faster |
-| Correctness | Exact | Exact |
-
-Full indexing remains the current tradeoff. Zova's advantage is strongest for repeated indexing and vector retrieval; its fixed database overhead is more visible on a small repository such as TOPS, while it is already smaller than pure SQLite on Deno.
-
-> **Research** — The design and benchmarks behind this project are described in the preprint [*Codebase-Memory: Tree-Sitter-Based Knowledge Graphs for LLM Code Exploration via MCP*](https://arxiv.org/abs/2603.27277) (arXiv:2603.27277). Evaluated across 31 real-world repositories: 83% answer quality, 10× fewer tokens, 2.1× fewer tool calls vs. file-by-file exploration.
-
-> **Security & Trust** — This tool reads your codebase and writes to your agent configuration files. Audit the [fork source](https://github.com/0ctacity/codebase-memory-mcp) before running if required. Indexing and queries run locally; source code is not sent to a hosted service. Report security issues through [SECURITY.md](SECURITY.md).
-
-## Why this fork
-
-- **Fast updates after the first index** — native delta publication makes incremental indexing 51.6%–76.9% faster in the current TOPS and Deno benchmarks.
-- **Cross-repository context** — search frontend, backend, libraries, or any other selected project set in one query without requiring repository names such as `frontend` or `backend`.
-- **Exact results** — Zova-native benchmark parity is checked against the pure-SQLite implementation.
-- **Plug and play** — release binaries for macOS, Linux, and Windows on amd64 and arm64. No Docker, hosted service, or API key. Download → install → restart agent → done.
-- **158 languages** — vendored tree-sitter grammars compiled into the binary. Nothing to install, nothing that breaks.
-- **120x fewer tokens** — 5 structural queries: ~3,400 tokens vs ~412,000 via file-by-file search. One graph query replaces dozens of grep/read cycles.
-- **11 agents, one command** — `install` auto-detects Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode, VS Code, OpenClaw, and Kiro — configures MCP entries, instruction files, and pre-tool hooks for each.
-- **Infrastructure-as-code indexing** — Dockerfiles, Kubernetes manifests, and Kustomize overlays indexed as graph nodes with cross-references. `Resource` nodes for K8s kinds, `Module` nodes for Kustomize overlays with `IMPORTS` edges to referenced resources.
-- **14 MCP tools** — search, trace, architecture, impact analysis, Cypher queries, dead code detection, cross-service HTTP linking, and more.
-
-## Quick Start
-
-**One-line install** (macOS / Linux):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/0ctacity/codebase-memory-mcp/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/octacity-org/codebase-memory-mcp/main/install.sh | bash
 ```
 
-The installer is non-destructive by default. If a different binary or MCP
-configuration already exists, replacement must be authorized explicitly with
-`--replace` or `--replace-config`.
+**Windows (PowerShell):**
 
-**Windows** (PowerShell):
 ```powershell
-# 1. Download the installer
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/0ctacity/codebase-memory-mcp/main/install.ps1 -OutFile install.ps1
-
-# 2. (Optional but recommended) Inspect the script
-notepad install.ps1
-
-# 3. Unblock the downloaded file (removes Mark-of-the-Web restriction added by browsers/Invoke-WebRequest)
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/octacity-org/codebase-memory-mcp/main/install.ps1 -OutFile install.ps1
 Unblock-File .\install.ps1
-
-# 4. Run it
 .\install.ps1
-
 ```
 
-> **Note:** If you see a script execution policy error, run `Set-ExecutionPolicy -Scope Process Bypass` first, or invoke with `PowerShell -ExecutionPolicy Bypass -File .\install.ps1`.
+If PowerShell refuses to run the script, use `PowerShell -ExecutionPolicy Bypass -File .\install.ps1`.
 
-Options: `--skip-config` (binary only, no agent setup), `--dir=<path>` (custom location).
+The installer downloads the release archive for your platform, verifies it against the release
+`checksums.txt`, installs the binary to `~/.local/bin`, and configures every coding agent it detects.
+It does not overwrite an existing different binary or MCP entry unless you ask it to.
 
-Restart your coding agent. Say **"Index this project"** — done.
+| Option | Effect |
+|--------|--------|
+| `--dir=<path>` | Install somewhere other than `~/.local/bin` |
+| `--skip-config` | Install the binary only; leave agent configuration alone |
+| `--replace` | Replace a different existing binary |
+| `--replace-config` | Replace a different existing MCP configuration entry |
+
+Pass options through the pipe with `bash -s --`, for example
+`curl -fsSL .../install.sh | bash -s -- --skip-config`.
+
+### Release archives
+
+Every [release](https://github.com/octacity-org/codebase-memory-mcp/releases/latest) ships these
+archives plus `checksums.txt` (SHA-256):
+
+| Platform | Archive |
+|----------|---------|
+| macOS, Apple Silicon | `codebase-memory-mcp-darwin-arm64.tar.gz` |
+| macOS, Intel | `codebase-memory-mcp-darwin-amd64.tar.gz` |
+| Linux x86_64, portable (installer default) | `codebase-memory-mcp-linux-amd64-portable.tar.gz` |
+| Linux ARM64, portable (installer default) | `codebase-memory-mcp-linux-arm64-portable.tar.gz` |
+| Linux x86_64, glibc | `codebase-memory-mcp-linux-amd64.tar.gz` |
+| Linux ARM64, glibc | `codebase-memory-mcp-linux-arm64.tar.gz` |
+| Windows x86_64 | `codebase-memory-mcp-windows-amd64.zip` |
+| Windows ARM64 | `codebase-memory-mcp-windows-arm64.zip` |
+
+The portable Linux binaries are statically linked. The glibc builds need a glibc at least as new as
+the release runner's. All binaries target the baseline CPU of their architecture, so they also run
+on older processors.
 
 <details>
-<summary>Manual install</summary>
+<summary>Manual install from an archive</summary>
 
-1. **Download** the archive for your platform from the [latest release](https://github.com/0ctacity/codebase-memory-mcp/releases/latest):
-   - `codebase-memory-mcp-<os>-<arch>.tar.gz` (macOS/Linux) or `.zip` (Windows)
+Each archive contains the binary and the matching installer.
 
-2. **Extract and install** (each archive includes `install.sh` or `install.ps1`):
+```bash
+tar xzf codebase-memory-mcp-*.tar.gz
+./install.sh
+```
 
-   macOS / Linux:
-   ```bash
-   tar xzf codebase-memory-mcp-*.tar.gz
-   ./install.sh
-   ```
+```powershell
+Expand-Archive codebase-memory-mcp-windows-amd64.zip -DestinationPath .
+Unblock-File .\install.ps1
+.\install.ps1
+```
 
-   Windows (PowerShell):
-   ```powershell
-   Expand-Archive codebase-memory-mcp-windows-amd64.zip -DestinationPath .
-   Unblock-File .\install.ps1
-   .\install.ps1
-   ```
+On macOS the `install` command removes the quarantine attribute and ad-hoc signs the binary. On
+Windows, SmartScreen may warn about unsigned software; check the archive against `checksums.txt`
+before choosing **More info → Run anyway**.
 
-3. **Restart** your coding agent.
-
-The `install` command automatically strips macOS quarantine attributes and ad-hoc signs the binary — no manual `xattr`/`codesign` needed.
 </details>
 
-The `install` command auto-detects all installed coding agents and configures MCP server entries, instruction files, skills, and pre-tool hooks for each.
+### Update and uninstall
 
-### Auto-Index
+```bash
+codebase-memory-mcp update
+codebase-memory-mcp uninstall
+```
 
-Enable automatic indexing on MCP session start:
+The server also checks for a newer release on startup and mentions it on the first tool call.
+`uninstall` removes the binary, agent configuration, skills, hooks, and instructions. It keeps the
+shared `cbm.zova` database.
+
+## Quick start
+
+1. Install, then restart your coding agent.
+2. Open a repository and ask the agent: **"Index this project."**
+3. Ask structural questions:
+   - "What calls `handleCheckout`, two levels up?"
+   - "Show me the HTTP routes and which services call them."
+   - "Which functions have no callers?"
+   - "What does my uncommitted change affect?"
+
+To index new projects automatically when a session starts:
 
 ```bash
 codebase-memory-mcp config set auto_index true
 ```
 
-When enabled, new projects are indexed automatically on first connection. Previously-indexed projects are registered with the background watcher for ongoing git-based change detection. Configurable file limit: `config set auto_index_limit 50000`.
+Indexed projects stay fresh on their own: a background watcher detects git changes and re-indexes
+only what changed.
 
-Watcher registration is controlled separately by `auto_watch` (default `true`). Set `config set auto_watch false` to keep a session from registering its project with the background watcher — useful when working across many projects and you want each session contained to explicit indexing.
+## Upgrading to 2.0
 
-### Keeping Up to Date
+2.0 changes the stored data and removes several tools. What happens when you upgrade from 1.x:
 
-```bash
-codebase-memory-mcp update
+- **Database format.** A `cbm.zova` in an older Zova storage format (9–11) is converted once when
+  the new binary starts. The conversion writes a verified new file and then swaps it in. If it
+  fails, the log names the fix: `codebase-memory-mcp zova-ops migrate-format --json`.
+- **Index format.** Each project takes one full re-index the next time it is indexed, instead of an
+  incremental one. That run reports `"format_migration": true`. Incremental indexing resumes after
+  it.
+- **Per-project `.db` files** from releases before the shared database are no longer read or
+  migrated. Re-index those repositories with `index_repository`.
+
+Breaking changes:
+
+| Change | What to do |
+|--------|------------|
+| `manage_adr` and `ingest_traces` tools removed | Drop them from prompts and scripts |
+| Graph UI, website, and artifact export/import removed | Use `zova-ops` backups and workspace archives |
+| `CALL_REFERENCE` edges split from `CALLS` | `CALLS` now means invocation only; see [Graph data model](#graph-data-model) |
+| File nodes keep their extension in the qualified name | `node.h` and `node.c` are now two File nodes; re-query stored QNs |
+
+New in 2.0: Zig type-aware call resolution, `compare_graphs`, `get_file_outline`, generation-bound
+`search_graph` cursors, project-wide `check_index_coverage`, compact output, `file_path` to choose
+between same-named `trace_path` and `get_code_snippet` targets, Cypher property-to-property
+comparison, and memory-budgeted indexing that spills to disk.
+
+## How it works
+
+codebase-memory-mcp is a structural backend. It does not include an LLM; the agent you already use
+turns your question into tool calls.
+
+```text
+You:    "what calls ProcessOrder?"
+Agent:  trace_path(function_name="ProcessOrder", direction="inbound")
+Server: walks the call graph, returns structured rows
+Agent:  explains the call chain
 ```
 
-The MCP server also checks for updates on startup and notifies on the first tool call if a newer release is available.
+```mermaid
+flowchart LR
+    Repo["Repository files"]
+    Parse["tree-sitter parse<br/>(158 languages)"]
+    LSP["Hybrid LSP<br/>type resolution"]
+    Pipe["Pipeline<br/>calls · routes · links"]
+    DB["cbm.zova<br/>one workspace per repo"]
+    MCP["MCP tools"]
+    Agent["Coding agent"]
 
-### Uninstall
-
-```bash
-codebase-memory-mcp uninstall
+    Repo --> Parse --> LSP --> Pipe --> DB
+    Agent <--> MCP <--> DB
 ```
 
-Removes the installed binary, agent configs, skills, hooks, and instructions. The shared `cbm.zova` database is kept.
+Indexing runs in passes: structure, definitions, calls, HTTP and channel links, configuration, and
+tests. Results publish atomically into the shared database. Incremental runs commit only the
+affected graph, metadata, full-text, and vector rows; unchanged files are not rewritten.
 
-## Features
+Indexing keeps results in memory up to a budget (a fraction of system RAM, or `CBM_MEM_BUDGET_MB`)
+and spills extraction results to disk beyond it, so a large repository does not have to fit in RAM.
 
-### Graph & analysis
-- **Architecture overview**: `get_architecture` returns languages, packages, entry points, routes, hotspots, boundaries, layers, and clusters in a single call
-- **Louvain community detection**: Discovers functional modules by clustering call edges
-- **Git diff impact mapping**: `detect_changes` maps uncommitted changes to affected symbols with risk classification
-- **Call graph**: Resolves function calls across files and packages (import-aware, type-inferred)
-- **Dead code detection**: Finds functions with zero callers, excluding entry points
-- **Cypher-like queries**: `MATCH (f:Function)-[:CALLS]->(g) WHERE f.name = 'main' RETURN g.name`
+> **Research.** The design and benchmarks are described in the preprint
+> [*Codebase-Memory: Tree-Sitter-Based Knowledge Graphs for LLM Code Exploration via MCP*](https://arxiv.org/abs/2603.27277).
+> Across 31 real repositories it reports 83% answer quality with 10× fewer tokens and 2.1× fewer tool
+> calls than file-by-file exploration.
+
+## What it can do
+
+### Understand structure
+
+- **Architecture overview**: `get_architecture` returns languages, packages, entry points, routes,
+  hotspots, boundaries, layers, and Louvain clusters in one call.
+- **Call graph**: calls resolve across files and packages, using imports and inferred types.
+- **Impact of a change**: `detect_changes` maps the git diff to affected symbols and rates the risk.
+- **Dead code**: functions with no callers, excluding entry points.
+- **Compare two indexes**: `compare_graphs` lists the nodes and edges added and removed between two
+  indexed projects, for example two branches checked out side by side.
 
 ### Search
-- **Semantic search** (`semantic_query`): vector search across the entire graph, powered by bundled Nomic `nomic-embed-code` embeddings (40K tokens, 768d int8) compiled into the binary — no API key, no Ollama, no Docker. 11-signal combined scoring (TF-IDF, RRI, API/Type/Decorator signatures, AST profiles, data flow, Halstead-lite, MinHash, module proximity, graph diffusion).
-- **BM25 full-text search** via SQLite FTS5 with `cbm_camel_split` tokenizer (camelCase / snake_case aware)
-- **Structural search** (`search_graph`): regex name patterns, label filters, min/max degree, file scoping
-- **Code search** (`search_code`): graph-augmented grep over indexed files only
 
-### Cross-service linking
-- **HTTP** route ↔ call-site matching with confidence scoring
-- **gRPC, GraphQL, tRPC** service detection with protobuf Route extraction
-- **Channel detection** (`EMITS` / `LISTENS_ON`) for Socket.IO, EventEmitter, and generic pub-sub patterns across 8 languages with constant resolution
+- **Structural search** (`search_graph`): regex names, labels, file patterns, degree filters.
+- **Full-text search**: BM25 over names and signatures, aware of camelCase and snake_case.
+- **Semantic search** (`semantic_query` in `search_graph`): vector search with the bundled
+  `nomic-embed-code` model compiled into the binary. No API key or model service.
+- **Code search** (`search_code`): grep over indexed files only.
+- **Cross-repository search**: one `search_graph` request can search several indexed repositories;
+  see [Cross-repository search](#cross-repository-search).
 
-### Edge types (selected)
-- `CALLS`, `IMPORTS`, `DEFINES`, `IMPLEMENTS`, `INHERITS`
-- `HTTP_CALLS`, `ASYNC_CALLS` (cross-service)
-- `EMITS`, `LISTENS_ON` (channels)
-- `DATA_FLOWS` with arg-to-param mapping + field access chains
-- `SIMILAR_TO` (MinHash + LSH near-clone detection, Jaccard scored)
-- `SEMANTICALLY_RELATED` (vocabulary-mismatch, same-language, score ≥ 0.80)
+### Link services
 
-### Indexing pipeline
-- **158 vendored tree-sitter grammars** compiled into the binary
-- **Generic package / module resolution** — bare specifiers like `@myorg/pkg`, `github.com/foo/bar`, `use my_crate::foo` resolved via manifest scanning (`package.json`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `composer.json`, `pubspec.yaml`, `pom.xml`, `build.gradle`, `mix.exs`, `*.gemspec`)
-- **Infrastructure-as-code indexing** — Dockerfiles, Kubernetes manifests, Kustomize overlays as graph nodes
-- **[Hybrid LSP semantic type resolution](#hybrid-lsp)** for Python, TypeScript / JavaScript / JSX / TSX, PHP, C#, Go, C, C++, Java, Kotlin, and Rust — a lightweight C implementation of language type-resolution algorithms, structurally inspired by and compatible with major language servers including tsserver / typescript-go, pyright, gopls, Roslyn, Eclipse JDT, and rust-analyzer (parameter binding, return-type inference, generic substitution, JSX component dispatch, JSDoc inference for plain JS files, namespace + trait + late-static-binding resolution for PHP, file-scoped namespaces + records + LINQ method syntax for C#, class-hierarchy + overload + lambda resolution for Java, extension-function + scope-function resolution for Kotlin, trait-method + UFCS resolution for Rust)
-- **Prepared Zova publication**: finalized nodes, grouped topology edges with compact payloads, metadata, FTS rows, and vectors are published atomically into the shared database.
+- HTTP routes matched to call sites, with confidence scores.
+- gRPC, GraphQL, and tRPC service detection, including protobuf routes.
+- Event channels (`EMITS` / `LISTENS_ON`) for Socket.IO, EventEmitter, and generic pub-sub.
+- Infrastructure as code: Dockerfiles, Kubernetes manifests, and Kustomize overlays become graph
+  nodes.
 
-### Distribution & operation
-- **Single self-contained application, zero infrastructure**: Zova embeds SQLite and persists the shared full-authority store at `~/.cache/codebase-memory-mcp/cbm.zova`.
-- **Auto-sync**: Background watcher detects file changes and re-indexes automatically
-- **Route nodes**: REST endpoints are first-class graph entities
-- **CLI mode**: `codebase-memory-mcp cli search_graph '{"name_pattern": ".*Handler.*"}'`
-- **Release archives**: signed-by-checksum binaries and installers for macOS, Linux, and Windows on amd64 and arm64.
+### Resolve types with Hybrid LSP
 
-## How It Works
+Tree-sitter alone sees syntax. It cannot tell that `user.profile.display_name()` means
+`Profile.display_name` three modules away. Hybrid LSP is a small C implementation of each language's
+type-resolution rules, built into the binary. It runs on every parse and refines `CALLS` and `USAGE`
+edges with types. No language server process, no per-project setup.
 
-codebase-memory-mcp is a **structural analysis backend** — it builds and queries the knowledge graph. It does **not** include an LLM. Instead, it relies on your MCP client (Claude Code, or any MCP-compatible agent) to be the intelligence layer.
+| Language | What it resolves |
+|----------|------------------|
+| Python | imports and submodules, dataclasses, generics, `@property`, `match`, narrowing, Pydantic, SQLAlchemy `Mapped[T]`, common stdlib |
+| TypeScript / JavaScript / JSX / TSX | generics, JSX components, JSDoc in plain JS, `.d.ts`, re-exports, method chains |
+| PHP | namespaces, traits, late static binding, PHPDoc |
+| C# | global usings, records, LINQ method syntax, `Task<T>` unwrap, `var` inference |
+| Go | cross-file package registry, generics, embedded structs, interface satisfaction |
+| C / C++ | macros, `typedef` chains, header-source linking, templates, namespaces, `auto` |
+| Java | imports, class hierarchy, overloads, lambdas and method references |
+| Kotlin | extension functions, companion objects, scope functions, nullable unwrapping |
+| Rust | `use` paths, `impl` and trait methods, trait bounds, UFCS, derive macros |
+| Zig | receiver types from annotations, `@This()`, `@import`, return types, captures, and type functions; `build.zig.zon` path dependencies map `@import("name")` to the dependency's module |
 
+Other languages fall back to name-based resolution. Where the Zig resolver cannot prove a receiver's
+type, it emits no edge rather than a guessed one.
+
+### Languages
+
+158 languages are parsed with vendored tree-sitter grammars compiled into the binary. Support tiers
+decide how much of the test suite covers a language; all of them index the same way.
+
+| Tier | Languages |
+|------|-----------|
+| 1 (default test suite) | Bash, C, C++, C#, CSS, Dart, Elixir, Go, Haskell, HCL, HTML, Java, JavaScript, JSON, Kotlin, Lua, Markdown, Nix, PHP, PowerShell, Python, Ruby, Rust, Scala, Solidity, Swift, TSX, TypeScript, YAML, Zig |
+| 2 (`CBM_TEST_TIERS=2`) | OCaml, Objective-C, Perl, Groovy, Erlang, R, SCSS, TOML, SQL, Dockerfile, Clojure, F#, Julia, CUDA, Fortran, MATLAB, XML, Makefile, CMake, Protobuf, GraphQL, Vue, Svelte, Go module, Kustomize, Kubernetes manifests |
+| 3 (`CBM_TEST_TIERS=all`) | Everything else, from Ada and Astro to WGSL and Zsh |
+
+Package resolution reads manifests to map bare imports such as `@myorg/pkg`, `github.com/foo/bar`,
+or `use my_crate::foo`: `package.json`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `composer.json`,
+`pubspec.yaml`, `pom.xml`, `build.gradle`, `mix.exs`, `*.gemspec`, and `build.zig.zon`.
+
+### Performance
+
+This fork's shared Zova database compared with the same CBM build on plain SQLite (ReleaseSafe
+medians):
+
+| Area | TOPS | Deno |
+|------|-----:|-----:|
+| Full indexing | 5.7% slower | 6.1% slower |
+| Incremental indexing | 76.9% faster | 51.6% faster |
+| Storage | 12.9% larger | 2.4% smaller |
+| Vector search p95 | 76.6% faster | 86.2% faster |
+| Result parity | exact | exact |
+
+Full indexing is the tradeoff; the shared database pays off on repeated indexing and vector
+retrieval. For scale, the original SQLite design fully indexed the Linux kernel (28M LOC, 75K files)
+in about 3 minutes, with Cypher queries and depth-5 traces in milliseconds. See
+[docs/BENCHMARK.md](docs/BENCHMARK.md).
+
+## MCP tools
+
+### Indexing
+
+| Tool | What it does |
+|------|--------------|
+| `index_repository` | Index a repository. The watcher keeps it fresh afterwards. |
+| `index_status` | Indexing state of a project, with a parse-coverage summary. |
+| `check_index_coverage` | Extraction coverage per path and directory: partial parses with line ranges, skipped and excluded files, freshness. With no path arguments it covers the whole project. A best-effort signal, not a completeness guarantee. |
+| `list_projects` | Indexed projects in selector order, with `offset`/`limit` paging and optional node and edge counts. |
+| `delete_project` | Remove a project and its data from the shared database. |
+
+### Querying
+
+| Tool | What it does |
+|------|--------------|
+| `get_graph_schema` | Node and edge counts, relationship patterns, properties per label. A good first call. |
+| `get_architecture` | Languages, packages, routes, hotspots, clusters. |
+| `search_graph` | Structural, full-text, and semantic search. Page with `limit`/`offset`, or pass `next_cursor` back as `cursor`. |
+| `search_code` | Text search within indexed files. |
+| `trace_path` | Who calls a function and what it calls, to a bounded depth (alias `trace_call_path`). |
+| `get_code_snippet` | Source of a symbol by qualified name. |
+| `get_file_outline` | Bounded symbol outline of one indexed file. |
+| `query_graph` | Read-only Cypher query. |
+| `detect_changes` | Map the git diff to affected symbols and blast radius. |
+| `compare_graphs` | Nodes and edges added and removed between two indexed projects. |
+
+Behavior worth knowing:
+
+- **Cursors** are tied to the query arguments and the index generation. A cursor used after a
+  re-index fails with `stale_cursor` instead of skipping or repeating rows.
+- **Ambiguous names**: when several symbols share a name, pass `file_path` to `trace_path` or
+  `get_code_snippet` to choose one.
+- **Compact output**: `search_graph`, `query_graph`, `trace_path`, `search_code`, `get_architecture`,
+  `list_projects`, and `check_index_coverage` accept `format: "compact"`, which returns indented text
+  with tabular rows instead of JSON. JSON stays the default.
+
+### Cross-repository search
+
+All indexed repositories share one database, so `search_graph` can search several at once:
+
+```json
+{"projects": ["codebase-memory-mcp", "AnotherFolder/codebase-memory-mcp"], "query": "update user profile"}
 ```
-You: "what calls ProcessOrder?"
 
-Agent calls: trace_path(function_name="ProcessOrder", direction="inbound")
+Use `{"projects": ["*"]}` for every ready, healthy workspace. Full-text, structural, and semantic
+results are ranked and paged across the combined scope. Each result names its `project`; pass it
+with the `qualified_name` to `get_code_snippet`.
 
-codebase-memory-mcp: executes graph query, returns structured results
+Selectors come from repository paths. The first repository claims its directory name; a later one
+with the same name gets the shortest unique parent-qualified name, such as
+`AnotherFolder/codebase-memory-mcp`. `list_projects` shows the selectors.
 
-Agent: presents the call chain in plain English
+## Graph data model
+
+**Node labels:** `Project`, `Package`, `Folder`, `File`, `Module`, `Class`, `Function`, `Method`,
+`Interface`, `Enum`, `Type`, `Route`, `Resource`
+
+**Edge types:** `CONTAINS_PACKAGE`, `CONTAINS_FOLDER`, `CONTAINS_FILE`, `DEFINES`, `DEFINES_METHOD`,
+`IMPORTS`, `CALLS`, `CALL_REFERENCE`, `HTTP_CALLS`, `ASYNC_CALLS`, `IMPLEMENTS`, `INHERITS`,
+`HANDLES`, `USAGE`, `CONFIGURES`, `WRITES`, `MEMBER_OF`, `TESTS`, `USES_TYPE`, `EMITS`,
+`LISTENS_ON`, `DATA_FLOWS`, `SIMILAR_TO`, `SEMANTICALLY_RELATED`, `FILE_CHANGES_WITH`
+
+`CALLS` means invocation only. A function named as a value without being called (passed as an
+argument, assigned, Java `A::m`, Kotlin `::f`, PHP `f(...)`) becomes `CALL_REFERENCE` when the type
+resolver proves the single target; otherwise it stays `USAGE`. `trace_path` follows `CALLS` by
+default; pass `edge_types: ["CALLS", "CALL_REFERENCE"]` to follow references too.
+
+**Qualified names** look like `<project>.<path_parts>.<name>`. File nodes keep their extension;
+symbols and modules do not. Use `search_graph` to find a qualified name.
+
+### Cypher subset
+
+`query_graph` accepts a read-only openCypher subset:
+
+- **Clauses:** `MATCH`, `OPTIONAL MATCH`, multiple `MATCH`, `WHERE`, `WITH … WHERE`, `RETURN`,
+  `ORDER BY`, `SKIP`, `LIMIT`, `DISTINCT`, `UNWIND`, `UNION [ALL]`, `CASE`.
+- **Patterns:** labels, label alternation `(n:A|B)`, relationship types and direction,
+  variable-length paths `[*1..3]`, inline property maps.
+- **WHERE:** comparisons, including between two bound properties (`a.name = b.name`);
+  `AND/OR/XOR/NOT`; `IN`; `CONTAINS`, `STARTS WITH`, `ENDS WITH`; `IS [NOT] NULL`; regex `=~`;
+  label tests; single-hop `EXISTS { (n)-[:TYPE]->() }`.
+- **Aggregates:** `count` (with `DISTINCT`), `sum`, `avg`, `min`, `max`, `collect`.
+- **Functions:** `labels`, `type`, `id`, `keys`, `properties` (list results can be indexed, as in
+  `labels(n)[0]`); `toLower`, `toUpper`, `toString`, `toInteger`, `toFloat`, `toBoolean`; `size`,
+  `length`, `trim`, `ltrim`, `rtrim`, `reverse`; `coalesce`, `substring`, `replace`, `left`, `right`.
+
+```cypher
+MATCH (f:Function) WHERE NOT EXISTS { (f)<-[:CALLS]-() } RETURN f.name LIMIT 20
 ```
 
-**Why no built-in LLM?** Other code graph tools embed an LLM for natural language → graph query translation. This means extra API keys, extra cost, and another model to configure. With MCP, the agent you're already talking to *is* the query translator.
+Anything outside the subset (writes, `MERGE`, `CALL`, list or map literals, comprehensions, path
+functions, parameters) fails with an `unsupported …` error instead of returning empty results.
 
-## Performance
+## Agents
 
-The Zova-native comparison above is the current fork benchmark. The following upstream-scale figures remain useful as parser and query reference points, but they are not measurements of the current Zova full-authority route:
+`install` detects these agents and configures each one it finds:
 
-| Operation | Time | Notes |
-|-----------|------|-------|
-| **Linux kernel full index** | **3 min** | 28M LOC, 75K files → 4.81M nodes, 7.72M edges |
-| Linux kernel fast index | 1m 12s | 1.88M nodes |
-| Django full index | ~6s | 49K nodes, 196K edges |
-| Cypher query | <1ms | Relationship traversal |
-| Name search (regex) | <10ms | SQL LIKE pre-filtering |
-| Dead code detection | ~150ms | Full graph scan with degree filtering |
-| Trace call path (depth=5) | <10ms | BFS traversal |
+| Agent | MCP config | Instructions | Hooks |
+|-------|------------|--------------|-------|
+| Claude Code | `.claude/.mcp.json` | Skills | PreToolUse on Grep/Glob (adds graph context, never blocks) |
+| Codex CLI | `.codex/config.toml` | `.codex/AGENTS.md` | SessionStart reminder |
+| Gemini CLI | `.gemini/settings.json` | `.gemini/GEMINI.md` | BeforeTool and SessionStart reminders |
+| Antigravity | `.gemini/config/mcp_config.json` | `antigravity-cli/AGENTS.md` | SessionStart reminder |
+| Zed | `settings.json` | — | — |
+| OpenCode | `opencode.json` | `AGENTS.md` | — |
+| Aider | — | `CONVENTIONS.md` | — |
+| KiloCode | `mcp_settings.json` | `~/.kilocode/rules/` | — |
+| VS Code | `Code/User/mcp.json` (and each profile) | — | — |
+| Cursor | `~/.cursor/mcp.json` | — | — |
+| OpenClaw | `~/.openclaw/openclaw.json` | — | — |
+| Kiro | `~/.kiro/settings/mcp.json` | — | — |
+| Junie | `~/.junie/mcp/mcp.json` | — | — |
 
-**RAM-first pipeline**: All indexing runs in memory (LZ4 HC compressed read, in-memory SQLite, single dump at end). Memory is released back to the OS after indexing completes.
-
-**Token efficiency**: Five structural queries consumed ~3,400 tokens via codebase-memory-mcp versus ~412,000 tokens via file-by-file grep exploration — a **99.2% reduction**.
-
-## Troubleshooting & Diagnostics
-
-codebase-memory-mcp runs **100% locally and collects no telemetry** — your code, queries, environment, and usage never leave your machine. That privacy guarantee also means that when you hit something we can't reproduce on our side (a slow memory climb over hours, a performance regression, a leak that only appears after days of real use), **we have no data at all unless you choose to send it.** Here is how to capture it yourself.
-
-### Capture a diagnostics log
-
-Set `CBM_DIAGNOSTICS=1` before the MCP server starts, then reproduce the problem (let it run as long as it takes — a slow leak needs time to show in the trend). The server writes two files to your system temp directory (`$TMPDIR` or `/tmp` on macOS/Linux, `%TEMP%` on Windows):
-
-| File | What it is |
-|------|------------|
-| `cbm-diagnostics-<pid>.ndjson` | **The memory trajectory** — one JSON line every 5 s with `rss`, `committed` (Windows commit charge), `peak_*`, `page_faults`, `fd`, and `queries`. **This is the file we need for memory/leak reports** — the *trend over time* is what pinpoints a leak. It is **kept on disk after the server exits** (so you can grab it post-mortem) and rotates to `.ndjson.1` past ~8 MB. |
-| `cbm-diagnostics-<pid>.json` | The latest snapshot only — handy for a quick live check. Removed on clean exit. |
-
-The startup log prints both paths, e.g.:
-
-```
-level=info msg=diagnostics.start snapshot=/tmp/cbm-diagnostics-12345.json trajectory=/tmp/cbm-diagnostics-12345.ndjson interval=5s
-```
-
-Set the variable in the `env` block of your agent's MCP server config, or export it before launching the server.
-
-### What to share
-
-When you open a memory/performance issue, **attach the `.ndjson` trajectory** — it contains no source code or query text, only resource counters. If you'd rather not attach a file, paste it (or an agent's summary of it) into the issue: your assistant can read the NDJSON directly and report whether `rss`/`committed` grow monotonically, how fast, and relative to query count — which is exactly what we need to find the cause.
-
-## Installation
-
-### Pre-built Binaries
-
-| Platform | Archive |
-|----------|---------|
-| macOS (Apple Silicon) | `codebase-memory-mcp-darwin-arm64.tar.gz` |
-| macOS (Intel) | `codebase-memory-mcp-darwin-amd64.tar.gz` |
-| Linux (x86_64) | `codebase-memory-mcp-linux-amd64.tar.gz` |
-| Linux (ARM64) | `codebase-memory-mcp-linux-arm64.tar.gz` |
-| Linux portable (x86_64) | `codebase-memory-mcp-linux-amd64-portable.tar.gz` |
-| Linux portable (ARM64) | `codebase-memory-mcp-linux-arm64-portable.tar.gz` |
-| Windows (x86_64) | `codebase-memory-mcp-windows-amd64.zip` |
-| Windows (ARM64) | `codebase-memory-mcp-windows-arm64.zip` |
-
-Every release includes `checksums.txt` with SHA-256 hashes, and the canonical
-installer refuses an unverified network download. The portable Linux archives
-are statically linked; the standard Linux archives target the release runner's
-glibc. The installer selects portable Linux by default.
-
-> **Windows note**: SmartScreen may show a warning for unsigned software. Click **"More info"** → **"Run anyway"**. Verify integrity with `checksums.txt`.
-
-### Build from Source
+Hooks always exit 0. The Claude Code hook watches `Grep` and `Glob` (never `Read`) and, when the
+search term matches indexed symbols, adds them as context. Its file is still named
+`cbm-code-discovery-gate` for compatibility with existing installs, but it never gates.
 
 <details>
-<summary>Prerequisites: C compiler + zlib</summary>
-
-| Requirement | Check | Install |
-|-------------|-------|---------|
-| **C compiler** (gcc or clang) | `gcc --version` or `clang --version` | macOS: `xcode-select --install`, Linux: `apt install build-essential` |
-| **C++ compiler** | `g++ --version` or `clang++ --version` | Same as above |
-| **zlib** | — | macOS: included, Linux: `apt install zlib1g-dev` |
-| **Git** | `git --version` | Pre-installed on most systems |
-
-</details>
-
-```bash
-git clone https://github.com/0ctacity/codebase-memory-mcp.git
-cd codebase-memory-mcp
-scripts/build.sh
-# Binary at: build/c/codebase-memory-mcp
-```
-
-### Manual MCP Configuration
-
-<details>
-<summary>If you prefer not to use the install command</summary>
-
-Add to `~/.claude/.mcp.json` (global) or project `.mcp.json`:
+<summary>Configure an MCP client by hand</summary>
 
 ```json
 {
   "mcpServers": {
     "codebase-memory-mcp": {
-      "command": "/path/to/codebase-memory-mcp",
+      "command": "/absolute/path/to/codebase-memory-mcp",
       "args": []
     }
   }
 }
 ```
 
-Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` with 15 tools.
+Restart the agent. In Claude Code, `/mcp` should list `codebase-memory-mcp` with 15 tools.
 
 </details>
 
-## Multi-Agent Support
+## CLI
 
-`install` auto-detects and configures all installed agents:
-
-| Agent | MCP Config | Instructions | Hooks |
-|-------|-----------|-------------|-------|
-| Claude Code | `.claude/.mcp.json` | 4 Skills | PreToolUse (Grep/Glob graph augment, non-blocking) |
-| Codex CLI | `.codex/config.toml` | `.codex/AGENTS.md` | SessionStart reminder |
-| Gemini CLI | `.gemini/settings.json` | `.gemini/GEMINI.md` | BeforeTool (grep reminder) + SessionStart reminder |
-| Zed | `settings.json` (JSONC) | — | — |
-| OpenCode | `opencode.json` | `AGENTS.md` | — |
-| Antigravity | `.gemini/config/mcp_config.json` (shared) | `antigravity-cli/AGENTS.md` | SessionStart reminder |
-| Aider | — | `CONVENTIONS.md` | — |
-| KiloCode | `mcp_settings.json` | `~/.kilocode/rules/` | — |
-| VS Code | `Code/User/mcp.json` | — | — |
-| OpenClaw | `openclaw.json` | — | — |
-| Kiro | `.kiro/settings/mcp.json` | — | — |
-
-**Hooks are structurally non-blocking** (exit code 0, every failure path).
-For Claude Code, the `PreToolUse` hook intercepts `Grep`/`Glob` (never `Read` —
-gating `Read` breaks the read-before-edit invariant) and, when the search
-token matches indexed symbols, injects them as `additionalContext` via
-`search_graph` so the agent gets structured context alongside its normal
-search results. For Codex, Gemini CLI, and Antigravity, a `SessionStart` hook
-injects a one-line code-discovery reminder as session context (Gemini CLI also
-keeps its `BeforeTool` reminder).
-The installed Claude shim file is named `cbm-code-discovery-gate` for
-backward compatibility with existing installs; despite the legacy name it
-never gates and never blocks.
-
-## CLI Mode
-
-Every MCP tool can be invoked from the command line:
+Every MCP tool runs from the command line:
 
 ```bash
 codebase-memory-mcp cli index_repository '{"repo_path": "/path/to/repo"}'
 codebase-memory-mcp cli search_graph '{"name_pattern": ".*Handler.*", "label": "Function"}'
 codebase-memory-mcp cli trace_path '{"function_name": "Search", "direction": "both"}'
 codebase-memory-mcp cli query_graph '{"query": "MATCH (f:Function) RETURN f.name LIMIT 5"}'
-codebase-memory-mcp cli list_projects
 codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.results[].name'
 ```
 
-### Storage
+The other subcommands are `install`, `uninstall`, `update`, `config`, and `zova-ops` (below).
 
-All projects live in one shared `cbm.zova` file in the CBM cache. Projects
-indexed by older releases into per-project `.db` files are not read or
-migrated; re-index them with `index_repository`.
+## Configuration
 
-The one-file `cbm.zova` schema is documented in
-[`docs/zova-single-file-schema.md`](docs/zova-single-file-schema.md).
+```bash
+codebase-memory-mcp config list                        # show settings
+codebase-memory-mcp config set auto_index true         # index new projects on session start
+codebase-memory-mcp config set auto_index_limit 50000  # skip auto-index above this many files
+codebase-memory-mcp config set auto_watch false        # don't register the background watcher
+codebase-memory-mcp config reset auto_index            # back to the default
+```
 
-### Zova backup, recovery, and workspace operations
+`auto_watch` defaults to `true`. Turn it off to keep each session limited to explicit indexing.
 
-The shared-database operator commands act only on
-`${CBM_CACHE_DIR:-$HOME/.cache/codebase-memory-mcp}/cbm.zova` and emit exactly
-one compact JSON object. Exit `0` means success or no-op, exit `1` means an
-operational refusal/failure, and exit `2` means invalid command syntax.
+### Environment variables
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | Where `cbm.zova` and settings live. |
+| `CBM_ALLOWED_ROOT` | unset | Refuse to index any path that resolves outside this directory. Useful when an untrusted caller drives the server. |
+| `CBM_WORKERS` | detected | Indexing workers. `0` is sequential; `1`–`256` sets the count. |
+| `CBM_MEM_BUDGET_MB` | fraction of RAM | Indexing memory budget in MiB. Beyond it, extraction results spill to disk. |
+| `CBM_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or `none`. Logs go to stderr; stdout carries MCP JSON-RPC. |
+| `CBM_DIAGNOSTICS` | off | `1` writes periodic resource snapshots; see [Diagnostics](#diagnostics-and-troubleshooting). |
+| `CBM_DUMP_VERIFY_MIN_RATIO` | `0.5` | If fewer than this fraction of indexed nodes persist, `index_repository` reports `status: "degraded"`. `0` disables the check. |
+| `CBM_DOWNLOAD_URL` | GitHub releases | Override the update download URL. |
+
+### Ignoring files
+
+Ignore rules layer: built-in patterns (`.git`, `node_modules`, …), then the `.gitignore` hierarchy,
+then `.cbmignore` (gitignore syntax, project-specific). Symlinks are always skipped. See
+[docs/cbmignore.md](docs/cbmignore.md).
+
+### Extra file extensions
+
+Map extra extensions to a supported language in `.codebase-memory.json` at the repository root, or
+globally in `~/.config/codebase-memory-mcp/config.json` (or under `$XDG_CONFIG_HOME`):
+
+```json
+{"extra_extensions": {".blade.php": "php", ".mjs": "javascript"}}
+```
+
+Project entries win over global ones. Unknown languages and extensions without a leading `.` are
+skipped with a warning. The full reference, including accepted language names, is in
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
+## Storage and Zova operations
+
+Every indexed repository is an isolated workspace in one file,
+`${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/cbm.zova`. Zova stores the graph topology, edge
+payloads, traversal indexes, full-text rows, and int8 vectors natively, and the file survives agent
+and machine restarts. Current storage: CBM schema 7 on Zova storage format 12.
+
+`zova-ops` maintains that file. Every command needs `--json` and prints one JSON object. Exit code
+`0` is success or no-op, `1` is a refusal or failure, `2` is invalid syntax.
 
 ```bash
 codebase-memory-mcp zova-ops status --json
+codebase-memory-mcp zova-ops health --json
 codebase-memory-mcp zova-ops backup --output /safe/path/cbm-backup.zova --json
 codebase-memory-mcp zova-ops restore --input /safe/path/cbm-backup.zova --confirm-replace --json
 codebase-memory-mcp zova-ops export-database --output /safe/path/database-archive --json
@@ -381,320 +506,94 @@ codebase-memory-mcp zova-ops import-database --input /safe/path/database-archive
 codebase-memory-mcp zova-ops export-workspace --workspace-id WORKSPACE_ID --output /safe/path/workspace-archive --json
 codebase-memory-mcp zova-ops import-workspace --input /safe/path/workspace-archive --json
 codebase-memory-mcp zova-ops delete-workspace --workspace-id WORKSPACE_ID --confirm-workspace WORKSPACE_ID --json
+codebase-memory-mcp zova-ops recover-workspace --workspace-id WORKSPACE_ID --repo-path /absolute/repository --json
 codebase-memory-mcp zova-ops compact --json
 codebase-memory-mcp zova-ops migrate-format --json
-codebase-memory-mcp zova-ops health --workspace-id WORKSPACE_ID --json
-codebase-memory-mcp zova-ops recover-workspace --workspace-id WORKSPACE_ID --repo-path /absolute/repository --json
 ```
 
-Full-database archives contain a versioned manifest and verified `data.zova`.
-Workspace archives contain one workspace's metadata, canonical FTS, native
-graph and vector payloads, file hashes, summary, generation, and integrity
-digests; import rebuilds and verifies the native objects. Restore and database import
-require the literal `--confirm-replace` flag. Workspace deletion requires the
-exact target ID as `--confirm-workspace`.
+Safety rules:
 
-Replacement is same-directory and resumable: the candidate is verified before
-the live file moves, and interruption leaves either the preceding verified live
-database or a retryable recovery artifact. Compaction runs only when reclaimable
-space is at least both 64 MiB and 10 percent of the database, and requires free
-space of at least the larger of 8 GiB or database bytes plus 1 GiB.
+- `restore` and `import-database` require `--confirm-replace`. `delete-workspace` requires the exact
+  workspace ID again as `--confirm-workspace`.
+- A replacement is verified before the live file moves. An interruption leaves either the previous
+  verified database or a retryable recovery artifact.
+- `compact` runs only when reclaimable space is at least 64 MiB and 10% of the file, and free disk is
+  at least the larger of 8 GiB or the database size plus 1 GiB.
+- `health` tells a damaged workspace (`workspace_rebuild`: rebuild that workspace from source) from a
+  damaged file (`whole_file_recovery`: restore a verified backup). Without a backup, recovery
+  quarantines the corrupt file and creates no replacement.
 
-Health distinguishes `workspace_rebuild` from `whole_file_recovery`. A confined
-workspace defect blocks only that flagged workspace until a full source rebuild
-publishes successfully. Shared-schema, open, quick-check, foreign-key, or other
-unattributable damage requires a verified full backup restore; without one,
-explicit recovery quarantines the corrupt file and creates no replacement.
+`scripts/zova-operations.sh` wraps these commands with a disk guard, serialization, progress on
+stderr, and JSON reports under `build/zova-operations`.
 
-The wrapper builds once, applies the disk guard, serializes operations, writes
-progress to stderr, and retains JSON reports under `build/zova-operations`:
+## Build from source
+
+Requirements: a C and C++ compiler (clang or gcc), zlib, git, and
+[Zig 0.17.0](https://ziglang.org/download/) for the Zova library and the Zig support objects.
 
 ```bash
-scripts/zova-operations.sh status
-scripts/zova-operations.sh backup --output /safe/path/cbm-backup.zova
+git clone https://github.com/octacity-org/codebase-memory-mcp.git
+cd codebase-memory-mcp
+scripts/build.sh
+# binary: build/c/codebase-memory-mcp
 ```
 
-The current schema is CBM v7 on Zova format v9. It removes projection
-tables, duplicate workspace FTS/rowmaps, compatibility-vector tables, and the
-separate native norm table. Native topology edges carry compact CBM payloads,
-and fresh full publication uses Zova's prepared builder;
-`CBM_MODE_INCREMENTAL` computes and commits an atomic delta without clearing
-the workspace or rewriting unchanged rows. Migration from v5/v7 uses a
-verified temporary database and resumable atomic replacement. The final
-same-binary TOPS → motive → rvault → CBM optimization gate
-passes; storage is 45.0%–60.1% lower than the documented pre-v6 Zova baseline,
-and true incremental publication performs no full clear or unchanged-row rewrite.
-
-### Reproducible Zova development builds
-
-CBM builds against an immutable local snapshot in `.zova-sdk`, not the live
-neighboring Zova checkout. Pin the currently built Zova library and headers
-once, build the production binary, then build and run only the test groups you
-request:
+Builds link an immutable Zova snapshot in `.zova-sdk`, not a live Zova checkout. The development
+loop:
 
 ```bash
-scripts/zova-pin-current.sh
-scripts/zova-build-once.sh
-scripts/zova-run-tests.sh zova mcp
+scripts/zova-pin-current.sh            # snapshot the built Zova library and headers (once)
+scripts/zova-build-once.sh             # production binary, no tests
+scripts/zova-run-tests.sh zova mcp     # build and run only these test groups
+scripts/zova-run-tests.sh              # the full C test runner CI uses
+scripts/zova-pin-current.sh --refresh  # adopt a new Zova build on purpose
 ```
 
-`zova-build-once.sh` does not compile tests. `zova-run-tests.sh` selects a
-focused Zova, MCP, or pipeline runner when possible; running it without suite
-arguments builds and executes the complete C test runner used by CI. Focused
-runners share one cached production-support library, so later groups compile
-only their own test sources.
+The wrappers keep Zig caches under `build/.zova-build-cache`, hold a build lock against overlapping
+builds, and refuse to start with less than 8 GiB free (`CBM_ZOVA_MIN_FREE_GB` changes the guard).
 
-Later changes under `../zova` are ignored. Refresh the snapshot only when a
-Zova update is intentionally being adopted:
+## Diagnostics and troubleshooting
 
-```bash
-scripts/zova-pin-current.sh --refresh
-```
+The server runs locally and sends no telemetry, so a slow leak or regression on your machine stays
+invisible unless you capture it. Set `CBM_DIAGNOSTICS=1` in the MCP server's environment and
+reproduce the problem. The server writes to the system temp directory:
 
-The wrapper keeps both CBM's Zig cache and the global Zig cache under
-`build/.zova-build-cache`, and uses a build lock to reject overlapping builds.
-It never writes the repository `.zig-cache`, so interrupted builds do not
-poison the working tree. Real-repository validation keeps compact JSON
-reports and deletes successful temporary databases, sidecars, logs, and caches.
-It refuses to start with less than 8 GiB free by default; adjust that guard with
-`CBM_ZOVA_MIN_FREE_GB` when necessary. Full four-repository, three-run gates are
-promotion tests, not routine development tests.
+| File | Contents |
+|------|----------|
+| `cbm-diagnostics-<pid>.ndjson` | One line every 5 s: `rss`, `committed`, peaks, page faults, open files, query count. Kept after exit; rotates past ~8 MB. Attach this to memory and performance issues. |
+| `cbm-diagnostics-<pid>.json` | The latest snapshot only. Removed on clean exit. |
 
-## MCP Tools
-
-### Indexing
-
-| Tool | Description |
-|------|-------------|
-| `index_repository` | Index a repository into the graph. Auto-sync keeps it fresh after that. |
-| `list_projects` | List indexed projects in selector order. Optional `offset`/`limit` paging; `catalog_token` reports a catalog that changed between pages; `include_details` adds node/edge counts. |
-| `delete_project` | Remove a project and all its graph data. |
-| `index_status` | Check indexing status of a project, including a parse-coverage summary. |
-| `check_index_coverage` | Per-path and per-directory extraction coverage for the active generation: partial parses with line ranges, skipped and excluded files, and freshness. A best-effort signal, not a completeness guarantee. |
-
-### Querying
-
-| Tool | Description |
-|------|-------------|
-| `search_graph` | Structured search by label, name pattern, file pattern, degree filters. Pagination via limit/offset, or pass `next_cursor` back as `cursor`; semantic rows page separately with `semantic_offset`/`semantic_limit` or `semantic_next_cursor`. Cursors are tied to the query arguments and the index generation, so a cursor used after a re-index fails with `stale_cursor` instead of skipping or repeating rows. |
-| `trace_path` | BFS traversal — who calls a function and what it calls (alias: `trace_call_path`). Depth 1-5. |
-| `detect_changes` | Map git diff to affected symbols + blast radius with risk classification. |
-| `query_graph` | Execute Cypher-like graph queries (read-only). |
-| `get_graph_schema` | Node/edge counts, relationship patterns, property definitions per label. Run this first. |
-| `get_code_snippet` | Read source code for a function by qualified name. |
-| `get_file_outline` | Bounded symbol outline of one indexed file. |
-| `compare_graphs` | Bounded diff of nodes and edges added and removed between two indexed projects. |
-| `get_architecture` | Codebase overview: languages, packages, routes, hotspots, clusters. |
-| `search_code` | Grep-like text search within indexed project files. |
-
-`search_graph`, `query_graph`, `trace_path`, `search_code`, `get_architecture`, `list_projects` and
-`check_index_coverage` accept `format: "compact"`, which returns indented text with tabular rows and
-no duplicated `structuredContent`, instead of the default JSON. It is opt-in; the default output is
-unchanged.
-
-### Cross-repository search with Zova
-
-When Zova full authority is enabled, `search_graph` can search several repositories stored in the
-shared Zova database in one request:
-
-```json
-{"projects":["codebase-memory-mcp","AnotherFolder/codebase-memory-mcp"],"query":"update user profile"}
-```
-
-Use `{"projects":["*"]}` to search every ready, healthy workspace. BM25, structural filters, and
-`semantic_query` are ranked and paginated across the combined scope. Every result includes its
-owning `project`; pass that value and the returned `qualified_name` to `get_code_snippet`.
-
-Selectors come from canonical repository paths. The first registered repository claims its
-directory basename. A later basename collision receives the shortest unique parent-qualified
-name, such as `AnotherFolder/codebase-memory-mcp`. `list_projects` reports these selectors,
-canonical roots, generations, and health.
-
-This feature provides cross-repository discovery, not cross-workspace topology. `query_graph` and
-`trace_path` remain scoped to one repository; sharing a database does not create graph edges
-between unrelated workspaces.
-
-## Graph Data Model
-
-### Node Labels
-
-`Project`, `Package`, `Folder`, `File`, `Module`, `Class`, `Function`, `Method`, `Interface`, `Enum`, `Type`, `Route`, `Resource`
-
-### Edge Types
-
-`CONTAINS_PACKAGE`, `CONTAINS_FOLDER`, `CONTAINS_FILE`, `DEFINES`, `DEFINES_METHOD`, `IMPORTS`, `CALLS`, `HTTP_CALLS`, `ASYNC_CALLS`, `IMPLEMENTS`, `HANDLES`, `USAGE`, `CALL_REFERENCE`, `CONFIGURES`, `WRITES`, `MEMBER_OF`, `TESTS`, `USES_TYPE`, `FILE_CHANGES_WITH`
-
-`CALLS` is invocation-only. A function or method named as a value without being invoked (passed as an argument, assigned, Java `A::m`, Kotlin `::f`, PHP `f(...)`) is a `CALL_REFERENCE` edge when the language's type resolver proves the single target at that occurrence; otherwise it stays `USAGE`. `trace_path` in `calls` mode follows `CALLS` only; pass `edge_types: ["CALLS", "CALL_REFERENCE"]` to follow references too.
-
-### Qualified Names
-
-`get_code_snippet` uses qualified names: `<project>.<path_parts>.<name>`. Use `search_graph` to discover them first.
-
-### Supported Cypher (openCypher read subset)
-
-`query_graph` is a read-only openCypher subset:
-
-- **Clauses**: `MATCH`, `OPTIONAL MATCH`, multiple `MATCH`, `WHERE`, `WITH` (+ `WITH … WHERE`), `RETURN`, `ORDER BY`, `SKIP`, `LIMIT`, `DISTINCT`, `UNWIND`, `UNION` / `UNION ALL`, `CASE`.
-- **Patterns**: labelled nodes, label alternation `(n:A|B)`, relationship types/direction, variable-length paths `[*1..3]`, inline property maps.
-- **WHERE**: `= <> < <= > >=`, `AND/OR/XOR/NOT`, `IN`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `IS [NOT] NULL`, regex `=~`, label test `n:Label`, and `EXISTS { (n)-[:TYPE]->() }` (single-hop existence — great for dead-code, e.g. `WHERE NOT EXISTS { (f)<-[:CALLS]-() }`).
-- **Aggregates**: `count` (+`DISTINCT`), `sum`, `avg`, `min`, `max`, `collect`.
-- **Functions**: `labels`, `type`, `id`, `keys`, `properties`; `toLower/toUpper/toString/toInteger/toFloat/toBoolean`; `size`, `length`, `trim/ltrim/rtrim`, `reverse`; `coalesce`, `substring`, `replace`, `left`, `right`.
-
-Anything outside this subset (write/`MERGE`/`CALL` clauses, unsupported functions, list/map literals, comprehensions, path functions, parameters) **fails with a clear `unsupported …` error** rather than returning empty results.
-
-## Ignoring Files
-
-Layered: hardcoded patterns (`.git`, `node_modules`, etc.) → `.gitignore` hierarchy → `.cbmignore` (project-specific, gitignore syntax). Symlinks are always skipped.
-
-See [docs/cbmignore.md](docs/cbmignore.md) for the full `.cbmignore` how-to: syntax, precedence across the ignore layers, and negation semantics.
-
-## Configuration
-
-```bash
-codebase-memory-mcp config list                          # show all settings
-codebase-memory-mcp config set auto_index true           # auto-index on session start
-codebase-memory-mcp config set auto_index_limit 50000    # max files for auto-index
-codebase-memory-mcp config set auto_watch false          # don't register background git watcher (default: true)
-codebase-memory-mcp config reset auto_index              # reset to default
-```
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CBM_ALLOWED_ROOT` | *(unset)* | Restrict `index_repository` to paths within this directory. When set, a `repo_path` that resolves (after symlink / `..` resolution) outside this root is refused; unset imposes no restriction. Useful when the server may be driven by an untrusted caller, e.g. agentic or multi-tenant deployments. |
-| `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | Override the database storage directory. All project indexes and config are stored here. |
-| `CBM_DIAGNOSTICS` | `false` | Set to `1` or `true` to enable periodic diagnostics output to `/tmp/cbm-diagnostics-<pid>.json`. |
-| `CBM_DOWNLOAD_URL` | *(GitHub releases)* | Override the download URL for updates. Used for testing or self-hosted deployments. |
-| `CBM_LOG_LEVEL` | `info` | Set the minimum log level. Accepted values (case-insensitive): `debug`, `info`, `warn`, `error`, `none` — or their numeric equivalents `0`–`4` matching the internal enum. Logs go to stderr; stdout is reserved for MCP JSON-RPC. |
-| `CBM_WORKERS` | *(detected)* | Set the indexing worker count. `0` selects the sequential path; `1`–`256` selects an explicit worker count. Unset or invalid values use automatic detection. |
-| `CBM_DUMP_VERIFY_MIN_RATIO` | `0.5` | After indexing, compare persisted SQLite node count to the in-memory dump count. When persisted nodes fall below this fraction of committed nodes (and committed > 50), `index_repository` returns `status:"degraded"` instead of silent `indexed`. Range 0–1; set `0` to disable. Invalid values are ignored with a warning. |
-
-```bash
-# Store indexes in a custom directory
-export CBM_CACHE_DIR=~/my-projects/cbm-data
-```
-
-## Custom File Extensions
-
-The JSON config files support a single key, `extra_extensions`, which maps additional file extensions to supported languages. Useful for framework-specific extensions like `.blade.php` (Laravel) or `.mjs` (ES modules). (For other tunables, see [Environment Variables](#environment-variables) and the `config` subcommand above.)
-
-Need the full config-file reference? See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
-
-**Per-project** (in your repo root):
-```json
-// .codebase-memory.json
-{"extra_extensions": {".blade.php": "php", ".mjs": "javascript"}}
-```
-
-**Global** (applies to all projects):
-```json
-// ~/.config/codebase-memory-mcp/config.json  (or $XDG_CONFIG_HOME/...)
-{"extra_extensions": {".twig": "html", ".phtml": "php"}}
-```
-
-Each entry maps an extension (which **must** start with `.`) to a language name. Language names are matched **case-insensitively**. Accepted values (aliases in parentheses) are:
-
-`bash` (`sh`), `c`, `c++` (`cpp`), `c#` (`csharp`), `clojure`, `cmake`, `cobol`, `common lisp` (`commonlisp`, `lisp`), `css`, `cuda`, `dart`, `dockerfile`, `elixir`, `elm`, `emacs lisp` (`emacslisp`), `erlang`, `f#` (`fsharp`), `form`, `fortran`, `glsl`, `go`, `graphql`, `groovy`, `haskell`, `hcl` (`terraform`), `html`, `ini`, `java`, `javascript`, `json`, `julia`, `kotlin`, `lean`, `lua`, `magma`, `makefile`, `markdown`, `matlab`, `meson`, `nix`, `objective-c` (`objc`), `ocaml`, `perl`, `php`, `protobuf`, `python`, `r`, `ruby`, `rust`, `scala`, `scss`, `sql`, `svelte`, `swift`, `toml`, `tsx`, `typescript`, `verilog`, `vimscript`, `vue`, `wolfram`, `xml`, `yaml`, `zig`.
-
-Project config overrides global for conflicting extensions. An entry whose language name is unknown, or whose extension does not start with `.`, is skipped and a warning is logged to stderr (shown at the default `info` log level). Missing config files are ignored.
-
-## Persistence
-
-All indexed projects persist as isolated workspaces in the shared
-`${CBM_CACHE_DIR:-$HOME/.cache/codebase-memory-mcp}/cbm.zova` database. The
-database uses WAL mode and survives agent and machine restarts. Per-project
-`.db` files from older versions are ignored; re-index those repositories.
-
-## Troubleshooting
+The trajectory holds resource counters only, no source code or query text.
 
 | Problem | Fix |
 |---------|-----|
-| `/mcp` doesn't show the server | Check `.mcp.json` path is absolute. Restart agent. Test: `echo '{}' \| /path/to/binary` should output JSON. |
-| `index_repository` fails | Pass absolute path: `index_repository(repo_path="/absolute/path")` |
-| `trace_path` returns 0 results | Use `search_graph(name_pattern=".*PartialName.*")` first to find the exact name. |
-| Queries return wrong project results | Add `project="name"` parameter. Use `list_projects` to see names. |
-| Binary not found after install | Add to PATH: `export PATH="$HOME/.local/bin:$PATH"` |
+| The agent does not list the server | Use an absolute binary path in the MCP config and restart the agent. |
+| `index_repository` fails | Pass an absolute `repo_path`. Check `CBM_ALLOWED_ROOT` if it is set. |
+| `trace_path` finds nothing | Find the exact name first with `search_graph(name_pattern=".*Partial.*")`. |
+| Results come from the wrong project | Pass `project`; `list_projects` shows the selectors. |
+| Indexing reports a memory-budget error | Raise `CBM_MEM_BUDGET_MB` or lower `CBM_WORKERS`. |
+| Binary not found after install | Add `~/.local/bin` to `PATH`. |
 
-## Hybrid LSP
+## Current boundaries
 
-**Semantic type resolution beyond tree-sitter.**
-
-Tree-sitter alone gives a syntactic AST. That handles naming, structure, and call sites well, but it can't tell you that `user.profile.display_name()` resolves to `Profile.display_name` declared three modules away — tree-sitter doesn't track imports, generics, inheritance, or stdlib types.
-
-codebase-memory-mcp ships a **lightweight C implementation of language type-resolution algorithms, structurally inspired by and compatible with major language servers** (tsserver / typescript-go, pyright, gopls, Roslyn, Eclipse JDT, rust-analyzer), embedded directly into the static binary. No language server process, no per-project setup, no API key. We call this layer **Hybrid LSP**: it runs alongside tree-sitter on every parse and refines `CALLS`, `USAGE`, and `RESOLVED_CALLS` edges with type information, so the resulting graph mirrors what an IDE "Go to Definition" would resolve.
-
-**Languages with full Hybrid LSP:**
-
-| Language | What it handles |
-|----------|-----------------|
-| **Python** *(new in v0.7.0)* | imports + dotted submodule walks, dataclasses, `Self` return types, generics, `@property`, `match/case` class patterns, SQLAlchemy 2.0 `Mapped[T]`, Pydantic `BaseModel`, `typing.Annotated` / `ClassVar` / `Final` / `InitVar`, async/await, classmethod/staticmethod, narrowing (`isinstance` / `is not None` / walrus), `typing.cast` / `assert_type`, common stdlib (logging, pathlib, json, functools). Target ~95% resolution on idiomatic code. |
-| **TypeScript / JavaScript / JSX / TSX** | generics, JSX component dispatch, JSDoc inference for plain JS, `.d.ts` declarations, module re-exports, method chaining via return-type propagation, per-file overlay chained to a shared cross-file registry |
-| **PHP** *(new in v0.7.0)* | namespaces, traits, late-static-binding, PHPDoc inference, parameter binding, return-type inference |
-| **C#** *(new in v0.7.0)* | global usings, file-scoped namespaces, records (incl. C# 12 primary constructors), LINQ method syntax, `async Task<T>` / `ValueTask<T>` unwrap, generic methods, `this` / `base` dispatch, `var` inference, common BCL stdlib |
-| **Go** *(sharpened in v0.7.0)* | pre-built per-package cross-file registry, generics, embedded structs, interface satisfaction, package-aware import resolution |
-| **C / C++** *(sharpened in v0.7.0)* | pre-built per-language cross-file registry shared across C and C++; C side handles macros + `typedef` chains + header-vs-source linking; C++ side handles templates, namespaces, `auto` inference, and method resolution via class hierarchy |
-| **Java** *(new in v0.8.0)* | imports (single-type, on-demand, static), class hierarchies with `this` / `super` dispatch, generics, annotations, overload matching by arity and parameter types, lambdas / method references bound to functional interfaces, field-type inference, common JDK stdlib |
-| **Kotlin** *(new in v0.8.0)* | imports + same-package resolution, classes / objects / companion objects, extension functions, data classes, nullable-type unwrapping, scope functions (`let` / `apply` / `run` / `also` / `with`), infix calls, common stdlib |
-| **Rust** *(new in v0.8.0)* | `use` declarations + module paths, `impl` blocks and trait methods, struct fields, generics with trait bounds, operator-trait desugaring, derive-macro method synthesis, UFCS static paths, common std prelude |
-
-**Two-layer architecture:**
-
-1. **Tree-sitter pass** — fast, syntactic, runs for every one of the 158 languages. Extracts definitions, calls, imports.
-2. **Hybrid LSP pass** — type-aware, runs above the tree-sitter pass per-language. Refines call edges using the import graph plus a per-file or pre-built cross-file definition registry. Languages without a Hybrid LSP pass yet fall back to textual resolution, so you always get *some* answer.
-
-The result is a knowledge graph accurate enough to drive `trace_path` across packages, inheritance hierarchies, and stdlib calls — without paying for a language server process per project.
-
-## Language Support
-
-158 languages, all parsed via vendored tree-sitter grammars compiled into the binary.
-
-### Support tiers
-
-Every language is grouped into a support tier. Tiers are labels: all languages index the same way.
-
-| Tier | Meaning | Languages |
-|------|---------|-----------|
-| **Tier 1** | Shared with [Badbox](https://github.com/octacity-org/badbox). The default test suite covers these. | Bash, C, C++, C#, CSS, Dart, Elixir, Go, Haskell, HCL, HTML, Java, JavaScript, JSON, Kotlin, Lua, Markdown, Nix, PHP, PowerShell, Python, Ruby, Rust, Scala, Solidity, Swift, TSX, TypeScript, YAML, Zig |
-| **Tier 2** | Other mainstream languages and build/config formats. Tests run with `CBM_TEST_TIERS=2`. | OCaml, Objective-C, Perl, Groovy, Erlang, R, SCSS, TOML, SQL, Dockerfile, Clojure, F#, Julia, CUDA, Fortran, MATLAB, XML, Makefile, CMake, Protobuf, GraphQL, Vue, Svelte, Go module, Kustomize, Kubernetes manifests |
-| **Tier 3** | Every other language. Tests run with `CBM_TEST_TIERS=all`. | The rest of the languages listed below |
-
-### Benchmark results
-
-Benchmarked against 64 real open-source repositories (78 to 49K nodes):
-
-| Band | Score | Languages |
-|------|-------|-----------|
-| **Excellent** (>= 90%) | | Lua, Kotlin, C++, Perl, Objective-C, Groovy, C, Bash, Zig, Swift, CSS, YAML, TOML, HTML, SCSS, HCL, Dockerfile |
-| **Good** (75-89%) | | Python, TypeScript, TSX, Go, Rust, Java, R, Dart, JavaScript, Erlang, Elixir, Scala, Ruby, PHP, C#, SQL |
-| **Functional** (< 75%) | | OCaml, Haskell |
-
-Also supported (not yet benchmarked): Ada, Agda, Apex, Assembly (NASM), Astro, AWK, Beancount, BibTeX, Bicep, Bitbake, Blade, Cairo, Cap'n Proto, Clojure, CMake, COBOL, Common Lisp, Crystal, CSV, CUDA, D, Devicetree, Diff, .env, Elm, Emacs Lisp, F#, Fennel, Fish, FORM, Fortran, FunC, GDScript, .gitattributes, .gitignore, Gleam, GLSL, GN, Go module, Go template, GraphQL, Hare, HLSL, Hyprlang, INI, ISPC, Janet, Jinja2, JSDoc, JSON, JSON5, Jsonnet, Julia, Just, Kconfig, KDL, Lean 4, Linker Script, Liquid, LLVM IR, Luau, Magma, Makefile, Markdown, MATLAB, Mermaid, Meson, Move, Nickel, Nim, Nix, Odin, Pascal, Pkl, PO (gettext), Pony, PowerShell, Prisma, .properties, Protobuf, Puppet, PureScript, Racket, Regex, requirements.txt, ReScript, RON, reStructuredText, Scheme, Slang, Smali, Smithy, Solidity, SOQL, SOSL, Squirrel, SSH config, Starlark, Svelte, Sway, SystemVerilog, TableGen, Tcl, Teal, Templ, Thrift, TLA+, Typst, Verilog, VHDL, Vim script, Vue, WGSL, WIT, Wolfram, XML, Zsh.
-
-## Architecture
-
-```
-src/
-  main.c              Entry point (MCP stdio server + CLI + install/update/config)
-  mcp/                MCP server (15 tools, JSON-RPC 2.0, session detection, auto-index)
-  cli/                Install/uninstall/update/config (10 agents, hooks, instructions)
-  store/              Query/storage compatibility layer and cross-workspace search
-  zova/               Shared database, native graph/vector publication, migration, and operations
-  pipeline/           Multi-pass indexing (structure → definitions → calls → HTTP links → config → tests)
-  cypher/             Cypher query lexer, parser, planner, executor
-  discover/           File discovery (.gitignore, .cbmignore, symlink handling)
-  watcher/            Background auto-sync (git polling, adaptive intervals)
-  foundation/         Platform abstractions (threads, filesystem, logging, memory)
-internal/cbm/         Vendored tree-sitter grammars (158 languages) + AST extraction engine
-```
+- **Cross-repository search, not cross-repository topology.** `search_graph` spans repositories, but
+  `query_graph` and `trace_path` stay inside one, and no edges connect workspaces.
+- **Full indexing is slightly slower** than the plain SQLite design (about 6% in the benchmarks
+  above); incremental indexing is much faster.
+- **Type-aware resolution covers ten language families.** Other languages use name-based
+  resolution, which can miss or merge same-named targets.
+- **Index coverage is best-effort.** `check_index_coverage` reports partial parses and skipped files;
+  it does not prove the graph is complete.
+- **No built-in LLM.** Natural-language questions need an MCP client.
 
 ## Security
 
-Indexing, storage, vector search, and graph queries run locally. The project does not upload source
-code or require a hosted database, API key, or model service. Release archives include SHA-256
-checksums, and the installers verify the selected archive before extraction. See
-[SECURITY.md](SECURITY.md) for vulnerability reporting and the current security policy.
+Indexing, storage, vector search, and queries run on your machine. Nothing is uploaded, and no hosted
+database, API key, or model service is needed. The installer verifies each archive against the
+release checksums before extracting it. The tool writes to your agents' configuration files, so
+audit the [source](https://github.com/octacity-org/codebase-memory-mcp) first if your environment
+requires it. Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
