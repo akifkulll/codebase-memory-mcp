@@ -4711,6 +4711,61 @@ TEST(snippet_exact_qn) {
     PASS();
 }
 
+/* ── Issue #76: a line longer than the 2 KiB read buffer is still one line ── */
+
+TEST(snippet_line_longer_than_read_buffer) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_snippet_long_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    char proj_dir[512];
+    snprintf(proj_dir, sizeof(proj_dir), "%s/project", tmp);
+    cbm_mkdir(proj_dir);
+
+    /* Line 1 is about 3000 bytes; Hello() sits on lines 3-5. */
+    char src_path[512];
+    snprintf(src_path, sizeof(src_path), "%s/main.go", proj_dir);
+    FILE *fp = fopen(src_path, "w");
+    ASSERT_NOT_NULL(fp);
+    fputs("var data = \"", fp);
+    for (int i = 0; i < 3000; i++) {
+        fputc('x', fp);
+    }
+    fputs("\"\n\nfunc Hello() {\n\treturn\n}\n", fp);
+    fclose(fp);
+
+    th_remove_zova_user_database();
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+    const char *proj = "long-line-project";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, proj_dir);
+
+    cbm_node_t n = {0};
+    n.project = proj;
+    n.label = "Function";
+    n.name = "Hello";
+    n.qualified_name = "long-line-project.main.Hello";
+    n.file_path = "main.go";
+    n.start_line = 3;
+    n.end_line = 5;
+    cbm_store_upsert_node(st, &n);
+    ASSERT_EQ(th_publish_store_project(st, proj), 0);
+
+    char *resp = call_snippet(srv, "{\"qualified_name\":\"long-line-project.main.Hello\","
+                                   "\"project\":\"long-line-project\"}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "\"source\":\"func Hello() {\\n\\treturn\\n}\\n\""));
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    unlink(src_path);
+    rmdir(proj_dir);
+    rmdir(tmp);
+    PASS();
+}
+
 /* ── TestSnippet_QNSuffix ─────────────────────────────────────── */
 
 TEST(snippet_qn_suffix) {
@@ -6813,6 +6868,7 @@ SUITE(mcp) {
 
     /* Snippet resolution (port of snippet_test.go) */
     RUN_TEST(snippet_exact_qn);
+    RUN_TEST(snippet_line_longer_than_read_buffer);
     RUN_TEST(snippet_qn_suffix);
     RUN_TEST(snippet_unique_short_name);
     RUN_TEST(snippet_c_macro_namespace_c1);

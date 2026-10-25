@@ -4704,15 +4704,21 @@ static char *read_file_lines(const char *path, int start, int end) {
 
     char line[CBM_SZ_2K];
     int lineno = 0;
+    /* A line longer than the buffer arrives in several fgets() chunks; only the
+     * first chunk starts a new line, so count lines by newline, not by chunk. */
+    bool at_line_start = true;
     while (fgets(line, sizeof(line), fp)) {
-        lineno++;
+        size_t ll = strlen(line);
+        if (at_line_start) {
+            lineno++;
+        }
+        at_line_start = ll > 0 && line[ll - SKIP_ONE] == '\n';
         if (lineno < start) {
             continue;
         }
         if (lineno > end) {
             break;
         }
-        size_t ll = strlen(line);
         while (len + ll + SKIP_ONE > cap) {
             cap *= PAIR_LEN;
             buf = safe_realloc(buf, cap);
@@ -6728,9 +6734,18 @@ static grep_match_t *collect_grep_matches(FILE *fp, const char *root_path, size_
     int gm_count = 0;
     grep_match_t *gm = malloc(gm_cap * sizeof(grep_match_t));
     char line[CBM_SZ_2K];
+    /* grep prints "path:line:content"; a match line longer than the buffer
+     * arrives in several chunks. Parse only the first chunk of each line and
+     * skip the rest, so a continuation is never read as a new match. */
+    bool at_line_start = true;
 
     while (fgets(line, sizeof(line), fp) && gm_count < grep_limit) {
         size_t len = strlen(line);
+        bool continuation = !at_line_start;
+        at_line_start = len > 0 && line[len - SKIP_ONE] == '\n';
+        if (continuation) {
+            continue;
+        }
         while (len > 0 && (line[len - SKIP_ONE] == '\n' || line[len - SKIP_ONE] == '\r')) {
             line[--len] = '\0';
         }
